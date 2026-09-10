@@ -80,13 +80,16 @@ impl Controller {
         }).unwrap_or(false)
     }
 
+    /// Direct sysfs/HID writes can block for seconds on a wedged device, so
+    /// they always run on a blocking thread and never stall the async runtime.
     pub async fn write(&self, path: impl AsRef<Path>, value: impl AsRef<str>) -> Result<(), ControlError> {
-        let path = path.as_ref();
+        let path = path.as_ref().to_path_buf();
+        let value = value.as_ref().to_string();
         if let Some(p) = &self.proxy {
-            let err = p.write_sysfs(&path.to_string_lossy(), value.as_ref()).await?;
+            let err = p.write_sysfs(&path.to_string_lossy(), &value).await?;
             if err.is_empty() { Ok(()) } else { Err(ControlError::Remote(err)) }
         } else {
-            Ok(crate::sysfs::write(path, value)?)
+            Ok(tokio::task::spawn_blocking(move || crate::sysfs::write(&path, &value)).await.map_err(|e| anyhow::anyhow!(e))??)
         }
     }
 
@@ -97,10 +100,15 @@ impl Controller {
             let res = p.write_sysfs_batch(req.clone()).await?;
             Ok(req.into_iter().zip(res).filter(|(_, e)| !e.is_empty()).map(|((path, _), e)| (path, e)).collect())
         } else {
-            Ok(entries
-                .iter()
-                .filter_map(|(path, v)| crate::sysfs::write(path, v).err().map(|e| (path.to_string_lossy().into_owned(), e.to_string())))
-                .collect())
+            let entries = entries.to_vec();
+            Ok(tokio::task::spawn_blocking(move || {
+                entries
+                    .iter()
+                    .filter_map(|(path, v)| crate::sysfs::write(path, v).err().map(|e| (path.to_string_lossy().into_owned(), e.to_string())))
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?)
         }
     }
 
@@ -121,8 +129,13 @@ impl Controller {
             let arr: Vec<(String, Option<String>)> = serde_json::from_str(&res).map_err(|e| anyhow::anyhow!(e))?;
             Ok(arr.into_iter().filter_map(|(s, e)| e.map(|e| (s, e))).collect())
         } else {
-            let gpu = crate::nvidia::NvidiaGpu::open(index)?;
-            Ok(gpu.apply(ctl).into_iter().filter_map(|(s, r)| r.err().map(|e| (s, e))).collect())
+            let ctl = ctl.clone();
+            Ok(tokio::task::spawn_blocking(move || -> Result<Vec<(String, String)>, anyhow::Error> {
+                let gpu = crate::nvidia::NvidiaGpu::open(index)?;
+                Ok(gpu.apply(&ctl).into_iter().filter_map(|(s, r)| r.err().map(|e| (s, e))).collect())
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!(e))??)
         }
     }
 
@@ -130,10 +143,16 @@ impl Controller {
         if let Some(p) = &self.proxy {
             Ok(p.hid_write(path, report.to_vec()).await? as usize)
         } else {
-            let api = hidapi::HidApi::new().map_err(|e| anyhow::anyhow!(e))?;
-            let c = std::ffi::CString::new(path).map_err(|e| anyhow::anyhow!(e))?;
-            let dev = api.open_path(&c).map_err(|e| anyhow::anyhow!(e))?;
-            Ok(dev.write(report).map_err(|e| anyhow::anyhow!(e))?)
+            let path = path.to_string();
+            let report = report.to_vec();
+            Ok(tokio::task::spawn_blocking(move || -> Result<usize, anyhow::Error> {
+                let api = hidapi::HidApi::new()?;
+                let c = std::ffi::CString::new(path)?;
+                let dev = api.open_path(&c)?;
+                Ok(dev.write(&report)?)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!(e))??)
         }
     }
 }

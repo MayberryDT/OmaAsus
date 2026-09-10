@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub struct FanBackend {
     ctl: Controller,
+    /// Targets whose last write stalled; skipped until the instant.
+    quarantine: Arc<Mutex<HashMap<FanTarget, std::time::Instant>>>,
     ryujin: Option<[PathBuf; 3]>,
     superio: HashMap<u32, PwmChannel>,
     saved_enable: Arc<Mutex<HashMap<u32, PwmEnable>>>,
@@ -54,11 +56,13 @@ impl FanBackend {
                 }
             }
         }
-        Self { ctl, ryujin, superio, saved_enable: Arc::new(Mutex::new(HashMap::new())), lianli: LianLiHub::enumerate(), cc, has_nvidia: inv.nvidia_count > 0 }
+        Self { ctl, quarantine: Arc::new(Mutex::new(HashMap::new())), ryujin, superio, saved_enable: Arc::new(Mutex::new(HashMap::new())), lianli: LianLiHub::enumerate(), cc, has_nvidia: inv.nvidia_count > 0 }
     }
 
-    pub fn available(inv: &SystemInventory, snapshot_fans: &[crate::telemetry::FanReading]) -> Vec<Available> {
+    pub fn available(inv: &SystemInventory, snap: Option<&crate::telemetry::Snapshot>) -> Vec<Available> {
         let mut v = Vec::new();
+        let empty: Vec<crate::telemetry::FanReading> = Vec::new();
+        let snapshot_fans: &[crate::telemetry::FanReading] = snap.map(|s| s.fans.as_slice()).unwrap_or(&empty);
         let rpm_of = |label: &str| snapshot_fans.iter().find(|f| f.label == label).map(|f| f.rpm).unwrap_or(0);
         if inv.hwmon.iter().any(|d| d.name == "rog_ryujin") {
             v.push(Available { target: FanTarget::RyujinPump, label: "AIO pump".into(), detail: format!("ROG Ryujin · {} rpm", rpm_of("Pump speed")) });
@@ -67,15 +71,14 @@ impl FanBackend {
         }
         for d in inv.hwmon.iter().filter(|d| d.is_super_io()) {
             for p in &d.pwms {
-                let fan = d.fans.iter().find(|f| f.index == p.index);
-                let rpm = fan.and_then(|f| f.read_rpm()).unwrap_or(0);
+                let rpm = snap.and_then(|s| s.superio_rpm.get(&p.index).copied()).unwrap_or(0);
                 v.push(Available { target: FanTarget::SuperIo(p.index), label: format!("Header {}", header_name(p.index)), detail: if rpm > 0 { format!("{rpm} rpm") } else { "no tach signal".into() } });
             }
         }
-        for (i, h) in LianLiHub::enumerate().iter().enumerate() {
-            let rpm = h.read_rpm().unwrap_or([0; 4]);
+        if inv.features.lianli_uni_hub {
             for c in 1..=4u8 {
-                v.push(Available { target: FanTarget::LianLiChannel(c), label: format!("Lian Li channel {c}"), detail: format!("{}{} · {} rpm", h.kind.label(), if i > 0 { format!(" #{}", i + 1) } else { String::new() }, rpm[c as usize - 1]) });
+                let rpm = rpm_of(&format!("Lian Li channel {c}"));
+                v.push(Available { target: FanTarget::LianLiChannel(c), label: format!("Lian Li channel {c}"), detail: if rpm > 0 { format!("UNI FAN hub · {rpm} rpm") } else { "UNI FAN hub · no fan".into() } });
             }
         }
         if inv.nvidia_count > 0 {
@@ -85,6 +88,21 @@ impl FanBackend {
     }
 
     pub async fn apply(&self, cmd: Command) -> Result<(), String> {
+        let now = std::time::Instant::now();
+        if self.quarantine.lock().unwrap().get(&cmd.target).is_some_and(|until| *until > now) {
+            return Ok(());
+        }
+        let target = cmd.target.clone();
+        let started = std::time::Instant::now();
+        let r = self.apply_inner(cmd).await;
+        if started.elapsed() > std::time::Duration::from_millis(600) {
+            tracing::warn!(?target, ms = started.elapsed().as_millis(), "fan write stalled; quarantining target for 60s");
+            self.quarantine.lock().unwrap().insert(target, started + std::time::Duration::from_secs(60));
+        }
+        r
+    }
+
+    async fn apply_inner(&self, cmd: Command) -> Result<(), String> {
         match &cmd.target {
             FanTarget::RyujinPump | FanTarget::RyujinInternalFan | FanTarget::RyujinExternalFans => {
                 let paths = self.ryujin.as_ref().ok_or("Ryujin hwmon not present")?;
@@ -209,14 +227,16 @@ pub fn header_name(idx: u32) -> String {
     }
 }
 
-pub fn temps_from(snap: &crate::telemetry::Snapshot, hwmon: &[HwmonDevice]) -> oma_hw::fanengine::Temps {
-    let mut t = oma_hw::fanengine::Temps { cpu_tctl: snap.cpu.tctl_c, cpu_package: snap.cpu.tctl_c, gpu: snap.nvidia.as_ref().and_then(|n| n.temp_c).map(|c| c as f64), coolant: snap.coolant_c, vrm: snap.vrm_c, board: snap.board_c, hwmon: Default::default() };
-    for d in hwmon {
-        for s in &d.temps {
-            if let Some(v) = s.read() {
-                t.hwmon.insert((d.name.clone(), s.label.clone()), v);
-            }
-        }
+/// Build the engine's temperature view purely from the sampled snapshot
+/// (never touches sysfs on the UI thread).
+pub fn temps_from(snap: &crate::telemetry::Snapshot, _hwmon: &[HwmonDevice]) -> oma_hw::fanengine::Temps {
+    oma_hw::fanengine::Temps {
+        cpu_tctl: snap.cpu.tctl_c,
+        cpu_package: snap.cpu.tctl_c,
+        gpu: snap.nvidia.as_ref().and_then(|n| n.temp_c).map(|c| c as f64),
+        coolant: snap.coolant_c,
+        vrm: snap.vrm_c,
+        board: snap.board_c,
+        hwmon: snap.hwmon_temps.iter().map(|((d, l), v)| ((d.clone(), l.clone()), *v)).collect(),
     }
-    t
 }

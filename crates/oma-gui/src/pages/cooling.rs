@@ -29,8 +29,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let p = app.palette;
     let Some(inv) = app.inventory.as_ref() else { return widgets::dim(p, "Detecting cooling hardware…") };
     let snap = app.snapshot.as_ref();
-    let fans: Vec<crate::telemetry::FanReading> = snap.map(|s| s.fans.clone()).unwrap_or_default();
-    let available = crate::fans::FanBackend::available(inv, &fans);
+    let snap_ref: Option<&crate::telemetry::Snapshot> = snap.map(|s| &**s);
+    let available = crate::fans::FanBackend::available(inv, snap_ref);
     let profile = app.active_profile();
     let owner_effective = app.effective_fan_owner();
 
@@ -71,7 +71,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .spacing(space::MD),
         )
         .width(Length::Fill);
-        return scrollable(column![owner, cc_card, fan_readings(app)].spacing(space::LG).padding(iced::Padding::from([0.0, space::XS]))).into();
+        return column![owner, cc_card, fan_readings(app).height(Length::Fill)].spacing(space::LG).height(Length::Fill).into();
     }
 
     // ---- targets list -------------------------------------------------------
@@ -92,7 +92,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             target_row(app, a, is_sel, mode_label.0.into(), mode_label.1)
         })
         .collect();
-    let targets = widgets::card(p, column![widgets::eyebrow(p, "Outputs"), Column::with_children(list).spacing(space::XS)].spacing(space::MD)).width(Length::Fixed(300.0));
+    let targets = widgets::card(p, column![widgets::eyebrow(p, "Outputs"), scrollable(Column::with_children(list).spacing(space::XS)).height(Length::Fill)].spacing(space::MD).height(Length::Fill)).width(Length::Fixed(300.0)).height(Length::Fill);
 
     // ---- editor -------------------------------------------------------------
     let editor: Element<Message> = match selected {
@@ -129,7 +129,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     for d in &inv.hwmon {
                         if matches!(d.name.as_str(), "asusec") || d.is_super_io() {
                             for t in &d.temps {
-                                if t.read().is_some() && !t.label.starts_with("PCH") && !t.label.starts_with("AUXTIN") {
+                                let live = snap_ref.map(|s| s.hwmon_temps.contains_key(&(d.name.clone(), t.label.clone()))).unwrap_or(false);
+                                if live && !t.label.starts_with("PCH") && !t.label.starts_with("AUXTIN") {
                                     sources.push(TempSource::Hwmon { driver: d.name.clone(), label: t.label.clone() });
                                 }
                             }
@@ -142,7 +143,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     column![
                         canvas(CurveEditor { palette: p, points: &c.points, color: p.accent, live, min_duty: c.min_duty, on_event: |e| Message::Cooling(CoolingMsg::Curve(e)), editable: true })
                             .width(Length::Fill)
-                            .height(Length::Fixed(300.0)),
+                            .height(Length::Fill),
                         widgets::dim(p, "Drag points · click to add · right-click to remove"),
                         widgets::eyebrow(p, "Temperature source"),
                         src_row,
@@ -164,6 +165,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                         .align_y(iced::Alignment::Center),
                     ]
                     .spacing(space::MD)
+                    .height(Length::Fill)
                     .into()
                 }
             };
@@ -175,14 +177,17 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     kind_row,
                     body,
                 ]
-                .spacing(space::LG),
+                .spacing(space::LG)
+                .height(Length::Fill),
             )
             .width(Length::Fill)
+            .height(Length::Fill)
             .into()
         }
     };
 
-    scrollable(column![owner, row![targets, editor].spacing(space::LG), fan_readings(app)].spacing(space::LG).padding(iced::Padding::from([0.0, space::XS]))).into()
+    let left = column![targets.height(Length::FillPortion(3)), fan_readings(app).height(Length::FillPortion(2))].spacing(space::LG).width(Length::Fixed(320.0)).height(Length::Fill);
+    column![owner, row![left, editor].spacing(space::LG).height(Length::Fill)].spacing(space::LG).height(Length::Fill).into()
 }
 
 fn target_row<'a>(app: &'a App, a: &crate::fans::Available, selected: bool, mode: String, color: iced::Color) -> Element<'a, Message> {
@@ -196,7 +201,7 @@ fn target_row<'a>(app: &'a App, a: &crate::fans::Available, selected: bool, mode
     iced::widget::button(content).width(Length::Fill).padding([8, 10]).style(widgets::button_style(p, widgets::ButtonKind::Nav { active: selected })).on_press(Message::Cooling(CoolingMsg::Select(a.target.clone()))).into()
 }
 
-fn fan_readings(app: &App) -> Element<'_, Message> {
+fn fan_readings(app: &App) -> iced::widget::Container<'_, Message> {
     let p = app.palette;
     let rows: Vec<Element<Message>> = app
         .snapshot
@@ -219,7 +224,8 @@ fn fan_readings(app: &App) -> Element<'_, Message> {
                 .collect()
         })
         .unwrap_or_default();
-    widgets::card(p, column![widgets::eyebrow(p, "Live readings"), Column::with_children(rows).spacing(space::SM)].spacing(space::MD)).width(Length::Fill).into()
+    let body: Element<Message> = if rows.is_empty() { widgets::dim(p, "No tachometer signals yet.") } else { scrollable(Column::with_children(rows).spacing(space::SM)).height(Length::Fill).into() };
+    widgets::card(p, column![widgets::eyebrow(p, "Live readings"), body].spacing(space::MD).height(Length::Fill)).width(Length::Fill)
 }
 
 pub fn preset(name: &str, source: TempSource) -> FanCurve {

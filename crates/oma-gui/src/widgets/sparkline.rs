@@ -26,9 +26,9 @@ impl<M> canvas::Program<M> for Sparkline<'_> {
         if n < 2 {
             return vec![frame.into_geometry()];
         }
-        let cap = self.capacity.max(n) as f32;
-        let dx = w / (cap - 1.0);
-        let x0 = w - dx * (n as f32 - 1.0);
+        let _ = self.capacity;
+        let dx = w / (n as f32 - 1.0);
+        let x0 = 0.0;
         let y = |v: f32| h - 3.0 - ((v - self.min) / (self.max - self.min)).clamp(0.0, 1.0) * (h - 6.0);
         let pts: Vec<Point> = self.data.iter().enumerate().map(|(i, &v)| Point::new(x0 + dx * i as f32, y(v))).collect();
         let line = Path::new(|b| {

@@ -46,14 +46,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
         p,
         column![
             row![widgets::eyebrow(p, "Profiles"), widgets::hfill(), widgets::btn(p, "+ New", widgets::ButtonKind::Ghost, Some(Message::Profiles(ProfilesMsg::New)))].align_y(iced::Alignment::Center),
-            Column::with_children(list).spacing(space::XS),
+            scrollable(Column::with_children(list).spacing(space::XS)).height(Length::Fill),
         ]
-        .spacing(space::MD),
+        .spacing(space::MD)
+        .height(Length::Fill),
     )
-    .width(Length::Fixed(340.0));
+    .width(Length::Fixed(340.0))
+    .height(Length::Fill);
 
     let editor: Element<Message> = match app.config.profile(sel) {
-        None => widgets::card(p, widgets::dim(p, "Select a profile.")).into(),
+        None => widgets::card(p, widgets::dim(p, "Select a profile.")).height(Length::Fill).into(),
         Some(pr) => {
             let name = iced::widget::text_input("Profile name", &pr.name)
                 .on_input(|s| Message::Profiles(ProfilesMsg::Rename(s)))
@@ -113,7 +115,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .wrap();
             widgets::card(
                 p,
-                column![
+                scrollable(column![
                     row![name, widgets::hfill(), if pr.builtin { widgets::pill(p, "built-in", p.text_dim) } else { iced::widget::Space::new().into() }].spacing(space::MD).align_y(iced::Alignment::Center),
                     widgets::eyebrow(p, "Accent"),
                     accents,
@@ -129,14 +131,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     widgets::rule(p),
                     actions,
                 ]
-                .spacing(space::MD),
+                .spacing(space::MD))
+                .height(Length::Fill),
             )
             .width(Length::Fill)
+            .height(Length::Fill)
             .into()
         }
     };
 
-    scrollable(column![widgets::headline(p, "Profiles"), row![list_card, editor].spacing(space::LG)].spacing(space::LG).padding(iced::Padding::from([0.0, space::XS]))).into()
+    column![widgets::headline(p, "Profiles"), row![list_card, editor].spacing(space::LG).height(Length::Fill)].spacing(space::LG).height(Length::Fill).into()
 }
 
 fn summary(pr: &Profile) -> String {

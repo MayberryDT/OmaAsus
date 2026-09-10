@@ -5,7 +5,7 @@ use crate::app::{App, Message};
 use crate::pages::cpu::{slider_style, toggle};
 use crate::theme::{self, size, space};
 use crate::widgets;
-use iced::widget::{column, row, scrollable, slider, Column, Row};
+use iced::widget::{column, container, row, scrollable, slider, Row};
 use iced::{Element, Length};
 
 #[derive(Debug, Clone)]
@@ -128,5 +128,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
     let diagnostics = widgets::card(p, column![widgets::title(p, "Detected hardware"), diag].spacing(space::MD)).width(Length::Fill);
 
-    scrollable(Column::with_children(vec![widgets::headline(p, "Settings"), helper.into(), cc.into(), overlay.into(), oled.into(), diagnostics.into()]).spacing(space::LG).padding(iced::Padding::from([0.0, space::XS]))).into()
+    let left = scrollable(column![helper, cc, oled].spacing(space::LG)).height(Length::Fill);
+    let right = scrollable(column![overlay, diagnostics].spacing(space::LG)).height(Length::Fill);
+    column![
+        widgets::headline(p, "Settings"),
+        row![container(left).width(Length::FillPortion(1)), container(right).width(Length::FillPortion(1))].spacing(space::LG).height(Length::Fill),
+    ]
+    .spacing(space::LG)
+    .height(Length::Fill)
+    .into()
 }

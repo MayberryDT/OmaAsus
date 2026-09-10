@@ -6,3 +6,5 @@ o.bind("SUPER + CTRL + G", "OmaAsus: Gaming profile", hl.dsp.exec({ cmd = "omaas
 o.bind("SUPER + CTRL + B", "OmaAsus: Balanced profile", hl.dsp.exec({ cmd = "omaasus profile balanced" }))
 -- Autostart the overlay daemon (or enable the user unit: systemctl --user enable --now omaasus)
 -- o.autostart("omaasus --overlay")
+-- Keep OmaAsus fully opaque (Omarchy applies 0.985/0.96 opacity to every window by default)
+o.window({ title = "^OmaAsus$" }, { opacity = "1 1" })

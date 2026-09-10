@@ -14,7 +14,8 @@ use crate::pages::Page;
 use crate::theme::{self, Palette, size, space};
 use crate::widgets;
 use crate::{ipc, telemetry};
-use iced::widget::{column, container, row, Column};
+use crate::widgets::icons::{self, Icon};
+use iced::widget::{column, container, row, shader, stack, Column};
 use iced::window::Id;
 use iced::{Background, Element, Length, Subscription, Task, Theme};
 use iced_exwlshell::actions::IcedXdgWindowSettings;
@@ -84,6 +85,26 @@ pub struct App {
     pub auto_state: AutoState,
     pub helper_log: String,
     pub asus: AsusState,
+    pub t0: std::time::Instant,
+    pub now: std::time::Instant,
+    pub smooth: Smooth,
+}
+
+/// Eased display values so gauges glide instead of stepping.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Smooth {
+    pub cpu_t: f32,
+    pub gpu_t: f32,
+    pub coolant: f32,
+    pub gpu_w: f32,
+    pub cpu_load: f32,
+    pub gpu_load: f32,
+    pub heat: f32,
+    pub load: f32,
+}
+
+fn ease(cur: &mut f32, target: f32, k: f32) {
+    *cur += (target - *cur) * k;
 }
 
 #[to_exwlshell_message(multi)]
@@ -106,6 +127,7 @@ pub enum Message {
     Automation(AutomationMsg),
     Auto(AutoEvent),
     Settings(SettingsMsg),
+    Tick(std::time::Instant),
     Asus(AsusMsg),
     AsusLoaded(AsusState),
     HelperInstalled(Result<String, String>),
@@ -173,6 +195,9 @@ impl App {
             auto_state: AutoState::default(),
             helper_log: String::new(),
             asus: AsusState::default(),
+            t0: std::time::Instant::now(),
+            now: std::time::Instant::now(),
+            smooth: Smooth::default(),
         };
         let inv = Task::perform(async { Arc::new(tokio::task::spawn_blocking(oma_hw::detect::inventory).await.expect("inventory")) }, Message::Inventory);
         let ctl = Task::perform(async { oma_hw::helper::Controller::connect().await.has_helper() }, Message::Controller);
@@ -217,10 +242,12 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
+        let anim = if self.surfaces.is_empty() { Subscription::none() } else { iced::time::every(std::time::Duration::from_millis(33)).map(Message::Tick) };
         Subscription::batch([
             Subscription::run(telemetry::stream).map(Message::Telemetry),
             Subscription::run(ipc::stream).map(Message::Ipc),
             Subscription::run(crate::automation::stream).map(Message::Auto),
+            anim,
         ])
     }
 
@@ -257,8 +284,7 @@ impl App {
     fn selected_target(&self) -> Option<FanTarget> {
         self.cooling_sel.clone().or_else(|| {
             let inv = self.inventory.as_ref()?;
-            let fans = self.snapshot.as_ref().map(|s| s.fans.clone()).unwrap_or_default();
-            crate::fans::FanBackend::available(inv, &fans).first().map(|a| a.target.clone())
+            crate::fans::FanBackend::available(inv, self.snapshot.as_deref()).first().map(|a| a.target.clone())
         })
     }
 
@@ -856,6 +882,22 @@ impl App {
             Message::Profiles(m) => self.update_profiles(m),
             Message::Automation(m) => self.update_automation(m),
             Message::Settings(m) => self.update_settings(m),
+            Message::Tick(now) => {
+                self.now = now;
+                if let Some(s) = &self.snapshot {
+                    let k = 0.12;
+                    ease(&mut self.smooth.cpu_t, s.cpu.tctl_c.unwrap_or(0.0) as f32, k);
+                    ease(&mut self.smooth.gpu_t, s.nvidia.as_ref().and_then(|n| n.temp_c).unwrap_or(0) as f32, k);
+                    ease(&mut self.smooth.coolant, s.coolant_c.unwrap_or(0.0) as f32, k);
+                    ease(&mut self.smooth.gpu_w, s.nvidia.as_ref().and_then(|n| n.power_w).unwrap_or(0.0) as f32, k);
+                    ease(&mut self.smooth.cpu_load, s.cpu.util_total as f32, k);
+                    ease(&mut self.smooth.gpu_load, s.nvidia.as_ref().and_then(|n| n.util_gpu).unwrap_or(0) as f32, k);
+                    let heat = ((self.smooth.cpu_t.max(self.smooth.gpu_t) - 40.0) / 50.0).clamp(0.0, 1.0);
+                    ease(&mut self.smooth.heat, heat, 0.05);
+                    ease(&mut self.smooth.load, (self.smooth.cpu_load.max(self.smooth.gpu_load) / 100.0).clamp(0.0, 1.0), 0.05);
+                }
+                Task::none()
+            }
             Message::AsusLoaded(st) => {
                 self.asus = st;
                 Task::none()
@@ -1134,14 +1176,25 @@ impl App {
         };
         let show_asus = self.asus.asusd.is_some() || self.asus.gfx.is_some() || self.inventory.as_ref().map(|i| i.platform == oma_hw::Platform::AsusLaptop).unwrap_or(false);
         let pages: Vec<Page> = Page::ALL.iter().copied().filter(|pg| *pg != Page::Asus || show_asus).collect();
+        let page_icon = |pg: Page| match pg {
+            Page::Dashboard => Icon::Dashboard,
+            Page::Cpu => Icon::Cpu,
+            Page::Gpu => Icon::Gpu,
+            Page::Cooling => Icon::Fan,
+            Page::Lighting => Icon::Light,
+            Page::Profiles => Icon::Layers,
+            Page::Automation => Icon::Loop,
+            Page::Asus => Icon::Rog,
+            Page::Settings => Icon::Gear,
+        };
         let nav = Column::with_children(
             pages
                 .iter()
                 .map(|pg| {
                     let active = *pg == self.page;
                     let label = row![
-                        container(iced::widget::text(pg.glyph()).size(size::LEAD).color(if active { p.accent } else { p.text_faint })).width(Length::Fixed(22.0)).align_x(iced::Alignment::Center),
-                        iced::widget::text(pg.label()).size(size::BODY).font(theme::font::BODY),
+                        icons::icon(page_icon(*pg), if active { p.accent } else { p.text_faint }, 18.0),
+                        iced::widget::text(pg.label()).size(size::BODY).font(if active { theme::font::BODY_MEDIUM } else { theme::font::BODY }),
                     ]
                     .spacing(space::MD)
                     .align_y(iced::Alignment::Center);
@@ -1150,16 +1203,21 @@ impl App {
                 .collect::<Vec<_>>(),
         )
         .spacing(space::XS)
-        .width(Length::Fixed(200.0));
+        .width(Length::Fixed(208.0));
 
-        let brand = column![
-            iced::widget::text("OMA").size(size::TITLE).font(theme::font::DISPLAY).color(p.text),
-            iced::widget::text("ASUS control").size(size::CAPTION).font(theme::font::BODY).color(p.text_faint),
+        let brand = row![
+            icons::icon_glow(Icon::Logo, p.accent, p.accent, 34.0),
+            column![
+                iced::widget::text("OMAASUS").size(size::LEAD).font(theme::font::DISPLAY_MEDIUM).color(p.text),
+                iced::widget::text(widgets::tracked("control atelier")).size(size::MICRO).font(theme::font::BODY_MEDIUM).color(p.text_faint),
+            ]
+            .spacing(1.0),
         ]
-        .spacing(0.0);
+        .spacing(space::SM)
+        .align_y(iced::Alignment::Center);
 
         let toast: Element<Message> = match &self.toast {
-            Some((msg, ok)) => container(row![widgets::body(p, msg), widgets::hfill(), widgets::btn(p, "✕", widgets::ButtonKind::Ghost, Some(Message::DismissToast))].align_y(iced::Alignment::Center))
+            Some((msg, ok)) => container(row![widgets::body(p, msg), widgets::hfill(), iced::widget::button(icons::icon(Icon::Close, p.text_dim, 14.0)).padding(6).style(widgets::button_style(p, widgets::ButtonKind::Ghost)).on_press(Message::DismissToast)].align_y(iced::Alignment::Center))
                 .padding([8, 12])
                 .width(Length::Fill)
                 .style(move |_| container::Style {
@@ -1171,14 +1229,15 @@ impl App {
             None => iced::widget::Space::new().height(0.0).into(),
         };
 
+        let icon_btn = |ic: Icon, msg: Message| iced::widget::button(icons::icon(ic, p.text_dim, 16.0)).padding(9).style(widgets::button_style(p, widgets::ButtonKind::Ghost)).on_press(msg);
         let shell: Element<Message> = if is_overlay {
             let tabs = row(pages.iter().map(|pg| {
                 let active = *pg == self.page;
-                iced::widget::button(iced::widget::text(pg.glyph()).size(size::LEAD)).padding([6, 10]).style(widgets::button_style(p, widgets::ButtonKind::Nav { active })).on_press(Message::Navigate(*pg)).into()
+                iced::widget::button(icons::icon(page_icon(*pg), if active { p.accent } else { p.text_faint }, 18.0)).padding([7, 11]).style(widgets::button_style(p, widgets::ButtonKind::Nav { active })).on_press(Message::Navigate(*pg)).into()
             }))
             .spacing(space::XS);
             column![
-                row![brand, widgets::hfill(), widgets::btn(p, "Open window", widgets::ButtonKind::Ghost, Some(Message::OpenWindow)), widgets::btn(p, "✕", widgets::ButtonKind::Ghost, Some(Message::Close(id)))].spacing(space::SM).align_y(iced::Alignment::Center),
+                row![brand, widgets::hfill(), icon_btn(Icon::Window, Message::OpenWindow), icon_btn(Icon::Close, Message::Close(id))].spacing(space::SM).align_y(iced::Alignment::Center),
                 tabs,
                 toast,
                 content
@@ -1186,23 +1245,37 @@ impl App {
             .spacing(space::LG)
             .into()
         } else {
+            let footer = column![
+                widgets::rule(p),
+                row![widgets::dim(p, format!("v{}", env!("CARGO_PKG_VERSION"))), widgets::hfill(), widgets::dim(p, if self.controller_ready { "helper ●" } else { "read-only ○" })].align_y(iced::Alignment::Center),
+            ]
+            .spacing(space::SM);
             row![
-                column![brand, nav, widgets::vfill(), widgets::dim(p, format!("v{}", env!("CARGO_PKG_VERSION")))].spacing(space::XL).height(Length::Fill),
-                column![toast, content].spacing(space::MD).width(Length::Fill),
+                column![brand, nav, widgets::vfill(), footer].spacing(space::XL).width(Length::Fixed(224.0)).height(Length::Fill),
+                column![toast, content].spacing(space::MD).width(Length::Fill).height(Length::Fill),
             ]
             .spacing(space::XL)
             .into()
         };
 
-        container(shell)
-            .padding(space::XL)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(Background::Color(if is_overlay { iced::Color { a: self.config.overlay.opacity.clamp(0.5, 1.0), ..p.bg } } else { iced::Color { a: 1.0, ..p.bg } })),
-                border: iced::Border { color: p.line, width: if is_overlay { 1.0 } else { 0.0 }, radius: if is_overlay { theme::radius::LG.into() } else { 0.0.into() } },
-                ..Default::default()
-            })
-            .into()
+        let o = &self.config.overlay;
+        let ambient = shader(widgets::ambient::Ambient {
+            accent: p.accent,
+            accent2: theme::complement(p.accent),
+            heat: self.smooth.heat,
+            load: self.smooth.load,
+            time: self.now.duration_since(self.t0).as_secs_f32(),
+            intensity: if is_overlay { 0.75 } else { 1.0 },
+            radius: if is_overlay { theme::radius::LG } else { 0.0 },
+            alpha: if is_overlay { o.opacity.clamp(0.5, 1.0) } else { 1.0 },
+        })
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+        let content_layer = container(shell).padding(space::XL).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
+            border: iced::Border { color: if is_overlay { theme::alpha(iced::Color::WHITE, 0.12) } else { iced::Color::TRANSPARENT }, width: if is_overlay { 1.0 } else { 0.0 }, radius: if is_overlay { theme::radius::LG.into() } else { 0.0.into() } },
+            ..Default::default()
+        });
+        stack![ambient, content_layer].width(Length::Fill).height(Length::Fill).into()
     }
 }

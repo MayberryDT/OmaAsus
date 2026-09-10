@@ -363,7 +363,7 @@ pub struct OverlaySettings {
 
 impl Default for OverlaySettings {
     fn default() -> Self {
-        Self { anchor: "right".into(), width: 540, height: 1000, margin: 16, opacity: 0.94, hud_enabled: true }
+        Self { anchor: "right".into(), width: 560, height: 1040, margin: 16, opacity: 0.97, hud_enabled: true }
     }
 }
 

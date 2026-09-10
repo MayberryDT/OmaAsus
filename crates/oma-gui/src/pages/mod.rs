@@ -44,17 +44,4 @@ impl Page {
         }
     }
 
-    pub fn glyph(self) -> &'static str {
-        match self {
-            Page::Dashboard => "◈",
-            Page::Cpu => "▣",
-            Page::Gpu => "▤",
-            Page::Cooling => "✺",
-            Page::Lighting => "◐",
-            Page::Profiles => "❖",
-            Page::Automation => "⟲",
-            Page::Asus => "◬",
-            Page::Settings => "⚙",
-        }
-    }
 }

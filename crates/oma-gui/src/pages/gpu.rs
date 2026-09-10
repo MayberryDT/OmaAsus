@@ -55,12 +55,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     let stats = Row::new()
         .spacing(space::MD)
-        .push(widgets::card(p, widgets::metric(p, "Core clock", clk.to_string(), "MHz", p.gpu)))
-        .push(widgets::card(p, widgets::metric(p, "Memory clock", mclk.to_string(), "MHz", p.gpu)))
-        .push(widgets::card(p, widgets::metric(p, "VRAM used", format!("{:.1}", vram as f64 / 1024.0), "GiB", p.gpu)))
-        .push(widgets::card(p, widgets::metric(p, "Fans", nv.as_ref().map(|n| n.fan_percent.iter().map(|f| format!("{f}%")).collect::<Vec<_>>().join(" / ")).unwrap_or_default(), "", p.fan)))
-        .push(widgets::card(p, column![widgets::eyebrow(p, "Limiter"), Row::with_children(nv.as_ref().map(|n| n.throttle_reasons.iter().map(|r| widgets::pill(p, r, if r == "Idle" { p.text_dim } else { p.warn })).collect::<Vec<_>>()).unwrap_or_default()).spacing(space::XS).wrap()].spacing(space::XS)))
-        .wrap();
+        .push(widgets::card(p, widgets::metric(p, "Core clock", clk.to_string(), "MHz", p.gpu)).width(Length::Fill))
+        .push(widgets::card(p, widgets::metric(p, "Memory clock", mclk.to_string(), "MHz", p.gpu)).width(Length::Fill))
+        .push(widgets::card(p, widgets::metric(p, "VRAM used", format!("{:.1}", vram as f64 / 1024.0), "GiB", p.gpu)).width(Length::Fill))
+        .push(widgets::card(p, widgets::metric(p, "Fans", nv.as_ref().map(|n| n.fan_percent.iter().map(|f| format!("{f}")).collect::<Vec<_>>().join(" / ")).unwrap_or_default(), "%", p.fan)).width(Length::Fill))
+        .push(widgets::card(p, column![widgets::eyebrow(p, "Limiter"), Row::with_children(nv.as_ref().map(|n| n.throttle_reasons.iter().map(|r| widgets::pill(p, r, if r == "Idle" { p.text_dim } else { p.warn })).collect::<Vec<_>>()).unwrap_or_default()).spacing(space::XS).wrap()].spacing(space::SM)).width(Length::Fill));
 
     let pmin = (info.power_min_mw / 1000) as f64;
     let pmax = (info.power_max_mw / 1000) as f64;
@@ -140,26 +139,35 @@ pub fn view(app: &App) -> Element<'_, Message> {
         ]
         .spacing(space::SM),
     );
-    let control = widgets::card(p, ctl).width(Length::Fill);
+    let control = widgets::card(p, scrollable(ctl).height(Length::Fill)).width(Length::Fill);
 
-    let history = row![
-        widgets::card(p, column![widgets::eyebrow(p, "Temperature"), canvas(Sparkline { palette: p, data: &app.hist.gpu_temp, min: 25.0, max: 90.0, color: p.accent, capacity: crate::app::HISTORY }).width(Length::Fill).height(Length::Fixed(80.0))].spacing(space::SM)).width(Length::Fill),
-        widgets::card(p, column![widgets::eyebrow(p, "Load"), canvas(Sparkline { palette: p, data: &app.hist.gpu_load, min: 0.0, max: 100.0, color: p.gpu, capacity: crate::app::HISTORY }).width(Length::Fill).height(Length::Fixed(80.0))].spacing(space::SM)).width(Length::Fill),
-        widgets::card(p, column![widgets::eyebrow(p, "Power"), canvas(Sparkline { palette: p, data: &app.hist.gpu_power, min: 0.0, max: pmax as f32, color: p.power, capacity: crate::app::HISTORY }).width(Length::Fill).height(Length::Fixed(80.0))].spacing(space::SM)).width(Length::Fill),
+    let hist_card = |label: &str, data, min: f32, max: f32, color| widgets::card(p, column![widgets::eyebrow(p, label), canvas(Sparkline { palette: p, data, min, max, color, capacity: crate::app::HISTORY }).width(Length::Fill).height(Length::Fill)].spacing(space::SM).height(Length::Fill)).width(Length::Fill).height(Length::Fill);
+    let mut right = column![
+        hist_card("Temperature", &app.hist.gpu_temp, 25.0, 90.0, p.accent),
+        hist_card("Load", &app.hist.gpu_load, 0.0, 100.0, p.gpu),
+        hist_card("Power", &app.hist.gpu_power, 0.0, pmax as f32, p.power),
     ]
-    .spacing(space::MD);
-
-    let mut page = column![header, stats, control, history].spacing(space::LG);
+    .spacing(space::MD)
+    .width(Length::FillPortion(2))
+    .height(Length::Fill);
     if let Some(a) = amd_card(app) {
-        page = page.push(a);
+        right = right.push(a);
     }
-    scrollable(page.padding(iced::Padding::from([0.0, space::XS])).width(Length::Fill)).into()
+    column![
+        header,
+        stats,
+        row![control.width(Length::FillPortion(3)).height(Length::Fill), right].spacing(space::LG).height(Length::Fill),
+    ]
+    .spacing(space::LG)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 fn amd_only(app: &App) -> Element<'_, Message> {
     let p = app.palette;
     match amd_card(app) {
-        Some(c) => scrollable(column![widgets::headline(p, "Graphics"), c].spacing(space::LG)).into(),
+        Some(c) => column![widgets::headline(p, "Graphics"), c].spacing(space::LG).into(),
         None => widgets::dim(p, "No supported GPU detected."),
     }
 }

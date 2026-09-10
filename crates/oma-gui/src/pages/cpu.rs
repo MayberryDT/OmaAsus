@@ -101,7 +101,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .push(epp_row)
             .push(toggles)
             .push(limits)
-            .push(actions),
+            .push(widgets::vfill())
+            .push(actions)
+            .height(Length::Fill),
     )
     .width(Length::Fill);
 
@@ -132,10 +134,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let core_card = widgets::card(
         p,
         column![
-            row![widgets::title(p, "Cores"), widgets::hfill(), widgets::dim(p, "★ preferred core (amd-pstate ranking) · MHz and load")].align_y(iced::Alignment::Center),
-            Row::with_children(cores).spacing(space::SM).wrap(),
+            row![widgets::title(p, "Cores"), widgets::hfill(), widgets::dim(p, "★ preferred core · MHz · load")].align_y(iced::Alignment::Center),
+            scrollable(Row::with_children(cores).spacing(space::SM).wrap()).height(Length::Fill),
         ]
-        .spacing(space::MD),
+        .spacing(space::MD)
+        .height(Length::Fill),
     )
     .width(Length::Fill);
 
@@ -143,13 +146,23 @@ pub fn view(app: &App) -> Element<'_, Message> {
         p,
         column![
             row![widgets::eyebrow(p, "Package temperature"), widgets::hfill(), widgets::mono(p, format!("{:.1} °C", snap.and_then(|s| s.cpu.tctl_c).unwrap_or(0.0)), size::SMALL)],
-            canvas(Sparkline { palette: p, data: &app.hist.cpu_temp, min: 30.0, max: 95.0, color: p.accent, capacity: crate::app::HISTORY }).width(Length::Fill).height(Length::Fixed(90.0)),
+            canvas(Sparkline { palette: p, data: &app.hist.cpu_temp, min: 30.0, max: 95.0, color: p.accent, capacity: crate::app::HISTORY }).width(Length::Fill).height(Length::Fill),
         ]
-        .spacing(space::SM),
+        .spacing(space::SM)
+        .height(Length::Fill),
     )
     .width(Length::Fill);
 
-    scrollable(column![header, control, history, core_card].spacing(space::LG).padding(iced::Padding::from([0.0, space::XS])).width(Length::Fill)).into()
+    // Fixed composition: header, then controls beside telemetry; only the core grid scrolls internally.
+    let right = column![history.height(Length::FillPortion(2)), core_card.height(Length::FillPortion(5))].spacing(space::LG).width(Length::FillPortion(6)).height(Length::Fill);
+    column![
+        header,
+        row![control.width(Length::FillPortion(5)).height(Length::Fill), right].spacing(space::LG).height(Length::Fill),
+    ]
+    .spacing(space::LG)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 fn pretty(s: &str) -> String {

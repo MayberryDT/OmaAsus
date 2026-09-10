@@ -4,12 +4,16 @@
 //! active profile recolours. Every token lives here; widgets never hard-code
 //! colours.
 
-use iced::{Border, Color, Shadow, Vector, color};
+use iced::{Color, Shadow, Vector, color};
 
 /// Font handles. The families are bundled from `assets/fonts` (OFL).
 pub mod font {
+    use iced::font::{Family, Weight};
     use iced::Font;
     pub const DISPLAY: Font = Font::with_name("Space Grotesk");
+    pub const DISPLAY_LIGHT: Font = Font { family: Family::Name("Space Grotesk"), weight: Weight::Light, ..Font::DEFAULT };
+    pub const DISPLAY_MEDIUM: Font = Font { family: Family::Name("Space Grotesk"), weight: Weight::Medium, ..Font::DEFAULT };
+    pub const BODY_MEDIUM: Font = Font { family: Family::Name("Inter Variable"), weight: Weight::Medium, ..Font::DEFAULT };
     pub const BODY: Font = Font::with_name("Inter Variable");
     pub const MONO: Font = Font::with_name("JetBrains Mono");
     pub const BODY_BYTES: &[u8] = include_bytes!("../assets/fonts/InterVariable.ttf");
@@ -28,18 +32,20 @@ pub mod space {
 
 /// Type scale (px).
 pub mod size {
+    pub const MICRO: f32 = 9.5;
     pub const CAPTION: f32 = 11.0;
     pub const SMALL: f32 = 12.5;
     pub const BODY: f32 = 14.0;
     pub const LEAD: f32 = 16.0;
     pub const TITLE: f32 = 20.0;
     pub const HEADLINE: f32 = 28.0;
+    pub const DISPLAY: f32 = 44.0;
 }
 
 pub mod radius {
-    pub const SM: f32 = 8.0;
-    pub const MD: f32 = 14.0;
-    pub const LG: f32 = 20.0;
+    pub const SM: f32 = 10.0;
+    pub const MD: f32 = 16.0;
+    pub const LG: f32 = 26.0;
     pub const PILL: f32 = 999.0;
 }
 
@@ -70,12 +76,12 @@ pub struct Palette {
 }
 
 pub const OBSIDIAN: Palette = Palette {
-    bg: Color::from_rgba(0.043, 0.047, 0.063, 0.90),
-    bg_elev: Color::from_rgba(0.075, 0.082, 0.106, 0.92),
-    glass: Color::from_rgba(1.0, 1.0, 1.0, 0.035),
-    glass_strong: Color::from_rgba(1.0, 1.0, 1.0, 0.07),
-    line: Color::from_rgba(1.0, 1.0, 1.0, 0.07),
-    line_strong: Color::from_rgba(1.0, 1.0, 1.0, 0.16),
+    bg: Color::from_rgba(0.028, 0.031, 0.048, 0.92),
+    bg_elev: Color::from_rgba(0.06, 0.066, 0.09, 0.92),
+    glass: Color::from_rgba(0.62, 0.70, 0.95, 0.035),
+    glass_strong: Color::from_rgba(0.70, 0.76, 1.0, 0.075),
+    line: Color::from_rgba(1.0, 1.0, 1.0, 0.075),
+    line_strong: Color::from_rgba(1.0, 1.0, 1.0, 0.2),
     text: color!(0xF3F4F8),
     text_dim: Color::from_rgba(0.953, 0.957, 0.973, 0.62),
     text_faint: Color::from_rgba(0.953, 0.957, 0.973, 0.38),
@@ -119,12 +125,16 @@ pub fn thermal(p: &Palette, t: f64, lo: f64, hi: f64) -> Color {
     if f < 0.5 { mix(p.coolant, p.warn, f * 2.0) } else { mix(p.warn, p.danger, (f - 0.5) * 2.0) }
 }
 
-pub fn card_border(p: &Palette) -> Border {
-    Border { color: p.line, width: 1.0, radius: radius::LG.into() }
+pub fn card_shadow() -> Shadow {
+    Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.45), offset: Vector::new(0.0, 18.0), blur_radius: 40.0 }
 }
 
-pub fn card_shadow() -> Shadow {
-    Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.35), offset: Vector::new(0.0, 8.0), blur_radius: 24.0 }
+/// Complementary hue used for the second aurora ribbon.
+pub fn complement(c: Color) -> Color {
+    // rotate hue ~150° in a cheap RGB way, keep it luminous.
+    let (r, g, b) = (c.r, c.g, c.b);
+    let m = (r + g + b) / 3.0;
+    Color::from_rgb((b * 0.7 + m * 0.3).clamp(0.15, 1.0), (r * 0.5 + g * 0.5).clamp(0.2, 1.0), (g * 0.8 + 0.2).clamp(0.3, 1.0))
 }
 
 pub fn glow(c: Color) -> Shadow {

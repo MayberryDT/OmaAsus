@@ -6,7 +6,7 @@ use crate::app::{App, Message};
 use crate::pages::cpu::{slider_style, toggle};
 use crate::theme::{self, size, space};
 use crate::widgets;
-use iced::widget::{column, row, scrollable, slider, Column, Row};
+use iced::widget::{column, container, row, scrollable, slider, Column, Row};
 use iced::{Element, Length};
 use oma_hw::profile::{Mode, Rule, Trigger};
 
@@ -85,7 +85,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
     )
     .width(Length::Fill);
 
-    scrollable(column![header, Column::with_children(rules).spacing(space::MD), add].spacing(space::LG).padding(iced::Padding::from([0.0, space::XS]))).into()
+    let rules_el: Element<Message> = if rules.is_empty() { widgets::card(p, widgets::dim(p, "No rules yet — add one below.")).into() } else { scrollable(Column::with_children(rules).spacing(space::MD)).height(Length::Fill).into() };
+    column![header, container(rules_el).height(Length::Fill), add].spacing(space::LG).height(Length::Fill).into()
 }
 
 fn rule_card<'a>(app: &'a App, r: &'a Rule) -> Element<'a, Message> {

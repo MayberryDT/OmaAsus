@@ -140,5 +140,5 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if let Some(e) = &st.error {
         col = col.push(widgets::pill(p, e, p.danger));
     }
-    scrollable(col.padding(iced::Padding::from([0.0, space::XS]))).into()
+    scrollable(col).height(Length::Fill).into()
 }

@@ -81,10 +81,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
             iced::widget::button(content).width(Length::Fill).padding([8, 10]).style(widgets::button_style(p, widgets::ButtonKind::Nav { active })).on_press(Message::Lighting(LightingMsg::Select(i))).into()
         })
         .collect();
-    let devices = widgets::card(p, column![widgets::eyebrow(p, "Devices"), if list.is_empty() { widgets::dim(p, if app.rgb_server { "No RGB devices reported." } else { "Start the server to enumerate devices." }) } else { Column::with_children(list).spacing(space::XS).into() }].spacing(space::MD)).width(Length::Fixed(320.0));
+    let devices = widgets::card(p, column![widgets::eyebrow(p, "Devices"), if list.is_empty() { widgets::dim(p, if app.rgb_server { "No RGB devices reported." } else { "Start the server to enumerate devices." }) } else { scrollable(Column::with_children(list).spacing(space::XS)).height(Length::Fill).into() }].spacing(space::MD).height(Length::Fill)).width(Length::Fixed(320.0)).height(Length::Fill);
 
     let editor: Element<Message> = match app.rgb_devices.get(sel) {
-        None => widgets::card(p, widgets::dim(p, "Select a device.")).into(),
+        None => widgets::card(p, widgets::dim(p, "Select a device.")).height(Length::Fill).into(),
         Some(d) => {
             let swatches = Row::with_children(
                 SWATCHES
@@ -131,7 +131,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             let leds = Row::with_children(d.colors.iter().take(96).map(|c| swatch(iced::Color::from_rgb8(c.0, c.1, c.2), 12.0)).collect::<Vec<_>>()).spacing(3.0).wrap();
             widgets::card(
                 p,
-                column![
+                scrollable(column![
                     row![widgets::title(p, &d.name), widgets::hfill(), widgets::dim(p, format!("{} · {}", d.vendor, d.zones.iter().map(|(n, c)| format!("{n} ({c})")).collect::<Vec<_>>().join(", ")))].align_y(iced::Alignment::Center),
                     widgets::eyebrow(p, "Static colour"),
                     row![swatches, hex, widgets::btn(p, "Off", widgets::ButtonKind::Ghost, Some(Message::Lighting(LightingMsg::Off(d.index))))].spacing(space::MD).align_y(iced::Alignment::Center),
@@ -140,9 +140,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     widgets::eyebrow(p, "LEDs"),
                     leds,
                 ]
-                .spacing(space::MD),
+                .spacing(space::MD))
+                .height(Length::Fill),
             )
             .width(Length::Fill)
+            .height(Length::Fill)
             .into()
         }
     };
@@ -173,7 +175,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .into()
     };
 
-    scrollable(column![header, row![devices, editor].spacing(space::LG), profile_summary].spacing(space::LG).padding(iced::Padding::from([0.0, space::XS]))).into()
+    let left = column![devices.height(Length::FillPortion(3)), profile_summary].spacing(space::LG).width(Length::Fixed(320.0)).height(Length::Fill);
+    column![header, row![left, editor].spacing(space::LG).height(Length::Fill)].spacing(space::LG).height(Length::Fill).into()
 }
 
 pub fn swatch<'a, M: 'a>(c: iced::Color, size: f32) -> Element<'a, M> {

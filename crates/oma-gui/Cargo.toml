@@ -28,6 +28,7 @@ anyhow.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 palette = "0.7"
+bytemuck = { version = "1", features = ["derive"] }
 
 # Workaround (2026-09-09): winit-core 0.31.0-beta.3 breaks iced_exdevtools 0.20.0
 # (non-exhaustive NativeKeyCode match). Keep pinned until upstream releases a fix.
