@@ -7,6 +7,7 @@
 
 pub mod amdgpu;
 pub mod asusd;
+pub mod capture;
 pub mod coolercontrol;
 pub mod cpu;
 pub mod detect;

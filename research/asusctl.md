@@ -145,13 +145,13 @@ Source: `gitlab:asusd/src/ctrl_fancurves.rs`; types `gitlab:rog-profiles/src/{li
 
 | Method | Sig | Rust |
 |---|---|---|
-| `FanCurveData` | `(u) -> a(sayayb)` | `fan_curve_data(profile: PlatformProfile) -> Vec<CurveData>` — returns the **stored** curves for that profile (Quiet and LowPower share one set). |
-| `SetFanCurve` | `(u (sayayb)) -> ()` | `set_fan_curve(profile, curve: CurveData)` — replaces the curve whose `fan` matches; writes to hardware only if `profile` is the active profile; then re-applies PPT. |
+| `FanCurveData` | `(u) -> a(s(yyyyyyyy)(yyyyyyyy)b)` | `fan_curve_data(profile: PlatformProfile) -> Vec<CurveData>` — returns the **stored** curves for that profile (Quiet and LowPower share one set). |
+| `SetFanCurve` | `(u (s(yyyyyyyy)(yyyyyyyy)b)) -> ()` | `set_fan_curve(profile, curve: CurveData)` — replaces the curve whose `fan` matches; writes to hardware only if `profile` is the active profile; then re-applies PPT. |
 | `SetFanCurvesEnabled` | `(u b) -> ()` | `set_fan_curves_enabled(profile, enabled)` — all fans of a profile. |
 | `SetProfileFanCurveEnabled` | `(u s b) -> ()` | `set_profile_fan_curve_enabled(profile, fan: FanCurvePU, enabled)` |
 | `SetCurvesToDefaults` | `(u) -> ()` | `set_curves_to_defaults(profile)` — **switches the platform profile** to `profile`, writes `pwmN_enable=3` (reset), reads factory curve back, switches back. Expect a brief profile flip. |
 
-`CurveData { fan: FanCurvePU ("CPU"/"GPU"/"MID" as `s`), pwm: [u8; 8] (0–255), temp: [u8; 8] (°C), enabled: bool }` → signature `(sayayb)`. `pwmN_enable` is written `1` for enabled curves, `2` for disabled. String form for CLI/RON: `30c:1%,49c:2%,…` (8 points, non-decreasing). Persisted in `/etc/asusd/fan_curves.ron` (`FanCurveConfig { profiles: FanCurveProfiles { balanced, performance, quiet, custom: Vec<CurveData> } }`); on first run every profile is visited to capture factory defaults.
+`CurveData { fan: FanCurvePU ("CPU"/"GPU"/"MID" as `s`), pwm: [u8; 8] (0–255), temp: [u8; 8] (°C), enabled: bool }` → signature `(s(yyyyyyyy)(yyyyyyyy)b)`: fixed-size arrays travel as structures, not `ay` (verified against asusd 6.4.0 introspection on a GA403WR, 2026-09-10). `pwmN_enable` is written `1` for enabled curves, `2` for disabled. String form for CLI/RON: `30c:1%,49c:2%,…` (8 points, non-decreasing). Persisted in `/etc/asusd/fan_curves.ron` (`FanCurveConfig { profiles: FanCurveProfiles { balanced, performance, quiet, custom: Vec<CurveData> } }`); on first run every profile is visited to capture factory defaults.
 
 ### 1.6 `xyz.ljones.Aura` (at `/xyz/ljones/aura/<dev>` or `/xyz/ljones/aura/tuf`)
 
@@ -227,8 +227,8 @@ Reconstructed from the `#[interface]` impls (6.3.8; `[6.4.0]` additions marked).
     <!-- [6.4.0] --><property name="DisableNvidiaPowerdOnBattery" type="b" access="readwrite"/>
   </interface>
   <interface name="xyz.ljones.FanCurves">
-    <method name="FanCurveData"><arg name="profile" type="u" direction="in"/><arg type="a(sayayb)" direction="out"/></method>
-    <method name="SetFanCurve"><arg name="profile" type="u" direction="in"/><arg name="curve" type="(sayayb)" direction="in"/></method>
+    <method name="FanCurveData"><arg name="profile" type="u" direction="in"/><arg type="a(s(yyyyyyyy)(yyyyyyyy)b)" direction="out"/></method>
+    <method name="SetFanCurve"><arg name="profile" type="u" direction="in"/><arg name="curve" type="(s(yyyyyyyy)(yyyyyyyy)b)" direction="in"/></method>
     <method name="SetFanCurvesEnabled"><arg name="profile" type="u" direction="in"/><arg name="enabled" type="b" direction="in"/></method>
     <method name="SetProfileFanCurveEnabled"><arg name="profile" type="u" direction="in"/><arg name="fan" type="s" direction="in"/><arg name="enabled" type="b" direction="in"/></method>
     <method name="SetCurvesToDefaults"><arg name="profile" type="u" direction="in"/></method>

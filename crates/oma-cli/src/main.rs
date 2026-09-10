@@ -4,7 +4,7 @@ use oma_hw::{amdgpu, cpu, detect, hwmon, nvidia};
 use std::time::Duration;
 
 fn usage() -> ! {
-    eprintln!("usage: oma <inventory [--json]|sensors|watch [secs]|nvidia|cpu|daemons|rgb [index]>");
+    eprintln!("usage: oma <inventory [--json]|sensors|watch [secs]|nvidia|cpu|daemons|rgb [--set index]|capture [dir]>");
     std::process::exit(2)
 }
 
@@ -97,14 +97,36 @@ fn main() -> anyhow::Result<()> {
                         for x in &d {
                             println!("[{}] {} · {} · {} LEDs · modes={:?} active={}", x.index, x.name, x.kind, x.leds, x.modes.iter().map(|m| m.name.clone()).collect::<Vec<_>>(), x.active_mode);
                         }
-                        if let Some(a) = args.get(1) {
-                            let idx: usize = a.parse().unwrap_or(0);
+                        // Listing is read-only; lighting changes only on request.
+                        if args.get(1).map(String::as_str) == Some("--set") {
+                            let idx: usize = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(0);
                             println!("set_static({idx}) -> {:?}", oma_hw::rgb::set_static(idx, (255, 61, 104)).await.map_err(|e| e.to_string()));
                         }
                     }
                     Err(e) => println!("devices error: {e:#}"),
                 }
             });
+        }
+        Some("capture") => {
+            let dir = std::path::PathBuf::from(args.get(1).map(String::as_str).unwrap_or("."));
+            let rt = tokio::runtime::Runtime::new()?;
+            let raw = rt.block_on(oma_hw::capture::gather());
+            std::fs::create_dir_all(&dir)?;
+            let path = dir.join("raw-inventory.json");
+            std::fs::write(&path, serde_json::to_string_pretty(&raw)? + "\n")?;
+            let yes = |b: bool| if b { "yes" } else { "no" };
+            println!(
+                "captured {} (BIOS {}): {} hwmon devices, {} sysfs attributes, asusd {}, supergfxd {}, NVIDIA GPUs {}",
+                raw.system.dmi.product_name,
+                raw.system.dmi.bios_version,
+                raw.system.hwmon.len(),
+                raw.sysfs.len(),
+                yes(raw.asusd.is_some()),
+                yes(raw.supergfx.is_some()),
+                raw.nvidia.len()
+            );
+            println!("wrote {}", path.display());
+            println!("contains model, BIOS and kernel versions and live readings; no serial numbers (GPU UUIDs are redacted)");
         }
         Some("cpu") => {
             println!("{}", serde_json::to_string_pretty(&cpu::cpu_info())?);

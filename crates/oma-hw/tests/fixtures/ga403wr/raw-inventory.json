@@ -1,0 +1,1973 @@
+{
+  "format": 1,
+  "captured_at": "2026-09-10T10:37:47.390245183-04:00",
+  "system": {
+    "platform": "AsusLaptop",
+    "dmi": {
+      "sys_vendor": "ASUSTeK COMPUTER INC.",
+      "product_name": "ROG Zephyrus G14 GA403WR_GA403WR",
+      "board_vendor": "ASUSTeK COMPUTER INC.",
+      "board_name": "GA403WR",
+      "bios_version": "GA403WR.309",
+      "bios_date": "09/17/2025"
+    },
+    "kernel": "7.2.3-arch1-3",
+    "cpu": {
+      "model": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
+      "vendor": "AuthenticAMD",
+      "logical_cpus": 24,
+      "physical_cores": 12,
+      "threads_per_core": 2,
+      "scaling_driver": "amd-pstate-epp",
+      "amd_pstate_status": "active",
+      "available_governors": [
+        "performance",
+        "powersave"
+      ],
+      "available_epp": [
+        "default",
+        "performance",
+        "balance_performance",
+        "balance_power",
+        "power",
+        "custom"
+      ],
+      "cpuinfo_min_khz": 605264,
+      "cpuinfo_max_khz": 2000000,
+      "has_boost": true,
+      "has_smt_control": true,
+      "has_epp": true,
+      "prefcore_ranking": [
+        196,
+        202,
+        208,
+        208,
+        125,
+        125,
+        125,
+        125,
+        125,
+        125,
+        125,
+        125,
+        196,
+        202,
+        208,
+        208,
+        125,
+        125,
+        125,
+        125,
+        125,
+        125,
+        125,
+        125
+      ],
+      "per_cpu_max_khz": [
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000,
+        2000000
+      ]
+    },
+    "hwmon": [
+      {
+        "name": "ACAD",
+        "path": "/sys/class/hwmon/hwmon0",
+        "device_path": "/sys/devices/platform/ACPI0003:00/power_supply/ACAD",
+        "temps": [],
+        "fans": [],
+        "pwms": [],
+        "voltages": [],
+        "powers": []
+      },
+      {
+        "name": "acpi_fan",
+        "path": "/sys/class/hwmon/hwmon1",
+        "device_path": "/sys/devices/platform/PNP0C0B:00",
+        "temps": [],
+        "fans": [
+          {
+            "index": 1,
+            "label": "fan1",
+            "input": "/sys/class/hwmon/hwmon1/fan1_input",
+            "min": null
+          }
+        ],
+        "pwms": [],
+        "voltages": [],
+        "powers": []
+      },
+      {
+        "name": "ucsi_source_psy_USBC000:002",
+        "path": "/sys/class/hwmon/hwmon10",
+        "device_path": "/sys/devices/platform/USBC000:00/power_supply/ucsi-source-psy-USBC000:002",
+        "temps": [],
+        "fans": [],
+        "pwms": [],
+        "voltages": [
+          {
+            "index": 0,
+            "label": "in0",
+            "input": "/sys/class/hwmon/hwmon10/in0_input"
+          }
+        ],
+        "powers": []
+      },
+      {
+        "name": "mt7925_phy0",
+        "path": "/sys/class/hwmon/hwmon11",
+        "device_path": "/sys/devices/pci0000:00/0000:00:02.3/0000:63:00.0/ieee80211/phy0",
+        "temps": [
+          {
+            "index": 1,
+            "label": "temp1",
+            "input": "/sys/class/hwmon/hwmon11/temp1_input",
+            "crit": null,
+            "max": null
+          }
+        ],
+        "fans": [],
+        "pwms": [],
+        "voltages": [],
+        "powers": []
+      },
+      {
+        "name": "acpitz",
+        "path": "/sys/class/hwmon/hwmon2",
+        "device_path": "/sys/devices/virtual/thermal/thermal_zone0",
+        "temps": [
+          {
+            "index": 1,
+            "label": "temp1",
+            "input": "/sys/class/hwmon/hwmon2/temp1_input",
+            "crit": null,
+            "max": null
+          },
+          {
+            "index": 2,
+            "label": "temp2",
+            "input": "/sys/class/hwmon/hwmon2/temp2_input",
+            "crit": null,
+            "max": null
+          }
+        ],
+        "fans": [],
+        "pwms": [],
+        "voltages": [],
+        "powers": []
+      },
+      {
+        "name": "BAT1",
+        "path": "/sys/class/hwmon/hwmon3",
+        "device_path": "/sys/devices/LNXSYSTM:00/LNXSYBUS:00/PNP0C0A:00/power_supply/BAT1",
+        "temps": [],
+        "fans": [],
+        "pwms": [],
+        "voltages": [
+          {
+            "index": 0,
+            "label": "in0",
+            "input": "/sys/class/hwmon/hwmon3/in0_input"
+          }
+        ],
+        "powers": []
+      },
+      {
+        "name": "nvme",
+        "path": "/sys/class/hwmon/hwmon4",
+        "device_path": "/sys/devices/pci0000:00/0000:00:02.1/0000:61:00.0/nvme/nvme0",
+        "temps": [
+          {
+            "index": 1,
+            "label": "Composite",
+            "input": "/sys/class/hwmon/hwmon4/temp1_input",
+            "crit": 86.85,
+            "max": 85.85
+          },
+          {
+            "index": 2,
+            "label": "Sensor 1",
+            "input": "/sys/class/hwmon/hwmon4/temp2_input",
+            "crit": null,
+            "max": 65261.85
+          },
+          {
+            "index": 3,
+            "label": "Sensor 2",
+            "input": "/sys/class/hwmon/hwmon4/temp3_input",
+            "crit": null,
+            "max": 65261.85
+          }
+        ],
+        "fans": [],
+        "pwms": [],
+        "voltages": [],
+        "powers": []
+      },
+      {
+        "name": "amdgpu",
+        "path": "/sys/class/hwmon/hwmon5",
+        "device_path": "/sys/devices/pci0000:00/0000:00:08.1/0000:65:00.0",
+        "temps": [
+          {
+            "index": 1,
+            "label": "edge",
+            "input": "/sys/class/hwmon/hwmon5/temp1_input",
+            "crit": null,
+            "max": null
+          }
+        ],
+        "fans": [],
+        "pwms": [],
+        "voltages": [
+          {
+            "index": 0,
+            "label": "vddgfx",
+            "input": "/sys/class/hwmon/hwmon5/in0_input"
+          },
+          {
+            "index": 1,
+            "label": "vddnb",
+            "input": "/sys/class/hwmon/hwmon5/in1_input"
+          }
+        ],
+        "powers": [
+          {
+            "index": 1,
+            "label": "PPT",
+            "input": "/sys/class/hwmon/hwmon5/power1_input"
+          }
+        ]
+      },
+      {
+        "name": "k10temp",
+        "path": "/sys/class/hwmon/hwmon6",
+        "device_path": "/sys/devices/pci0000:00/0000:00:18.3",
+        "temps": [
+          {
+            "index": 1,
+            "label": "Tctl",
+            "input": "/sys/class/hwmon/hwmon6/temp1_input",
+            "crit": null,
+            "max": null
+          }
+        ],
+        "fans": [],
+        "pwms": [],
+        "voltages": [],
+        "powers": []
+      },
+      {
+        "name": "asus",
+        "path": "/sys/class/hwmon/hwmon7",
+        "device_path": "/sys/devices/platform/asus-nb-wmi",
+        "temps": [],
+        "fans": [
+          {
+            "index": 1,
+            "label": "cpu_fan",
+            "input": "/sys/class/hwmon/hwmon7/fan1_input",
+            "min": null
+          },
+          {
+            "index": 2,
+            "label": "gpu_fan",
+            "input": "/sys/class/hwmon/hwmon7/fan2_input",
+            "min": null
+          }
+        ],
+        "pwms": [],
+        "voltages": [],
+        "powers": []
+      },
+      {
+        "name": "asus_custom_fan_curve",
+        "path": "/sys/class/hwmon/hwmon8",
+        "device_path": "/sys/devices/platform/asus-nb-wmi",
+        "temps": [],
+        "fans": [],
+        "pwms": [],
+        "voltages": [],
+        "powers": []
+      },
+      {
+        "name": "ucsi_source_psy_USBC000:001",
+        "path": "/sys/class/hwmon/hwmon9",
+        "device_path": "/sys/devices/platform/USBC000:00/power_supply/ucsi-source-psy-USBC000:001",
+        "temps": [],
+        "fans": [],
+        "pwms": [],
+        "voltages": [
+          {
+            "index": 0,
+            "label": "in0",
+            "input": "/sys/class/hwmon/hwmon9/in0_input"
+          }
+        ],
+        "powers": []
+      }
+    ],
+    "amd_gpus": [
+      {
+        "device_path": "/sys/devices/pci0000:00/0000:00:08.1/0000:65:00.0",
+        "pci_slot": "0000:65:00.0",
+        "hwmon_path": "/sys/class/drm/card1/device/hwmon/hwmon5",
+        "name": "Advanced Micro Devices, Inc. [AMD/ATI] Strix [Radeon 880M / 890M] (rev c1)",
+        "is_integrated": true,
+        "has_od": true,
+        "dpm_levels": [
+          "auto",
+          "low",
+          "high",
+          "manual",
+          "profile_standard",
+          "profile_min_sclk",
+          "profile_min_mclk",
+          "profile_peak"
+        ]
+      }
+    ],
+    "nvidia_count": 0,
+    "hid": [
+      {
+        "vendor_id": 2821,
+        "product_id": 6582,
+        "product": "ITE Device(8910)",
+        "path": "/dev/hidraw0",
+        "interface": 0,
+        "usage_page": 65417,
+        "accessible": false
+      },
+      {
+        "vendor_id": 2821,
+        "product_id": 6582,
+        "product": "ITE Device(8910)",
+        "path": "/dev/hidraw0",
+        "interface": 0,
+        "usage_page": 65410,
+        "accessible": false
+      },
+      {
+        "vendor_id": 2821,
+        "product_id": 6582,
+        "product": "ITE Device(8910)",
+        "path": "/dev/hidraw0",
+        "interface": 0,
+        "usage_page": 1,
+        "accessible": false
+      },
+      {
+        "vendor_id": 2821,
+        "product_id": 6582,
+        "product": "ITE Device(8910)",
+        "path": "/dev/hidraw0",
+        "interface": 0,
+        "usage_page": 65329,
+        "accessible": false
+      },
+      {
+        "vendor_id": 2821,
+        "product_id": 6582,
+        "product": "ITE Device(8910)",
+        "path": "/dev/hidraw0",
+        "interface": 0,
+        "usage_page": 89,
+        "accessible": false
+      },
+      {
+        "vendor_id": 2821,
+        "product_id": 6582,
+        "product": "ITE Device(8910)",
+        "path": "/dev/hidraw0",
+        "interface": 0,
+        "usage_page": 12,
+        "accessible": false
+      }
+    ],
+    "daemons": {
+      "asusd": true,
+      "supergfxd": true,
+      "coolercontrold": false,
+      "power_profiles_daemon": true,
+      "gamemode": false,
+      "openrgb_server": false,
+      "oma_helper": true
+    },
+    "asus_armoury_attrs": [
+      "boot_sound",
+      "charge_mode",
+      "dgpu_disable",
+      "gpu_mux_mode",
+      "nv_base_tgp",
+      "nv_dynamic_boost",
+      "nv_temp_target",
+      "nv_tgp",
+      "panel_overdrive",
+      "ppt_pl1_spl",
+      "ppt_pl2_sppt",
+      "ppt_pl3_fppt"
+    ],
+    "platform_profile_choices": [
+      "quiet",
+      "balanced",
+      "performance"
+    ],
+    "features": {
+      "cpu_epp": true,
+      "cpu_boost": true,
+      "cpu_smt": true,
+      "super_io_fans": false,
+      "ryujin_aio": false,
+      "livedash_oled": false,
+      "aura_usb": false,
+      "lianli_uni_hub": false,
+      "nvidia": false,
+      "amd_gpu": true,
+      "asus_ec_sensors": false,
+      "platform_profile": true,
+      "asusd": true,
+      "supergfxd": true,
+      "coolercontrol": false,
+      "openrgb": false,
+      "liquidctl": false
+    }
+  },
+  "asusd": {
+    "objects": {
+      "version": "6.4.0",
+      "has_platform": true,
+      "has_fan_curves": true,
+      "armoury_attrs": [
+        "boot_sound",
+        "charge_mode",
+        "dgpu_disable",
+        "gpu_mux_mode",
+        "nv_base_tgp",
+        "nv_dynamic_boost",
+        "nv_temp_target",
+        "nv_tgp",
+        "panel_overdrive",
+        "ppt_pl1_spl",
+        "ppt_pl2_sppt",
+        "ppt_pl3_fppt"
+      ],
+      "aura_paths": [
+        "/xyz/ljones/aura/19b6_3_4"
+      ],
+      "anime": false,
+      "slash": true,
+      "backlight": false,
+      "slash_path": "/xyz/ljones/aura/19b6_3_4",
+      "anime_path": null
+    },
+    "platform": {
+      "version": "6.4.0",
+      "profile": 2,
+      "choices": [
+        2,
+        0,
+        1
+      ],
+      "profile_on_ac": 2,
+      "profile_on_battery": 2,
+      "change_on_ac": false,
+      "change_on_battery": false,
+      "linked_epp": false,
+      "charge_limit": 100,
+      "ppt_group": false,
+      "disable_nvidia_powerd_on_battery": true
+    },
+    "armoury": [
+      {
+        "attr": "boot_sound",
+        "name": "BootSound",
+        "current": 0,
+        "default": -1,
+        "min": -1,
+        "max": -1,
+        "step": -1,
+        "possible": [
+          0,
+          1
+        ],
+        "queued": -1
+      },
+      {
+        "attr": "charge_mode",
+        "name": "ChargeMode",
+        "current": 2,
+        "default": -1,
+        "min": -1,
+        "max": -1,
+        "step": -1,
+        "possible": [
+          0,
+          1,
+          2
+        ],
+        "queued": -1
+      },
+      {
+        "attr": "dgpu_disable",
+        "name": "DgpuDisable",
+        "current": 0,
+        "default": -1,
+        "min": -1,
+        "max": -1,
+        "step": -1,
+        "possible": [
+          0,
+          1
+        ],
+        "queued": -1
+      },
+      {
+        "attr": "gpu_mux_mode",
+        "name": "GpuMuxMode",
+        "current": 1,
+        "default": -1,
+        "min": -1,
+        "max": -1,
+        "step": -1,
+        "possible": [
+          0,
+          1
+        ],
+        "queued": -1
+      },
+      {
+        "attr": "nv_base_tgp",
+        "name": "DgpuBaseTgp",
+        "current": 80,
+        "default": -1,
+        "min": -1,
+        "max": -1,
+        "step": -1,
+        "possible": [],
+        "queued": -1
+      },
+      {
+        "attr": "nv_dynamic_boost",
+        "name": "NvDynamicBoost",
+        "current": 25,
+        "default": 25,
+        "min": 0,
+        "max": 25,
+        "step": 1,
+        "possible": [],
+        "queued": -1
+      },
+      {
+        "attr": "nv_temp_target",
+        "name": "NvTempTarget",
+        "current": 87,
+        "default": 87,
+        "min": 75,
+        "max": 87,
+        "step": 1,
+        "possible": [],
+        "queued": -1
+      },
+      {
+        "attr": "nv_tgp",
+        "name": "DgpuTgp",
+        "current": 95,
+        "default": 95,
+        "min": 80,
+        "max": 95,
+        "step": 1,
+        "possible": [],
+        "queued": -1
+      },
+      {
+        "attr": "panel_overdrive",
+        "name": "PanelOverdrive",
+        "current": 1,
+        "default": -1,
+        "min": -1,
+        "max": -1,
+        "step": -1,
+        "possible": [
+          0,
+          1
+        ],
+        "queued": -1
+      },
+      {
+        "attr": "ppt_pl1_spl",
+        "name": "PptPl1Spl",
+        "current": 80,
+        "default": 80,
+        "min": 15,
+        "max": 80,
+        "step": 1,
+        "possible": [],
+        "queued": -1
+      },
+      {
+        "attr": "ppt_pl2_sppt",
+        "name": "PptPl2Sppt",
+        "current": 80,
+        "default": 80,
+        "min": 25,
+        "max": 80,
+        "step": 1,
+        "possible": [],
+        "queued": -1
+      },
+      {
+        "attr": "ppt_pl3_fppt",
+        "name": "PptPl3Fppt",
+        "current": 80,
+        "default": 80,
+        "min": 35,
+        "max": 80,
+        "step": 1,
+        "possible": [],
+        "queued": -1
+      }
+    ],
+    "fan_curves": {
+      "0": [
+        {
+          "fan": "CPU",
+          "pwm": [
+            12,
+            22,
+            30,
+            40,
+            51,
+            71,
+            94,
+            142
+          ],
+          "temp": [
+            45,
+            62,
+            65,
+            68,
+            70,
+            72,
+            74,
+            76
+          ],
+          "enabled": true
+        },
+        {
+          "fan": "GPU",
+          "pwm": [
+            12,
+            17,
+            30,
+            40,
+            51,
+            71,
+            99,
+            153
+          ],
+          "temp": [
+            42,
+            59,
+            62,
+            65,
+            67,
+            69,
+            71,
+            73
+          ],
+          "enabled": false
+        }
+      ],
+      "1": [
+        {
+          "fan": "CPU",
+          "pwm": [
+            22,
+            30,
+            40,
+            71,
+            84,
+            94,
+            142,
+            168
+          ],
+          "temp": [
+            20,
+            64,
+            66,
+            68,
+            70,
+            72,
+            74,
+            76
+          ],
+          "enabled": false
+        },
+        {
+          "fan": "GPU",
+          "pwm": [
+            17,
+            30,
+            40,
+            71,
+            89,
+            99,
+            153,
+            181
+          ],
+          "temp": [
+            20,
+            57,
+            60,
+            63,
+            66,
+            69,
+            72,
+            75
+          ],
+          "enabled": false
+        }
+      ],
+      "2": [
+        {
+          "fan": "CPU",
+          "pwm": [
+            2,
+            12,
+            22,
+            30,
+            40,
+            51,
+            71,
+            71
+          ],
+          "temp": [
+            47,
+            69,
+            70,
+            72,
+            74,
+            76,
+            78,
+            255
+          ],
+          "enabled": false
+        },
+        {
+          "fan": "GPU",
+          "pwm": [
+            2,
+            12,
+            17,
+            30,
+            40,
+            51,
+            71,
+            71
+          ],
+          "temp": [
+            47,
+            67,
+            68,
+            70,
+            70,
+            70,
+            70,
+            255
+          ],
+          "enabled": false
+        }
+      ]
+    },
+    "aura": [
+      {
+        "path": "/xyz/ljones/aura/19b6_3_4",
+        "device_type": 0,
+        "brightness": 2,
+        "supported_brightness": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "supported_basic_modes": [
+          0,
+          1,
+          2,
+          3,
+          10
+        ],
+        "supported_basic_zones": [],
+        "supported_power_zones": [
+          1
+        ],
+        "led_mode": 0,
+        "led_mode_data": {
+          "mode": 0,
+          "zone": 0,
+          "colour1": [
+            181,
+            151,
+            144
+          ],
+          "colour2": [
+            0,
+            0,
+            0
+          ],
+          "speed": "Med",
+          "direction": "Right"
+        },
+        "all_mode_data": {
+          "0": {
+            "mode": 0,
+            "zone": 0,
+            "colour1": [
+              181,
+              151,
+              144
+            ],
+            "colour2": [
+              0,
+              0,
+              0
+            ],
+            "speed": "Med",
+            "direction": "Right"
+          },
+          "1": {
+            "mode": 1,
+            "zone": 0,
+            "colour1": [
+              166,
+              0,
+              0
+            ],
+            "colour2": [
+              0,
+              0,
+              0
+            ],
+            "speed": "Med",
+            "direction": "Right"
+          },
+          "2": {
+            "mode": 2,
+            "zone": 0,
+            "colour1": [
+              166,
+              0,
+              0
+            ],
+            "colour2": [
+              0,
+              0,
+              0
+            ],
+            "speed": "Med",
+            "direction": "Right"
+          },
+          "3": {
+            "mode": 3,
+            "zone": 0,
+            "colour1": [
+              166,
+              0,
+              0
+            ],
+            "colour2": [
+              0,
+              0,
+              0
+            ],
+            "speed": "Med",
+            "direction": "Right"
+          },
+          "9": {
+            "mode": 9,
+            "zone": 0,
+            "colour1": [
+              166,
+              0,
+              0
+            ],
+            "colour2": [
+              0,
+              0,
+              0
+            ],
+            "speed": "Med",
+            "direction": "Right"
+          }
+        },
+        "led_power": {
+          "states": [
+            {
+              "zone": 1,
+              "boot": true,
+              "awake": true,
+              "sleep": true,
+              "shutdown": true
+            }
+          ]
+        }
+      }
+    ],
+    "slash": {
+      "path": "/xyz/ljones/aura/19b6_3_4",
+      "enabled": false,
+      "brightness": 255,
+      "interval": 0,
+      "mode": 16,
+      "show_on_boot": true,
+      "show_on_sleep": true,
+      "show_on_shutdown": true,
+      "show_on_battery": true,
+      "show_battery_warning": true,
+      "show_on_lid_closed": true
+    }
+  },
+  "supergfx": {
+    "version": "5.2.7",
+    "mode": "Integrated",
+    "supported": [
+      "Integrated",
+      "Hybrid",
+      "Vfio",
+      "AsusMuxDgpu"
+    ],
+    "vendor": "Nvidia",
+    "power": "Off",
+    "pending_mode": "None",
+    "pending_action": "Nothing"
+  },
+  "ppd": {
+    "active": "power-saver",
+    "profiles": [
+      {
+        "name": "power-saver",
+        "driver": "multiple",
+        "cpu_driver": "amd_pstate",
+        "platform_driver": "platform_profile"
+      },
+      {
+        "name": "balanced",
+        "driver": "multiple",
+        "cpu_driver": "amd_pstate",
+        "platform_driver": "platform_profile"
+      },
+      {
+        "name": "performance",
+        "driver": "multiple",
+        "cpu_driver": "amd_pstate",
+        "platform_driver": "platform_profile"
+      }
+    ],
+    "degraded": "",
+    "version": "0.30"
+  },
+  "nvidia": [],
+  "pci_display": [
+    {
+      "slot": "0000:65:00.0",
+      "vendor": "0x1002",
+      "device": "0x150e",
+      "class": "0x038000",
+      "driver": "amdgpu",
+      "boot_vga": null,
+      "runtime_status": "active",
+      "power_state": "D0"
+    }
+  ],
+  "drm_connectors": [
+    "card1-DP-1",
+    "card1-DP-2",
+    "card1-DP-3",
+    "card1-DP-4",
+    "card1-DP-5",
+    "card1-DP-6",
+    "card1-DP-7",
+    "card1-DP-8",
+    "card1-Writeback-1",
+    "card1-eDP-1"
+  ],
+  "sysfs": {
+    "/sys/class/drm/card1/device/mem_info_vram_total": {
+      "value": "536870912",
+      "mode": 292
+    },
+    "/sys/class/drm/card1/device/power_dpm_force_performance_level": {
+      "value": "low",
+      "mode": 420
+    },
+    "/sys/class/drm/card1/device/power_dpm_state": {
+      "value": "performance",
+      "mode": 420
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/boot_sound/current_value": {
+      "value": "0",
+      "mode": 420
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/boot_sound/display_name": {
+      "value": "Set the boot POST sound",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/boot_sound/possible_values": {
+      "value": "0;1",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/boot_sound/type": {
+      "value": "enumeration",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/charge_mode/current_value": {
+      "value": "2",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/charge_mode/display_name": {
+      "value": "Show the current mode of charging",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/charge_mode/possible_values": {
+      "value": "0;1;2",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/charge_mode/type": {
+      "value": "enumeration",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/dgpu_disable/current_value": {
+      "value": "0",
+      "mode": 420
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/dgpu_disable/display_name": {
+      "value": "Disable the dGPU",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/dgpu_disable/possible_values": {
+      "value": "0;1",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/dgpu_disable/type": {
+      "value": "enumeration",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/gpu_mux_mode/current_value": {
+      "value": "1",
+      "mode": 420
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/gpu_mux_mode/display_name": {
+      "value": "Set the GPU display MUX mode",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/gpu_mux_mode/possible_values": {
+      "value": "0;1",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/gpu_mux_mode/type": {
+      "value": "enumeration",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_base_tgp/current_value": {
+      "value": "80",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_base_tgp/display_name": {
+      "value": "Read the base TGP value",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_base_tgp/type": {
+      "value": "integer",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_dynamic_boost/current_value": {
+      "value": "25",
+      "mode": 420
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_dynamic_boost/default_value": {
+      "value": "25",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_dynamic_boost/display_name": {
+      "value": "Set the Nvidia dynamic boost limit",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_dynamic_boost/max_value": {
+      "value": "25",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_dynamic_boost/min_value": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_dynamic_boost/scalar_increment": {
+      "value": "1",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_dynamic_boost/type": {
+      "value": "integer",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_temp_target/current_value": {
+      "value": "87",
+      "mode": 420
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_temp_target/default_value": {
+      "value": "87",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_temp_target/display_name": {
+      "value": "Set the Nvidia max thermal limit",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_temp_target/max_value": {
+      "value": "87",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_temp_target/min_value": {
+      "value": "75",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_temp_target/scalar_increment": {
+      "value": "1",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_temp_target/type": {
+      "value": "integer",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_tgp/current_value": {
+      "value": "95",
+      "mode": 420
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_tgp/default_value": {
+      "value": "95",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_tgp/display_name": {
+      "value": "Set the additional TGP on top of the base TGP",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_tgp/max_value": {
+      "value": "95",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_tgp/min_value": {
+      "value": "80",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_tgp/scalar_increment": {
+      "value": "1",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/nv_tgp/type": {
+      "value": "integer",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/panel_overdrive/current_value": {
+      "value": "1",
+      "mode": 420
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/panel_overdrive/display_name": {
+      "value": "Set the panel refresh overdrive",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/panel_overdrive/possible_values": {
+      "value": "0;1",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/panel_overdrive/type": {
+      "value": "enumeration",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/pending_reboot": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl1_spl/current_value": {
+      "value": "80",
+      "mode": 420
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl1_spl/default_value": {
+      "value": "80",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl1_spl/display_name": {
+      "value": "Set the CPU slow package limit",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl1_spl/max_value": {
+      "value": "80",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl1_spl/min_value": {
+      "value": "15",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl1_spl/scalar_increment": {
+      "value": "1",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl1_spl/type": {
+      "value": "integer",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl2_sppt/current_value": {
+      "value": "80",
+      "mode": 420
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl2_sppt/default_value": {
+      "value": "80",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl2_sppt/display_name": {
+      "value": "Set the CPU fast package limit",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl2_sppt/max_value": {
+      "value": "80",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl2_sppt/min_value": {
+      "value": "25",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl2_sppt/scalar_increment": {
+      "value": "1",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl2_sppt/type": {
+      "value": "integer",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl3_fppt/current_value": {
+      "value": "80",
+      "mode": 420
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl3_fppt/default_value": {
+      "value": "80",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl3_fppt/display_name": {
+      "value": "Set the CPU fastest package limit",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl3_fppt/max_value": {
+      "value": "80",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl3_fppt/min_value": {
+      "value": "35",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl3_fppt/scalar_increment": {
+      "value": "1",
+      "mode": 292
+    },
+    "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl3_fppt/type": {
+      "value": "integer",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon0/name": {
+      "value": "ACAD",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon1/fan1_input": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon1/name": {
+      "value": "acpi_fan",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon10/curr1_input": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon10/curr1_max": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon10/in0_input": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon10/in0_max": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon10/in0_min": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon10/name": {
+      "value": "ucsi_source_psy_USBC000:002",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon11/name": {
+      "value": "mt7925_phy0",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon11/temp1_input": {
+      "value": "54000",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon2/name": {
+      "value": "acpitz",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon2/temp1_input": {
+      "value": "47000",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon2/temp2_input": {
+      "value": "20000",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon3/curr1_input": {
+      "value": "1242",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon3/in0_input": {
+      "value": "17276",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon3/name": {
+      "value": "BAT1",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon4/name": {
+      "value": "nvme",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon4/temp1_alarm": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon4/temp1_crit": {
+      "value": "86850",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon4/temp1_input": {
+      "value": "33850",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon4/temp1_label": {
+      "value": "Composite",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon4/temp1_max": {
+      "value": "85850",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon4/temp1_min": {
+      "value": "-150",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon4/temp2_input": {
+      "value": "33850",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon4/temp2_label": {
+      "value": "Sensor 1",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon4/temp2_max": {
+      "value": "65261850",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon4/temp2_min": {
+      "value": "-273150",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon4/temp3_input": {
+      "value": "40850",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon4/temp3_label": {
+      "value": "Sensor 2",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon4/temp3_max": {
+      "value": "65261850",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon4/temp3_min": {
+      "value": "-273150",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon5/freq1_input": {
+      "value": "600000000",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon5/freq1_label": {
+      "value": "sclk",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon5/in0_input": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon5/in0_label": {
+      "value": "vddgfx",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon5/in1_input": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon5/in1_label": {
+      "value": "vddnb",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon5/name": {
+      "value": "amdgpu",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon5/power1_average": {
+      "value": "4693000",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon5/power1_input": {
+      "value": "4693000",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon5/power1_label": {
+      "value": "PPT",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon5/temp1_input": {
+      "value": "45000",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon5/temp1_label": {
+      "value": "edge",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon6/name": {
+      "value": "k10temp",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon6/temp1_input": {
+      "value": "47500",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon6/temp1_label": {
+      "value": "Tctl",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon7/fan1_input": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon7/fan1_label": {
+      "value": "cpu_fan",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon7/fan2_input": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon7/fan2_label": {
+      "value": "gpu_fan",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon7/name": {
+      "value": "asus",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon7/pwm1_enable": {
+      "value": "2",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon7/pwm2_enable": {
+      "value": "0",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/name": {
+      "value": "asus_custom_fan_curve",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point1_pwm": {
+      "value": "2",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point1_temp": {
+      "value": "47",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point2_pwm": {
+      "value": "12",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point2_temp": {
+      "value": "69",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point3_pwm": {
+      "value": "22",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point3_temp": {
+      "value": "70",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point4_pwm": {
+      "value": "30",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point4_temp": {
+      "value": "72",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point5_pwm": {
+      "value": "40",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point5_temp": {
+      "value": "74",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point6_pwm": {
+      "value": "51",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point6_temp": {
+      "value": "76",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point7_pwm": {
+      "value": "71",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point7_temp": {
+      "value": "78",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point8_pwm": {
+      "value": "71",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_auto_point8_temp": {
+      "value": "255",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm1_enable": {
+      "value": "2",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point1_pwm": {
+      "value": "2",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point1_temp": {
+      "value": "47",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point2_pwm": {
+      "value": "12",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point2_temp": {
+      "value": "67",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point3_pwm": {
+      "value": "17",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point3_temp": {
+      "value": "68",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point4_pwm": {
+      "value": "30",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point4_temp": {
+      "value": "70",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point5_pwm": {
+      "value": "40",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point5_temp": {
+      "value": "70",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point6_pwm": {
+      "value": "51",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point6_temp": {
+      "value": "70",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point7_pwm": {
+      "value": "71",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point7_temp": {
+      "value": "70",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point8_pwm": {
+      "value": "71",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_auto_point8_temp": {
+      "value": "255",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon8/pwm2_enable": {
+      "value": "2",
+      "mode": 420
+    },
+    "/sys/class/hwmon/hwmon9/curr1_input": {
+      "value": "2250",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon9/curr1_max": {
+      "value": "3000",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon9/in0_input": {
+      "value": "20000",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon9/in0_max": {
+      "value": "20000",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon9/in0_min": {
+      "value": "5000",
+      "mode": 292
+    },
+    "/sys/class/hwmon/hwmon9/name": {
+      "value": "ucsi_source_psy_USBC000:001",
+      "mode": 292
+    },
+    "/sys/class/leds/asus::kbd_backlight/brightness": {
+      "value": "2",
+      "mode": 420
+    },
+    "/sys/class/leds/asus::kbd_backlight/max_brightness": {
+      "value": "3",
+      "mode": 292
+    },
+    "/sys/class/leds/input12::capslock/brightness": {
+      "value": "0",
+      "mode": 420
+    },
+    "/sys/class/leds/input12::capslock/max_brightness": {
+      "value": "1",
+      "mode": 292
+    },
+    "/sys/class/leds/input12::compose/brightness": {
+      "value": "0",
+      "mode": 420
+    },
+    "/sys/class/leds/input12::compose/max_brightness": {
+      "value": "1",
+      "mode": 292
+    },
+    "/sys/class/leds/input12::kana/brightness": {
+      "value": "0",
+      "mode": 420
+    },
+    "/sys/class/leds/input12::kana/max_brightness": {
+      "value": "1",
+      "mode": 292
+    },
+    "/sys/class/leds/input12::numlock/brightness": {
+      "value": "1",
+      "mode": 420
+    },
+    "/sys/class/leds/input12::numlock/max_brightness": {
+      "value": "1",
+      "mode": 292
+    },
+    "/sys/class/leds/input12::scrolllock/brightness": {
+      "value": "0",
+      "mode": 420
+    },
+    "/sys/class/leds/input12::scrolllock/max_brightness": {
+      "value": "1",
+      "mode": 292
+    },
+    "/sys/class/platform-profile/platform-profile-0/choices": {
+      "value": "low-power balanced performance",
+      "mode": 292
+    },
+    "/sys/class/platform-profile/platform-profile-0/name": {
+      "value": "amd-pmf",
+      "mode": 292
+    },
+    "/sys/class/platform-profile/platform-profile-0/profile": {
+      "value": "quiet",
+      "mode": 420
+    },
+    "/sys/class/platform-profile/platform-profile-1/choices": {
+      "value": "quiet balanced performance",
+      "mode": 292
+    },
+    "/sys/class/platform-profile/platform-profile-1/name": {
+      "value": "asus-wmi",
+      "mode": 292
+    },
+    "/sys/class/platform-profile/platform-profile-1/profile": {
+      "value": "quiet",
+      "mode": 420
+    },
+    "/sys/class/power_supply/ACAD/online": {
+      "value": "1",
+      "mode": 292
+    },
+    "/sys/class/power_supply/ACAD/type": {
+      "value": "Mains",
+      "mode": 292
+    },
+    "/sys/class/power_supply/BAT1/capacity": {
+      "value": "92",
+      "mode": 292
+    },
+    "/sys/class/power_supply/BAT1/charge_control_end_threshold": {
+      "value": "100",
+      "mode": 420
+    },
+    "/sys/class/power_supply/BAT1/status": {
+      "value": "Charging",
+      "mode": 292
+    },
+    "/sys/class/power_supply/BAT1/type": {
+      "value": "Battery",
+      "mode": 292
+    },
+    "/sys/class/power_supply/ucsi-source-psy-USBC000:001/online": {
+      "value": "1",
+      "mode": 292
+    },
+    "/sys/class/power_supply/ucsi-source-psy-USBC000:001/status": {
+      "value": "Charging",
+      "mode": 292
+    },
+    "/sys/class/power_supply/ucsi-source-psy-USBC000:001/type": {
+      "value": "USB",
+      "mode": 292
+    },
+    "/sys/class/power_supply/ucsi-source-psy-USBC000:002/online": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/class/power_supply/ucsi-source-psy-USBC000:002/status": {
+      "value": "Not charging",
+      "mode": 292
+    },
+    "/sys/class/power_supply/ucsi-source-psy-USBC000:002/type": {
+      "value": "USB",
+      "mode": 292
+    },
+    "/sys/class/powercap/intel-rapl:0/energy_uj": {
+      "value": null,
+      "mode": 256
+    },
+    "/sys/class/powercap/intel-rapl:0/max_energy_range_uj": {
+      "value": "65532610987",
+      "mode": 292
+    },
+    "/sys/class/powercap/intel-rapl:0/name": {
+      "value": "package-0",
+      "mode": 292
+    },
+    "/sys/class/powercap/intel-rapl:0:0/energy_uj": {
+      "value": null,
+      "mode": 256
+    },
+    "/sys/class/powercap/intel-rapl:0:0/max_energy_range_uj": {
+      "value": "65532610987",
+      "mode": 292
+    },
+    "/sys/class/powercap/intel-rapl:0:0/name": {
+      "value": "core",
+      "mode": 292
+    },
+    "/sys/devices/platform/asus-nb-wmi/boot_sound": {
+      "value": "0",
+      "mode": 420
+    },
+    "/sys/devices/platform/asus-nb-wmi/cpufv": {
+      "value": null,
+      "mode": 128
+    },
+    "/sys/devices/platform/asus-nb-wmi/dgpu_disable": {
+      "value": "0",
+      "mode": 420
+    },
+    "/sys/devices/platform/asus-nb-wmi/gpu_mux_mode": {
+      "value": "1",
+      "mode": 420
+    },
+    "/sys/devices/platform/asus-nb-wmi/nv_dynamic_boost": {
+      "value": "5",
+      "mode": 420
+    },
+    "/sys/devices/platform/asus-nb-wmi/nv_temp_target": {
+      "value": "75",
+      "mode": 420
+    },
+    "/sys/devices/platform/asus-nb-wmi/panel_od": {
+      "value": "1",
+      "mode": 420
+    },
+    "/sys/devices/platform/asus-nb-wmi/ppt_fppt": {
+      "value": "5",
+      "mode": 420
+    },
+    "/sys/devices/platform/asus-nb-wmi/ppt_pl1_spl": {
+      "value": "5",
+      "mode": 420
+    },
+    "/sys/devices/platform/asus-nb-wmi/ppt_pl2_sppt": {
+      "value": "5",
+      "mode": 420
+    },
+    "/sys/devices/platform/asus-nb-wmi/throttle_thermal_policy": {
+      "value": "2",
+      "mode": 420
+    },
+    "/sys/devices/system/cpu/amd_pstate/prefcore": {
+      "value": "disabled",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/amd_pstate/status": {
+      "value": "active",
+      "mode": 420
+    },
+    "/sys/devices/system/cpu/cpufreq/boost": {
+      "value": "0",
+      "mode": 420
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/affected_cpus": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/amd_pstate_highest_perf": {
+      "value": "196",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/amd_pstate_hw_prefcore": {
+      "value": "disabled",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/amd_pstate_lowest_nonlinear_freq": {
+      "value": "605264",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/amd_pstate_max_freq": {
+      "value": "5157895",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/amd_pstate_prefcore_ranking": {
+      "value": "196",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/boost": {
+      "value": "0",
+      "mode": 420
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/cpuinfo_avg_freq": {
+      "value": "2004343",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq": {
+      "value": "2000000",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/cpuinfo_min_freq": {
+      "value": "605264",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/cpuinfo_transition_latency": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/energy_performance_available_preferences": {
+      "value": "default performance balance_performance balance_power power custom",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference": {
+      "value": "power",
+      "mode": 420
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/related_cpus": {
+      "value": "0",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/scaling_available_governors": {
+      "value": "performance powersave",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq": {
+      "value": "2004343",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/scaling_driver": {
+      "value": "amd-pstate-epp",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor": {
+      "value": "powersave",
+      "mode": 420
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq": {
+      "value": "2000000",
+      "mode": 420
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq": {
+      "value": "605264",
+      "mode": 420
+    },
+    "/sys/devices/system/cpu/cpufreq/policy0/scaling_setspeed": {
+      "value": "<unsupported>",
+      "mode": 420
+    },
+    "/sys/devices/system/cpu/smt/active": {
+      "value": "1",
+      "mode": 292
+    },
+    "/sys/devices/system/cpu/smt/control": {
+      "value": "on",
+      "mode": 420
+    },
+    "/sys/firmware/acpi/platform_profile": {
+      "value": "quiet",
+      "mode": 420
+    },
+    "/sys/firmware/acpi/platform_profile_choices": {
+      "value": "quiet balanced performance",
+      "mode": 292
+    }
+  }
+}

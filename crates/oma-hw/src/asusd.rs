@@ -114,6 +114,9 @@ pub trait Platform {
     fn enable_ppt_group(&self) -> zbus::Result<bool>;
     #[zbus(property)]
     fn set_enable_ppt_group(&self, v: bool) -> zbus::Result<()>;
+    /// asusd 6.4+: stop nvidia-powerd while on battery.
+    #[zbus(property)]
+    fn disable_nvidia_powerd_on_battery(&self) -> zbus::Result<bool>;
 }
 
 /// `xyz.ljones.AsusArmoury` at `/xyz/ljones/asus_armoury/<attr>`.
@@ -142,12 +145,16 @@ pub trait AsusArmoury {
     fn restore_default(&self) -> zbus::Result<()>;
 }
 
-/// `(sayayb)`: fan, pwm[8], temp[8], enabled.
+/// One fan's firmware curve: 8 points of (°C, pwm 0..=255).
+///
+/// The arrays are fixed-size on the wire, `(s(yyyyyyyy)(yyyyyyyy)b)`, as
+/// asusd 6.4 reports in its introspection data; `Vec<u8>` (`ay`) would not
+/// decode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct CurveData {
     pub fan: String,
-    pub pwm: Vec<u8>,
-    pub temp: Vec<u8>,
+    pub pwm: [u8; 8],
+    pub temp: [u8; 8],
     pub enabled: bool,
 }
 
@@ -226,8 +233,80 @@ pub trait Aura {
     fn led_mode_data(&self) -> zbus::Result<AuraEffect>;
     #[zbus(property)]
     fn set_led_mode_data(&self, v: AuraEffect) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn supported_brightness(&self) -> zbus::Result<Vec<u32>>;
+    #[zbus(property)]
+    fn supported_power_zones(&self) -> zbus::Result<Vec<u32>>;
+    #[zbus(property)]
+    fn led_power(&self) -> zbus::Result<LedPower>;
+    #[zbus(property)]
+    fn set_led_power(&self, v: LedPower) -> zbus::Result<()>;
     fn all_mode_data(&self) -> zbus::Result<HashMap<u32, AuraEffect>>;
     fn direct_addressing_raw(&self, packets: Vec<Vec<u8>>) -> zbus::Result<()>;
+}
+
+/// When one lighting zone is lit, `(ubbbb)`: zone, boot, awake, sleep, shutdown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, zbus::zvariant::Value, zbus::zvariant::OwnedValue)]
+pub struct PowerZoneState {
+    pub zone: u32,
+    pub boot: bool,
+    pub awake: bool,
+    pub sleep: bool,
+    pub shutdown: bool,
+}
+
+/// `(a(ubbbb))`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, zbus::zvariant::Value, zbus::zvariant::OwnedValue)]
+pub struct LedPower {
+    pub states: Vec<PowerZoneState>,
+}
+
+/// `xyz.ljones.Slash`: the LED bar on the lid of recent Zephyrus models.
+#[zbus::proxy(interface = "xyz.ljones.Slash", default_service = "xyz.ljones.Asusd")]
+pub trait Slash {
+    #[zbus(property)]
+    fn enabled(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_enabled(&self, v: bool) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn brightness(&self) -> zbus::Result<u8>;
+    #[zbus(property)]
+    fn set_brightness(&self, v: u8) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn interval(&self) -> zbus::Result<u8>;
+    #[zbus(property)]
+    fn set_interval(&self, v: u8) -> zbus::Result<()>;
+    /// `y` on asusd 6.4 (6.3.8's getter and setter disagreed on the type).
+    #[zbus(property)]
+    fn mode(&self) -> zbus::Result<u8>;
+    #[zbus(property)]
+    fn set_mode(&self, v: u8) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn show_on_boot(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_show_on_boot(&self, v: bool) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn show_on_sleep(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_show_on_sleep(&self, v: bool) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn show_on_shutdown(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_show_on_shutdown(&self, v: bool) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn show_on_battery(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_show_on_battery(&self, v: bool) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn show_battery_warning(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_show_battery_warning(&self, v: bool) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn show_on_lid_closed(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_show_on_lid_closed(&self, v: bool) -> zbus::Result<()>;
+    /// `(byyu)`: enabled, brightness, interval, mode.
+    fn device_state(&self) -> zbus::Result<(bool, u8, u8, u32)>;
 }
 
 #[zbus::proxy(interface = "org.freedesktop.DBus.ObjectManager", default_service = "xyz.ljones.Asusd", default_path = "/")]
@@ -247,6 +326,11 @@ pub struct AsusdObjects {
     pub anime: bool,
     pub slash: bool,
     pub backlight: bool,
+    /// Object paths of the hot-plugged Slash / AniMe devices.
+    #[serde(default)]
+    pub slash_path: Option<String>,
+    #[serde(default)]
+    pub anime_path: Option<String>,
 }
 
 /// Describe an armoury attribute with its limits.
@@ -279,8 +363,14 @@ pub async fn discover(conn: &zbus::Connection) -> zbus::Result<AsusdObjects> {
                     }
                 }
                 "xyz.ljones.Aura" => out.aura_paths.push(p.clone()),
-                "xyz.ljones.Anime" => out.anime = true,
-                "xyz.ljones.Slash" => out.slash = true,
+                "xyz.ljones.Anime" => {
+                    out.anime = true;
+                    out.anime_path = Some(p.clone());
+                }
+                "xyz.ljones.Slash" => {
+                    out.slash = true;
+                    out.slash_path = Some(p.clone());
+                }
                 "xyz.ljones.Backlight" => out.backlight = true,
                 _ => {}
             }

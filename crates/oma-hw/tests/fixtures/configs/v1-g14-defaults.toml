@@ -1,0 +1,531 @@
+mode = "Manual"
+fan_owner = "Auto"
+active_profile = "c0edfce3-9e77-441f-a850-b0485b61a376"
+default_profile = "35330cfd-ece3-4f3c-a77f-8ff10b217bdf"
+telemetry_hz = 2
+
+[[profiles]]
+id = "c0edfce3-9e77-441f-a850-b0485b61a376"
+name = "Silent"
+icon = "moon"
+builtin = true
+
+[profiles.accent]
+r = 96
+g = 140
+b = 255
+
+[profiles.cpu]
+prefer_ccd0 = false
+ppd_profile = "power-saver"
+
+[profiles.cpu.control]
+governor = "powersave"
+epp = "balance_power"
+boost = false
+scaling_min_khz = 0
+scaling_max_khz = 0
+
+[profiles.gpu.nvidia]
+power_limit_w = 300
+reset_power_limit = false
+unlock_clocks = false
+fan_auto = false
+
+[profiles.cooling]
+gpu_zero_rpm = true
+
+[[profiles.cooling.fans]]
+target = "RyujinPump"
+
+[profiles.cooling.fans.mode.Curve]
+points = [
+    [
+    25.0,
+    60.0,
+],
+    [
+    32.0,
+    70.0,
+],
+    [
+    38.0,
+    85.0,
+],
+    [
+    42.0,
+    100.0,
+],
+]
+source = "Coolant"
+hysteresis_c = 0.5
+min_duty = 60.0
+ramp_s = 6.0
+
+[[profiles.cooling.fans]]
+target = "RyujinExternalFans"
+
+[profiles.cooling.fans.mode.Curve]
+points = [
+    [
+    25.0,
+    30.0,
+],
+    [
+    30.0,
+    40.0,
+],
+    [
+    35.0,
+    60.0,
+],
+    [
+    40.0,
+    85.0,
+],
+    [
+    45.0,
+    100.0,
+],
+]
+source = "Coolant"
+hysteresis_c = 0.5
+min_duty = 30.0
+ramp_s = 5.0
+
+[[profiles.cooling.fans]]
+
+[profiles.cooling.fans.target]
+LianLiChannel = 1
+
+[profiles.cooling.fans.mode.Curve]
+points = [
+    [
+    30.0,
+    20.0,
+],
+    [
+    50.0,
+    30.0,
+],
+    [
+    65.0,
+    45.0,
+],
+    [
+    75.0,
+    70.0,
+],
+    [
+    85.0,
+    100.0,
+],
+]
+source = "CpuTctl"
+hysteresis_c = 2.0
+min_duty = 20.0
+ramp_s = 4.0
+
+[profiles.lighting]
+brightness = 100
+
+[profiles.lighting.zones]
+
+[profiles.lcd]
+content = "Firmware"
+brightness = 0
+
+[profiles.asusd]
+
+[[profiles]]
+id = "35330cfd-ece3-4f3c-a77f-8ff10b217bdf"
+name = "Balanced"
+icon = "scale"
+builtin = true
+
+[profiles.accent]
+r = 64
+g = 224
+b = 180
+
+[profiles.cpu]
+prefer_ccd0 = false
+ppd_profile = "balanced"
+
+[profiles.cpu.control]
+governor = "powersave"
+epp = "balance_performance"
+boost = true
+scaling_min_khz = 0
+scaling_max_khz = 0
+
+[profiles.gpu.nvidia]
+reset_power_limit = true
+unlock_clocks = true
+fan_auto = false
+
+[profiles.cooling]
+gpu_zero_rpm = true
+
+[[profiles.cooling.fans]]
+target = "RyujinPump"
+
+[profiles.cooling.fans.mode.Curve]
+points = [
+    [
+    25.0,
+    60.0,
+],
+    [
+    32.0,
+    70.0,
+],
+    [
+    38.0,
+    85.0,
+],
+    [
+    42.0,
+    100.0,
+],
+]
+source = "Coolant"
+hysteresis_c = 0.5
+min_duty = 60.0
+ramp_s = 6.0
+
+[[profiles.cooling.fans]]
+target = "RyujinExternalFans"
+
+[profiles.cooling.fans.mode.Curve]
+points = [
+    [
+    25.0,
+    30.0,
+],
+    [
+    30.0,
+    40.0,
+],
+    [
+    35.0,
+    60.0,
+],
+    [
+    40.0,
+    85.0,
+],
+    [
+    45.0,
+    100.0,
+],
+]
+source = "Coolant"
+hysteresis_c = 0.5
+min_duty = 30.0
+ramp_s = 5.0
+
+[[profiles.cooling.fans]]
+
+[profiles.cooling.fans.target]
+LianLiChannel = 1
+
+[profiles.cooling.fans.mode.Curve]
+points = [
+    [
+    30.0,
+    30.0,
+],
+    [
+    50.0,
+    40.0,
+],
+    [
+    60.0,
+    55.0,
+],
+    [
+    70.0,
+    75.0,
+],
+    [
+    80.0,
+    100.0,
+],
+]
+source = "CpuTctl"
+hysteresis_c = 1.5
+min_duty = 25.0
+ramp_s = 3.0
+
+[profiles.lighting]
+brightness = 100
+
+[profiles.lighting.zones]
+
+[profiles.lcd]
+content = "Firmware"
+brightness = 0
+
+[profiles.asusd]
+
+[[profiles]]
+id = "efcf619a-bc8c-45f9-9364-8aa3865deb51"
+name = "Gaming"
+icon = "gamepad"
+builtin = true
+
+[profiles.accent]
+r = 255
+g = 64
+b = 96
+
+[profiles.cpu]
+prefer_ccd0 = false
+ppd_profile = "performance"
+
+[profiles.cpu.control]
+governor = "performance"
+epp = "performance"
+boost = true
+scaling_min_khz = 0
+scaling_max_khz = 0
+
+[profiles.gpu.nvidia]
+reset_power_limit = true
+unlock_clocks = true
+fan_auto = false
+persistence = true
+
+[profiles.cooling]
+gpu_zero_rpm = false
+
+[[profiles.cooling.fans]]
+target = "RyujinPump"
+
+[profiles.cooling.fans.mode]
+Fixed = 100.0
+
+[[profiles.cooling.fans]]
+target = "RyujinExternalFans"
+
+[profiles.cooling.fans.mode.Curve]
+points = [
+    [
+    25.0,
+    30.0,
+],
+    [
+    30.0,
+    40.0,
+],
+    [
+    35.0,
+    60.0,
+],
+    [
+    40.0,
+    85.0,
+],
+    [
+    45.0,
+    100.0,
+],
+]
+source = "Coolant"
+hysteresis_c = 0.5
+min_duty = 30.0
+ramp_s = 5.0
+
+[[profiles.cooling.fans]]
+
+[profiles.cooling.fans.target]
+LianLiChannel = 1
+
+[profiles.cooling.fans.mode.Curve]
+points = [
+    [
+    30.0,
+    40.0,
+],
+    [
+    45.0,
+    55.0,
+],
+    [
+    55.0,
+    70.0,
+],
+    [
+    65.0,
+    85.0,
+],
+    [
+    75.0,
+    100.0,
+],
+]
+source = "CpuTctl"
+hysteresis_c = 1.0
+min_duty = 35.0
+ramp_s = 2.0
+
+[profiles.lighting]
+brightness = 100
+
+[profiles.lighting.zones]
+
+[profiles.lcd]
+content = "Firmware"
+brightness = 0
+
+[profiles.asusd]
+
+[[profiles]]
+id = "f5f14b02-a3a2-4dd9-944d-c9c031ff8a8f"
+name = "Turbo"
+icon = "flame"
+builtin = true
+
+[profiles.accent]
+r = 255
+g = 160
+b = 32
+
+[profiles.cpu]
+prefer_ccd0 = false
+ppd_profile = "performance"
+
+[profiles.cpu.control]
+governor = "performance"
+epp = "performance"
+boost = true
+scaling_min_khz = 0
+scaling_max_khz = 0
+
+[profiles.gpu.nvidia]
+power_limit_w = 600
+reset_power_limit = false
+unlock_clocks = false
+fan_auto = false
+persistence = true
+
+[profiles.cooling]
+gpu_zero_rpm = false
+
+[[profiles.cooling.fans]]
+target = "RyujinPump"
+
+[profiles.cooling.fans.mode]
+Fixed = 100.0
+
+[[profiles.cooling.fans]]
+target = "RyujinExternalFans"
+
+[profiles.cooling.fans.mode]
+Fixed = 100.0
+
+[[profiles.cooling.fans]]
+
+[profiles.cooling.fans.target]
+LianLiChannel = 1
+
+[profiles.cooling.fans.mode.Curve]
+points = [
+    [
+    30.0,
+    40.0,
+],
+    [
+    45.0,
+    55.0,
+],
+    [
+    55.0,
+    70.0,
+],
+    [
+    65.0,
+    85.0,
+],
+    [
+    75.0,
+    100.0,
+],
+]
+source = "CpuTctl"
+hysteresis_c = 1.0
+min_duty = 35.0
+ramp_s = 2.0
+
+[[profiles.cooling.fans]]
+target = "NvidiaFans"
+
+[profiles.cooling.fans.mode.Curve]
+points = [
+    [
+    30.0,
+    40.0,
+],
+    [
+    45.0,
+    55.0,
+],
+    [
+    55.0,
+    70.0,
+],
+    [
+    65.0,
+    85.0,
+],
+    [
+    75.0,
+    100.0,
+],
+]
+source = "Gpu"
+hysteresis_c = 1.0
+min_duty = 35.0
+ramp_s = 2.0
+
+[profiles.lighting]
+brightness = 100
+
+[profiles.lighting.zones]
+
+[profiles.lcd]
+content = "Firmware"
+brightness = 0
+
+[profiles.asusd]
+
+[[rules]]
+id = "3cded676-89aa-468f-8e86-cb94ab858480"
+name = "GameMode active"
+enabled = true
+trigger = "GameMode"
+profile = "efcf619a-bc8c-45f9-9364-8aa3865deb51"
+priority = 100
+hold_s = 20
+
+[[rules]]
+id = "983497e7-f034-4217-b416-bd086264b7f6"
+name = "Fullscreen game"
+enabled = true
+trigger = "FullscreenGame"
+profile = "efcf619a-bc8c-45f9-9364-8aa3865deb51"
+priority = 50
+hold_s = 20
+
+[coolercontrol]
+enabled = false
+url = "http://localhost:11987"
+
+[overlay]
+anchor = "right"
+width = 560
+height = 1040
+margin = 16
+opacity = 0.97
+hud_enabled = true
