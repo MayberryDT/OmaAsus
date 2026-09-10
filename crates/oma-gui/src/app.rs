@@ -113,6 +113,10 @@ pub struct App {
     pub ppd: Option<oma_hw::ppd::PpdState>,
     /// Charge-limit slider position while it is being dragged in the panel.
     pub quick_charge: Option<f64>,
+    /// A firmware setting's slider while it is dragged (ASUS page).
+    pub attr_drag: Option<(String, f64)>,
+    /// A graphics mode waiting for the user to confirm the switch.
+    pub gfx_confirm: Option<oma_hw::supergfx::GfxMode>,
     /// Logical height free under the bars on the focused output (Hyprland).
     screen_h: Option<f32>,
     /// Current panel surface height and anchor, for resizing it to its content.
@@ -325,6 +329,8 @@ impl App {
             overlay_phase: None,
             ppd: None,
             quick_charge: None,
+            attr_drag: None,
+            gfx_confirm: None,
             screen_h: None,
             overlay_h: 0,
             overlay_anchor: Anchor::Right | Anchor::Top,
@@ -626,6 +632,12 @@ impl App {
         }
     }
 
+    /// Why the graphics mode can't switch to `mode` right now, if anything.
+    fn gfx_blocker(&self, mode: oma_hw::supergfx::GfxMode) -> Option<String> {
+        let busy = self.snapshot.as_ref().and_then(|s| s.nvidia.as_ref()).is_some_and(|n| n.util_gpu.unwrap_or(0) > 10 || n.process_count.unwrap_or(0) > 0);
+        oma_hw::supergfx::switch_blocker(mode, busy, &oma_hw::supergfx::dgpu_displays())
+    }
+
     fn update_asus(&mut self, m: AsusMsg) -> Task<Message> {
         use oma_hw::asusd::PlatformProxy;
         let reload = || Task::perform(crate::pages::asus::load(), Message::AsusLoaded);
@@ -671,11 +683,30 @@ impl App {
                 PlatformProxy::new(&c).await.map_err(|e| e.to_string())?.set_charge_control_end_threshold(v as u8).await.map_err(|e| e.to_string())?;
                 Ok(format!("Charge limit {v:.0}%"))
             })),
-            AsusMsg::Attr(name, v) => run(Box::pin(async move {
-                let c = zbus::Connection::system().await.map_err(|e| e.to_string())?;
-                oma_hw::asusd::set_armoury_attr(&c, &name, v as i32).await.map_err(|e| e.to_string())?;
-                Ok(format!("{} = {v:.0}", oma_hw::asusd::attr_label(&name)))
-            })),
+            AsusMsg::Attr(name, v) => {
+                let v = v.round();
+                // Shown at once; the reload after the write confirms it.
+                if let Some(a) = self.asus.attrs.iter_mut().find(|a| a.name == name) {
+                    a.current = Some(v as i64);
+                }
+                let shown = match oma_hw::asusd::attr_unit(&name) {
+                    Some(u) => format!("{v:.0} {u}"),
+                    None => format!("{v:.0}"),
+                };
+                run(Box::pin(async move {
+                    let c = zbus::Connection::system().await.map_err(|e| e.to_string())?;
+                    oma_hw::asusd::set_armoury_attr(&c, &name, v as i32).await.map_err(|e| e.to_string())?;
+                    Ok(format!("{}: {shown}", oma_hw::asusd::attr_label(&name)))
+                }))
+            }
+            AsusMsg::AttrDrag(name, v) => {
+                self.attr_drag = Some((name, v));
+                Task::none()
+            }
+            AsusMsg::AttrRelease => match self.attr_drag.take() {
+                Some((name, v)) => self.update_asus(AsusMsg::Attr(name, v)),
+                None => Task::none(),
+            },
             AsusMsg::AttrRestore(name) => run(Box::pin(async move {
                 let c = zbus::Connection::system().await.map_err(|e| e.to_string())?;
                 let path = format!("/xyz/ljones/asus_armoury/{name}");
@@ -685,10 +716,26 @@ impl App {
             AsusMsg::GfxMode(mode) => {
                 // Only real changes, and never out from under a display or work on the dGPU.
                 if self.asus.gfx.as_ref().map(|g| g.mode) == Some(mode) {
+                    self.gfx_confirm = None;
                     return Task::none();
                 }
-                let busy = self.snapshot.as_ref().and_then(|s| s.nvidia.as_ref()).is_some_and(|n| n.util_gpu.unwrap_or(0) > 10 || n.process_count.unwrap_or(0) > 0);
-                if let Some(why) = oma_hw::supergfx::switch_blocker(mode, busy, &oma_hw::supergfx::dgpu_displays()) {
+                if let Some(why) = self.gfx_blocker(mode) {
+                    self.toast = Some((format!("Graphics → {}: {why}", mode.label()), false));
+                    self.toast_at = Some(std::time::Instant::now());
+                    return Task::none();
+                }
+                // The page asks first, saying what the switch involves.
+                self.gfx_confirm = Some(mode);
+                Task::none()
+            }
+            AsusMsg::GfxCancel => {
+                self.gfx_confirm = None;
+                Task::none()
+            }
+            AsusMsg::GfxConfirm => {
+                let Some(mode) = self.gfx_confirm.take() else { return Task::none() };
+                // Checked again: something may have started on the dGPU while the question was open.
+                if let Some(why) = self.gfx_blocker(mode) {
                     self.toast = Some((format!("Graphics → {}: {why}", mode.label()), false));
                     self.toast_at = Some(std::time::Instant::now());
                     return Task::none();
@@ -1861,8 +1908,11 @@ impl App {
         let performance = self.config.profile_by_role(ProfileRole::Performance);
         let perf_name = performance.map(|x| x.name.clone()).unwrap_or_else(|| "Performance".into());
         let status = if self.controller_ready { "helper" } else { "read-only" };
-        let tier = crate::pages::NavTier::for_width(width, &pages, &perf_name, &[&self.theme_name, status]);
-        let (labels, word, pills) = (tier != crate::pages::NavTier::Icons, tier == crate::pages::NavTier::Full, tier == crate::pages::NavTier::Full);
+        use crate::pages::NavTier;
+        let tier = NavTier::for_width(width, &pages, &perf_name, &[&self.theme_name, status]);
+        let labels = matches!(tier, NavTier::Full | NavTier::Labels);
+        let (word, pills) = (tier == NavTier::Full, tier == NavTier::Full);
+        let button = tier != NavTier::Minimal;
 
         let link = |pg: Page| -> Element<'_, Message> {
             let active = pg == self.page;
@@ -1897,7 +1947,9 @@ impl App {
         if pills || !self.controller_ready {
             right = right.push(widgets::pill(p, status, if self.controller_ready { p.brand } else { p.yellow }));
         }
-        right = right.push(widgets::btn(p, perf_name, widgets::ButtonKind::Primary, performance.map(|x| Message::ApplyProfile(x.id))));
+        if button {
+            right = right.push(widgets::btn(p, perf_name, widgets::ButtonKind::Primary, performance.map(|x| Message::ApplyProfile(x.id))));
+        }
         row![brand, links, widgets::hfill(), right].spacing(space::XL).align_y(iced::Alignment::Center).into()
     }
 

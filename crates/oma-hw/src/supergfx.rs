@@ -202,6 +202,20 @@ pub fn switch_blocker(to: GfxMode, dgpu_busy: bool, dgpu_displays: &[String]) ->
     dgpu_busy.then(|| "the dGPU is in use; close what's running on it first".to_string())
 }
 
+/// What switching from `from` to `to` involves, said before it happens;
+/// supergfxd answers the switch with exactly what it needs.
+pub fn switch_note(from: GfxMode, to: GfxMode) -> &'static str {
+    use GfxMode::*;
+    match (from, to) {
+        (_, AsusMuxDgpu) | (AsusMuxDgpu, _) => "The MUX is set in firmware: this takes effect after a restart, and the dGPU alone then drives the internal display.",
+        (_, AsusEgpu) | (AsusEgpu, _) => "Firmware hands over to the external GPU; this may need a restart.",
+        (_, Vfio) => "The dGPU is detached from the desktop so a virtual machine can use it.",
+        (_, Integrated) => "The dGPU is powered off to save battery. Programs using it must close first, and you may need to log out.",
+        (Integrated, _) => "The dGPU is powered on again. You may need to log out before the desktop can use it.",
+        _ => "supergfxd will say whether you need to log out or restart.",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +226,13 @@ mod tests {
         assert!(switch_blocker(GfxMode::Integrated, true, &[]).is_some());
         assert!(switch_blocker(GfxMode::Vfio, false, &["card0-DP-1".into()]).unwrap().contains("card0-DP-1"));
         assert_eq!(switch_blocker(GfxMode::Integrated, false, &[]), None);
+    }
+
+    #[test]
+    fn a_switch_says_what_it_involves() {
+        assert!(switch_note(GfxMode::Hybrid, GfxMode::AsusMuxDgpu).contains("restart"));
+        assert!(switch_note(GfxMode::AsusMuxDgpu, GfxMode::Hybrid).contains("restart"));
+        assert!(switch_note(GfxMode::Hybrid, GfxMode::Integrated).contains("powered off"));
+        assert!(switch_note(GfxMode::Integrated, GfxMode::Hybrid).contains("powered on"));
     }
 }

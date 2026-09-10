@@ -475,3 +475,13 @@ pub fn attr_label(attr: &str) -> &str {
         _ => attr,
     }
 }
+
+/// The unit an armoury attribute's value is in, where known.
+pub fn attr_unit(attr: &str) -> Option<&'static str> {
+    match attr {
+        a if a.starts_with("ppt_") => Some("W"),
+        "nv_dynamic_boost" | "nv_tgp" | "nv_base_tgp" => Some("W"),
+        "nv_temp_target" => Some("°C"),
+        _ => None,
+    }
+}

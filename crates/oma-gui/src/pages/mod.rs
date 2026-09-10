@@ -71,6 +71,9 @@ pub enum NavTier {
     Labels,
     /// Icons with tooltips.
     Icons,
+    /// Icons alone: the header's profile button goes too (the dashboard and
+    /// tray panel switch profiles as well).
+    Minimal,
 }
 
 impl NavTier {
@@ -80,17 +83,22 @@ impl NavTier {
         use crate::theme::{size, space};
         // JetBrains Mono advances 0.6 em, so widths can be sized from the text.
         let mono = |s: &str| s.chars().count() as f32 * size::SMALL * 0.6;
-        let links = pages.iter().map(|pg| mono(pg.label()) + 20.0).sum::<f32>() + pages.len().saturating_sub(1) as f32 * space::XS;
+        let gaps = pages.len().saturating_sub(1) as f32 * space::XS;
+        let links = pages.iter().map(|pg| mono(pg.label()) + 20.0).sum::<f32>() + gaps;
+        let icons = pages.len() as f32 * 32.0 + gaps;
         let pills: f32 = pills.iter().map(|s| mono(s) + 24.0 + space::SM).sum();
         let (mark, word) = (26.0, space::SM + mono("omaasus"));
-        // Less the header's padding, the gaps around links and filler, and the button.
-        let room = width - 5.0 * space::XL - (button.chars().count() as f32 * size::BODY * 0.6 + 32.0) - 16.0;
-        if room >= mark + word + links + pills {
+        let button = button.chars().count() as f32 * size::BODY * 0.6 + 32.0;
+        // Less the header's padding and the gaps around the links and filler.
+        let room = width - 5.0 * space::XL - 16.0;
+        if room >= mark + word + links + pills + button {
             Self::Full
-        } else if room >= mark + links {
+        } else if room >= mark + links + button {
             Self::Labels
-        } else {
+        } else if room >= mark + icons + button {
             Self::Icons
+        } else {
+            Self::Minimal
         }
     }
 }
@@ -106,6 +114,8 @@ mod tests {
         assert_eq!(fit(1100.0), NavTier::Labels);
         // A half-width tile on a laptop: every page stays reachable as an icon.
         assert_eq!(fit(710.0), NavTier::Icons);
+        // A quarter tile: icons alone, nothing cut off.
+        assert_eq!(fit(449.0), NavTier::Minimal);
         assert_eq!(NavTier::for_width(1100.0, &Page::ALL[..5], "Performance", &["Osaka Jade", "helper"]), NavTier::Full, "fewer pages, more room");
     }
 }
