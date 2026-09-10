@@ -30,9 +30,14 @@ impl<M> canvas::Program<M> for Gauge {
 
     fn draw(&self, _s: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
         let p = self.palette;
+        // Layout can hand us a degenerate box mid-resize; text sizes derived from the
+        // radius must never reach zero (cosmic-text asserts on it).
+        if bounds.width < 48.0 || bounds.height < 48.0 {
+            return Vec::new();
+        }
         let mut frame = Frame::new(renderer, bounds.size());
         let c = frame.center();
-        let r = bounds.width.min(bounds.height) / 2.0 - 10.0;
+        let r = (bounds.width.min(bounds.height) / 2.0 - 10.0).max(12.0);
         let start = 0.75 * PI;
         let span = 1.5 * PI;
         let w = (r * 0.06).clamp(3.0, 7.0);
