@@ -132,5 +132,6 @@ fn desktop_outputs_get_names_and_limits_from_knowledge() {
 
     let pump = m.fan("ryujin:pump").expect("pump");
     assert_eq!((pump.caps.min_duty, pump.caps.release), (60.0, Release::SafeFixed(65.0)));
+    assert_eq!(pump.caps.curve_input, oma_hw::model::CurveInput::Coolant);
     assert!(m.fan("ryujin:radiator").is_some() && m.fan("ryujin:block-fan").is_some());
 }

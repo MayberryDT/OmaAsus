@@ -2,6 +2,7 @@
 //! platform settings, plus the automation rules that select profiles.
 
 use crate::cpu::CpuControlState;
+use crate::model::HardwareModel;
 use crate::nvidia::NvidiaControl;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -91,33 +92,10 @@ impl TempSource {
     }
 }
 
-/// A fan output that a curve can drive.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum FanTarget {
-    /// nct6775 `pwmN`.
-    SuperIo(u32),
-    RyujinPump,
-    RyujinInternalFan,
-    RyujinExternalFans,
-    NvidiaFans,
-    LianLiChannel(u8),
-    /// A CoolerControl device UID + channel name.
-    CoolerControl { device_uid: String, channel: String },
-}
-
-impl FanTarget {
-    pub fn label(&self) -> String {
-        match self {
-            Self::SuperIo(n) => format!("Board header pwm{n}"),
-            Self::RyujinPump => "Ryujin pump".into(),
-            Self::RyujinInternalFan => "Ryujin VRM fan".into(),
-            Self::RyujinExternalFans => "Ryujin radiator fans".into(),
-            Self::NvidiaFans => "GPU fans".into(),
-            Self::LianLiChannel(c) => format!("Lian Li channel {c}"),
-            Self::CoolerControl { channel, .. } => format!("CoolerControl {channel}"),
-        }
-    }
-}
+/// A fan output, by the id the hardware model gives it (`asusd:fan:CPU`,
+/// `superio:pwm2`, `ryujin:pump`...). Profiles keep assignments for outputs a
+/// machine doesn't have, so they carry between machines; those are not driven.
+pub type FanTarget = crate::model::DeviceId;
 
 /// How a fan is controlled inside a profile.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -166,9 +144,16 @@ pub struct CpuSettings {
     pub control: Option<CpuControlState>,
     /// Pin the game to physical cores of CCD0 (Zen 4 gaming trick) via cgroup/cpuset.
     pub prefer_ccd0: bool,
-    /// power-profiles-daemon profile to activate.
+    /// Power mode to select, by the machine's name for it ("Quiet", "Balanced",
+    /// "power-saver"...). Applied through whichever component owns power modes;
+    /// a name from another machine maps to its nearest mode ([`match_power_mode`]).
+    #[serde(default)]
+    pub power_mode: Option<String>,
+    /// Config v1: power-profiles-daemon profile. Read only, to migrate into `power_mode`.
+    #[serde(default, skip_serializing)]
     pub ppd_profile: Option<String>,
-    /// `/sys/firmware/acpi/platform_profile` value (laptops).
+    /// Config v1: `platform_profile` value. Read only, to migrate into `power_mode`.
+    #[serde(default, skip_serializing)]
     pub platform_profile: Option<String>,
 }
 
@@ -232,11 +217,22 @@ pub enum LcdContent {
     Text(String),
 }
 
+/// What a profile is for, so rules and shortcuts find "the quiet one" or "the
+/// gaming one" without relying on names.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProfileRole {
+    Quiet,
+    Balanced,
+    Performance,
+}
+
 /// A full gaming profile.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Profile {
     pub id: uuid::Uuid,
     pub name: String,
+    #[serde(default)]
+    pub role: Option<ProfileRole>,
     pub icon: String,
     pub accent: Rgb,
     pub cpu: CpuSettings,
@@ -259,6 +255,7 @@ impl Profile {
         Self {
             id: uuid::Uuid::new_v4(),
             name: name.into(),
+            role: None,
             icon: "bolt".into(),
             accent: Rgb::new(255, 64, 96),
             cpu: CpuSettings::default(),
@@ -329,9 +326,19 @@ pub enum FanOwner {
     None,
 }
 
+/// Current config schema. v1: fixed fan names, `ppd_profile`, lighting keyed
+/// by OpenRGB device name, profiles known by name.
+pub const SCHEMA: u32 = 2;
+
+fn schema_v1() -> u32 {
+    1
+}
+
 /// Everything persisted for the user.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
+    #[serde(default = "schema_v1")]
+    pub schema_version: u32,
     pub mode: Mode,
     #[serde(default)]
     pub fan_owner: FanOwner,
@@ -376,69 +383,17 @@ impl Default for OverlaySettings {
 }
 
 impl Config {
-    pub fn with_builtin_profiles() -> Self {
-        let mut silent = Profile::new("Silent");
-        silent.icon = "moon".into();
-        silent.accent = Rgb::new(96, 140, 255);
-        silent.builtin = true;
-        silent.cpu.control = Some(CpuControlState { governor: "powersave".into(), epp: Some("balance_power".into()), boost: Some(false), smt: None, scaling_min_khz: 0, scaling_max_khz: 0 });
-        silent.cpu.ppd_profile = Some("power-saver".into());
-        silent.gpu.nvidia = Some(NvidiaControl { power_limit_w: Some(300), ..Default::default() });
-        silent.cooling.set(FanTarget::RyujinPump, FanMode::Curve(FanCurve::pump()));
-        silent.cooling.set(FanTarget::RyujinExternalFans, FanMode::Curve(FanCurve::coolant()));
-        silent.cooling.set(FanTarget::LianLiChannel(1), FanMode::Curve(FanCurve::silent()));
-        silent.cooling.gpu_zero_rpm = true;
-
-        let mut balanced = Profile::new("Balanced");
-        balanced.icon = "scale".into();
-        balanced.accent = Rgb::new(64, 224, 180);
-        balanced.builtin = true;
-        balanced.cpu.control = Some(CpuControlState { governor: "powersave".into(), epp: Some("balance_performance".into()), boost: Some(true), smt: None, scaling_min_khz: 0, scaling_max_khz: 0 });
-        balanced.cpu.ppd_profile = Some("balanced".into());
-        balanced.gpu.nvidia = Some(NvidiaControl { reset_power_limit: true, unlock_clocks: true, ..Default::default() });
-        balanced.cooling.set(FanTarget::RyujinPump, FanMode::Curve(FanCurve::pump()));
-        balanced.cooling.set(FanTarget::RyujinExternalFans, FanMode::Curve(FanCurve::coolant()));
-        balanced.cooling.set(FanTarget::LianLiChannel(1), FanMode::Curve(FanCurve::balanced()));
-        balanced.cooling.gpu_zero_rpm = true;
-
-        let mut gaming = Profile::new("Gaming");
-        gaming.icon = "gamepad".into();
-        gaming.accent = Rgb::new(255, 64, 96);
-        gaming.builtin = true;
-        gaming.cpu.control = Some(CpuControlState { governor: "performance".into(), epp: Some("performance".into()), boost: Some(true), smt: None, scaling_min_khz: 0, scaling_max_khz: 0 });
-        gaming.cpu.ppd_profile = Some("performance".into());
-        gaming.gpu.nvidia = Some(NvidiaControl { reset_power_limit: true, unlock_clocks: true, persistence: Some(true), ..Default::default() });
-        gaming.cooling.set(FanTarget::RyujinPump, FanMode::Fixed(100.0));
-        gaming.cooling.set(FanTarget::RyujinExternalFans, FanMode::Curve(FanCurve::coolant()));
-        gaming.cooling.set(FanTarget::LianLiChannel(1), FanMode::Curve(FanCurve::performance()));
-        gaming.cooling.gpu_zero_rpm = false;
-
-        let mut turbo = Profile::new("Turbo");
-        turbo.icon = "flame".into();
-        turbo.accent = Rgb::new(255, 160, 32);
-        turbo.builtin = true;
-        turbo.cpu.control = gaming.cpu.control.clone();
-        turbo.cpu.ppd_profile = Some("performance".into());
-        turbo.gpu.nvidia = Some(NvidiaControl { power_limit_w: Some(600), persistence: Some(true), ..Default::default() });
-        turbo.cooling.set(FanTarget::RyujinPump, FanMode::Fixed(100.0));
-        turbo.cooling.set(FanTarget::RyujinExternalFans, FanMode::Fixed(100.0));
-        turbo.cooling.set(FanTarget::LianLiChannel(1), FanMode::Curve(FanCurve::performance()));
-        turbo.cooling.set(FanTarget::NvidiaFans, FanMode::Curve(FanCurve { source: TempSource::Gpu, ..FanCurve::performance() }));
-        turbo.cooling.gpu_zero_rpm = false;
-
-        let balanced_id = balanced.id;
-        let gaming_id = gaming.id;
-        let rules = vec![
-            Rule { id: uuid::Uuid::new_v4(), name: "GameMode active".into(), enabled: true, trigger: Trigger::GameMode, profile: gaming_id, priority: 100, hold_s: 20 },
-            Rule { id: uuid::Uuid::new_v4(), name: "Fullscreen game".into(), enabled: true, trigger: Trigger::FullscreenGame, profile: gaming_id, priority: 50, hold_s: 20 },
-        ];
+    /// A config with no profiles yet: they are generated from the hardware
+    /// model once detection has run ([`Config::generated`]).
+    pub fn empty() -> Self {
         Self {
+            schema_version: SCHEMA,
             mode: Mode::Manual,
             fan_owner: FanOwner::Auto,
-            active_profile: balanced_id,
-            default_profile: balanced_id,
-            profiles: vec![silent, balanced, gaming, turbo],
-            rules,
+            active_profile: uuid::Uuid::nil(),
+            default_profile: uuid::Uuid::nil(),
+            profiles: Vec::new(),
+            rules: Vec::new(),
             coolercontrol: CoolerControlAuth { enabled: false, url: "http://localhost:11987".into(), password: None },
             overlay: OverlaySettings::default(),
             telemetry_hz: 2,
@@ -446,7 +401,110 @@ impl Config {
         }
     }
 
+    /// Profiles for a fresh install, from what the machine has: one per power
+    /// mode it offers, each changing only that. Fans stay with the firmware and
+    /// nothing else is forced; users build on these.
+    pub fn generated(model: &HardwareModel) -> Self {
+        let mut c = Self::empty();
+        let modes = &model.controls.power_modes;
+        let profiles: Vec<Profile> = if modes.is_empty() {
+            vec![Profile { builtin: true, role: Some(ProfileRole::Balanced), ..Profile::new("Default") }]
+        } else {
+            modes
+                .iter()
+                .map(|mode| {
+                    let role = power_kind(mode);
+                    let (icon, accent) = match role {
+                        Some(ProfileRole::Quiet) => ("moon", Rgb::new(96, 140, 255)),
+                        Some(ProfileRole::Performance) => ("gamepad", Rgb::new(255, 64, 96)),
+                        _ => ("scale", Rgb::new(64, 224, 180)),
+                    };
+                    let mut p = Profile::new(&display_name(mode));
+                    p.builtin = true;
+                    p.role = role;
+                    p.icon = icon.into();
+                    p.accent = accent;
+                    p.cpu.power_mode = Some(mode.clone());
+                    p
+                })
+                .collect()
+        };
+        let balanced = profiles.iter().find(|p| p.role == Some(ProfileRole::Balanced)).unwrap_or(&profiles[0]).id;
+        let current = model.controls.power_mode.as_deref();
+        c.active_profile = profiles.iter().find(|p| current.is_some() && p.cpu.power_mode.as_deref() == current).map(|p| p.id).unwrap_or(balanced);
+        c.default_profile = balanced;
+        if let Some(perf) = profiles.iter().find(|p| p.role == Some(ProfileRole::Performance)) {
+            c.rules = vec![
+                Rule { id: uuid::Uuid::new_v4(), name: "GameMode active".into(), enabled: true, trigger: Trigger::GameMode, profile: perf.id, priority: 100, hold_s: 20 },
+                Rule { id: uuid::Uuid::new_v4(), name: "Fullscreen game".into(), enabled: true, trigger: Trigger::FullscreenGame, profile: perf.id, priority: 50, hold_s: 20 },
+            ];
+        }
+        c.profiles = profiles;
+        c
+    }
+
+    /// Bring an older config up to [`SCHEMA`]. Fan targets are already read as
+    /// model ids; this moves the rest. Returns whether anything changed.
+    pub fn migrate(&mut self) -> bool {
+        if self.schema_version >= SCHEMA {
+            return false;
+        }
+        for p in &mut self.profiles {
+            // v1 kept power-profiles-daemon and platform_profile names apart.
+            let v1_mode = p.cpu.ppd_profile.take().or(p.cpu.platform_profile.take());
+            if p.cpu.power_mode.is_none() {
+                p.cpu.power_mode = v1_mode;
+            }
+            // v1 lighting was keyed by OpenRGB device name.
+            p.lighting.zones = std::mem::take(&mut p.lighting.zones).into_iter().map(|(k, v)| (if k.contains(':') { k } else { format!("openrgb:{k}") }, v)).collect();
+            // v1 built-ins were known by name.
+            if p.role.is_none() && p.builtin {
+                p.role = match p.name.to_ascii_lowercase().as_str() {
+                    "silent" => Some(ProfileRole::Quiet),
+                    "balanced" => Some(ProfileRole::Balanced),
+                    "gaming" | "turbo" => Some(ProfileRole::Performance),
+                    _ => None,
+                };
+            }
+        }
+        self.schema_version = SCHEMA;
+        true
+    }
+
     pub fn profile(&self, id: uuid::Uuid) -> Option<&Profile> {
         self.profiles.iter().find(|p| p.id == id)
     }
+
+    /// The first profile with this role.
+    pub fn profile_by_role(&self, role: ProfileRole) -> Option<&Profile> {
+        self.profiles.iter().find(|p| p.role == Some(role))
+    }
+}
+
+/// The kind of a power mode name, across asusd, power-profiles-daemon and sysfs names.
+pub fn power_kind(name: &str) -> Option<ProfileRole> {
+    match name.to_ascii_lowercase().replace(['_', ' '], "-").as_str() {
+        "quiet" | "silent" | "power-saver" | "low-power" | "cool" => Some(ProfileRole::Quiet),
+        "balanced" | "balanced-performance" => Some(ProfileRole::Balanced),
+        "performance" | "turbo" | "max-power" => Some(ProfileRole::Performance),
+        _ => None,
+    }
+}
+
+/// The machine's power mode that best matches `wanted`: the same name, else
+/// the same kind, so a profile made under power-profiles-daemon still means
+/// something where asusd owns power modes.
+pub fn match_power_mode<'a>(wanted: &str, choices: &'a [String]) -> Option<&'a str> {
+    if let Some(c) = choices.iter().find(|c| c.eq_ignore_ascii_case(wanted)) {
+        return Some(c);
+    }
+    let kind = power_kind(wanted)?;
+    choices.iter().find(|c| power_kind(c) == Some(kind)).map(String::as_str)
+}
+
+/// "power-saver" → "Power saver", "quiet" → "Quiet".
+fn display_name(mode: &str) -> String {
+    let spaced = mode.replace(['-', '_'], " ");
+    let mut chars = spaced.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }

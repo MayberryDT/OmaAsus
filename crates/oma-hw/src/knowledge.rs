@@ -11,7 +11,7 @@
 use crate::detect::DmiInfo;
 use crate::hwmon::TempUnit;
 use crate::lianli::HubKind;
-use crate::model::{Release, SensorRole};
+use crate::model::{CurveInput, Release, SensorRole};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -185,6 +185,8 @@ pub struct OutputQuirk {
     pub label: &'static str,
     pub min_duty: f64,
     pub release: Release,
+    /// What a new software curve for it should follow.
+    pub curve_input: CurveInput,
     pub source: Source,
 }
 
@@ -193,9 +195,9 @@ pub fn output_quirk(driver: &str, index: u32) -> Option<OutputQuirk> {
     match (driver, index) {
         // The pump has no curve of its own once driven: never below 60 %, and
         // released to a safe fixed duty rather than left where it was.
-        ("rog_ryujin", 1) => Some(OutputQuirk { id: "ryujin:pump", label: "AIO pump", min_duty: 60.0, release: Release::SafeFixed(65.0), source: RYUJIN }),
-        ("rog_ryujin", 2) => Some(OutputQuirk { id: "ryujin:block-fan", label: "Pump-block fan", min_duty: 0.0, release: Release::SafeFixed(40.0), source: RYUJIN }),
-        ("rog_ryujin", 3) => Some(OutputQuirk { id: "ryujin:radiator", label: "Radiator fans", min_duty: 0.0, release: Release::SafeFixed(40.0), source: RYUJIN }),
+        ("rog_ryujin", 1) => Some(OutputQuirk { id: "ryujin:pump", label: "AIO pump", min_duty: 60.0, release: Release::SafeFixed(65.0), curve_input: CurveInput::Coolant, source: RYUJIN }),
+        ("rog_ryujin", 2) => Some(OutputQuirk { id: "ryujin:block-fan", label: "Pump-block fan", min_duty: 0.0, release: Release::SafeFixed(40.0), curve_input: CurveInput::Cpu, source: RYUJIN }),
+        ("rog_ryujin", 3) => Some(OutputQuirk { id: "ryujin:radiator", label: "Radiator fans", min_duty: 0.0, release: Release::SafeFixed(40.0), curve_input: CurveInput::Coolant, source: RYUJIN }),
         _ => None,
     }
 }

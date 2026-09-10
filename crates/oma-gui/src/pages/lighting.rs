@@ -157,7 +157,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
             column![
                 widgets::eyebrow(p, "Profile lighting"),
                 widgets::dim(p, format!("“{}” stores {} device colour(s). They are re-applied whenever the profile is activated.", pr.map(|x| x.name.as_str()).unwrap_or("—"), zones)),
-                Column::with_children(pr.map(|x| x.lighting.zones.iter().map(|(name, mode)| {
+                Column::with_children(pr.map(|x| x.lighting.zones.iter().map(|(key, mode)| {
+                    let name = key.strip_prefix("openrgb:").unwrap_or(key.as_str());
                     let (label, col) = match mode {
                         LightingMode::Off => ("off".to_string(), p.text_faint),
                         LightingMode::Static(c) => (c.hex(), iced::Color::from_rgb8(c.r, c.g, c.b)),

@@ -24,7 +24,7 @@ use iced_exwlshell::daemon;
 use iced_exwlshell::reexport::{Anchor, BlurOption, KeyboardInteractivity, Layer, LayerSize, NewLayerShellSettings, OutputOption, PixelSize};
 use iced_exwlshell::settings::{LayerShellSettings, Settings, StartMode};
 use iced_exwlshell::to_exwlshell_message;
-use oma_hw::profile::{Config, FanMode, FanOwner, FanTarget};
+use oma_hw::profile::{Config, FanMode, FanOwner, FanTarget, ProfileRole};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -63,6 +63,8 @@ pub struct App {
     pub snapshot: Option<Arc<telemetry::Snapshot>>,
     pub hist: History,
     pub inventory: Option<Arc<oma_hw::SystemInventory>>,
+    /// What this machine has: detection plus knowledge.
+    pub model: Option<Arc<oma_hw::model::HardwareModel>>,
     pub inventory_title: String,
     pub controller_ready: bool,
     pub surfaces: HashMap<Id, Surface>,
@@ -173,7 +175,7 @@ fn load_screen() -> Task<Message> {
 pub enum Message {
     Telemetry(telemetry::Event),
     Ipc(ipc::Command),
-    Inventory(Arc<oma_hw::SystemInventory>),
+    Hardware(Arc<oma_hw::capture::RawInventory>),
     Controller(bool),
     Navigate(Page),
     Cpu(CpuMsg),
@@ -247,6 +249,7 @@ impl App {
             snapshot: None,
             hist: History::default(),
             inventory: None,
+            model: None,
             inventory_title: "detecting hardware…".into(),
             controller_ready: false,
             surfaces: HashMap::new(),
@@ -287,7 +290,7 @@ impl App {
             overlay_h: 0,
             overlay_anchor: Anchor::Right | Anchor::Top,
         };
-        let inv = Task::perform(async { Arc::new(tokio::task::spawn_blocking(oma_hw::detect::inventory).await.expect("inventory")) }, Message::Inventory);
+        let inv = Task::perform(async { Arc::new(oma_hw::capture::gather().await) }, Message::Hardware);
         let ctl = Task::perform(async { oma_hw::helper::Controller::connect().await.has_helper() }, Message::Controller);
         let nvi = Task::perform(async { tokio::task::spawn_blocking(|| oma_hw::nvidia::NvidiaGpu::open(0).and_then(|g| g.info()).ok().map(Arc::new)).await.unwrap_or(None) }, Message::NvidiaInfo);
         let open = if overlay_only { Task::none() } else { Task::done(Message::OpenWindow) };
@@ -380,17 +383,18 @@ impl App {
 
     fn selected_target(&self) -> Option<FanTarget> {
         self.cooling_sel.clone().or_else(|| {
-            let inv = self.inventory.as_ref()?;
-            crate::fans::FanBackend::available(inv, self.snapshot.as_deref()).first().map(|a| a.target.clone())
+            let model = self.model.as_deref()?;
+            crate::fans::FanBackend::available(model, self.snapshot.as_deref()).first().map(|a| a.target.clone())
         })
     }
 
     fn update_cooling(&mut self, m: CoolingMsg) -> Task<Message> {
         let Some(target) = self.selected_target() else { return Task::none() };
-        let default_source = match target {
-            FanTarget::RyujinPump | FanTarget::RyujinExternalFans => oma_hw::profile::TempSource::Coolant,
-            FanTarget::NvidiaFans => oma_hw::profile::TempSource::Gpu,
-            FanTarget::LianLiChannel(_) | FanTarget::SuperIo(_) => oma_hw::profile::TempSource::CpuGpuMax,
+        // A new curve follows what the model says this output cools.
+        let default_source = match self.model.as_ref().and_then(|m| m.fan(target.as_str())).map(|f| f.caps.curve_input) {
+            Some(oma_hw::model::CurveInput::Coolant) => oma_hw::profile::TempSource::Coolant,
+            Some(oma_hw::model::CurveInput::Gpu) => oma_hw::profile::TempSource::Gpu,
+            Some(oma_hw::model::CurveInput::CpuOrGpu) => oma_hw::profile::TempSource::CpuGpuMax,
             _ => oma_hw::profile::TempSource::CpuTctl,
         };
         match m {
@@ -739,8 +743,8 @@ impl App {
             }
             AutomationMsg::Delete(id) => self.config.rules.retain(|r| r.id != id),
             AutomationMsg::Add(kind) => {
-                let gaming = self.config.profiles.iter().find(|p| p.name.eq_ignore_ascii_case("gaming")).map(|p| p.id).unwrap_or(self.config.active_profile);
-                let silent = self.config.profiles.iter().find(|p| p.name.eq_ignore_ascii_case("silent")).map(|p| p.id).unwrap_or(self.config.default_profile);
+                let gaming = self.config.profile_by_role(ProfileRole::Performance).map(|p| p.id).unwrap_or(self.config.active_profile);
+                let silent = self.config.profile_by_role(ProfileRole::Quiet).map(|p| p.id).unwrap_or(self.config.default_profile);
                 let (name, trigger, profile, prio) = match kind {
                     "gamemode" => ("GameMode active", Trigger::GameMode, gaming, 100),
                     "fullscreen" => ("Fullscreen game", Trigger::FullscreenGame, gaming, 50),
@@ -819,7 +823,7 @@ impl App {
             if let Some(n) = name {
                 let id = app.config.active_profile;
                 if let Some(pr) = app.config.profiles.iter_mut().find(|p| p.id == id) {
-                    pr.lighting.zones.insert(n, mode);
+                    pr.lighting.zones.insert(format!("openrgb:{n}"), mode);
                 }
             }
         };
@@ -925,8 +929,8 @@ impl App {
             let cmds = self.fan_engine.evaluate(&Default::default(), &Default::default(), now);
             return self.dispatch_fan_cmds(cmds);
         }
-        let (Some(inv), Some(pr)) = (self.inventory.clone(), self.active_profile().cloned()) else { return Task::none() };
-        let temps = crate::fans::temps_from(snap, &inv.hwmon);
+        let Some(pr) = self.active_profile().cloned() else { return Task::none() };
+        let temps = crate::fans::temps_from(snap);
         // Drive only outputs this machine has; assignments for absent devices stay in the profile.
         let mut cooling = pr.cooling;
         cooling.fans.retain(|f| be.has(&f.target));
@@ -953,7 +957,8 @@ impl App {
 
     /// The one way out: hand every fan back to firmware and persist the
     /// config, then exit.
-    fn shutdown(&mut self) -> Task<Message> {
+    fn shutdown(&mut self, reason: &str) -> Task<Message> {
+        tracing::info!(reason, "shutting down: releasing fans and saving the config");
         let cmds = self.fan_engine.release_all(std::time::Instant::now());
         crate::config_store::flush();
         let Some(be) = self.fan_backend.clone().filter(|_| !cmds.is_empty()) else { return iced::exit() };
@@ -1062,7 +1067,7 @@ impl App {
             self.overlay_phase = None;
         }
         if kind == Surface::Window && !self.overlay_only && self.overlay_id().is_none() && !self.lives_in_tray() {
-            return self.shutdown();
+            return self.shutdown("the main window closed and no tray is showing OmaAsus");
         }
         Task::none()
     }
@@ -1132,11 +1137,27 @@ impl App {
                 let auto = if self.snapshot.as_ref().map(|s| s.seq % 2 == 0).unwrap_or(false) { self.auto_evaluate() } else { Task::none() };
                 Task::batch([task, auto])
             }
-            Message::Inventory(inv) => {
+            Message::Hardware(raw) => {
+                let (quirks, problem) = crate::config_store::load_quirks();
+                if let Some(e) = problem {
+                    self.toast = Some((e, false));
+                }
+                let model = Arc::new(oma_hw::model::HardwareModel::build(&raw, &quirks));
+                let inv = Arc::new(raw.system.clone());
                 self.inventory_title = format!("{} · {}", inv.dmi.board_name, inv.cpu.model.split(" Processor").next().unwrap_or(&inv.cpu.model));
                 self.inventory = Some(inv.clone());
+                if self.config.profiles.is_empty() {
+                    // First run: profiles for what this machine has.
+                    let fresh = Config::generated(&model);
+                    self.config.profiles = fresh.profiles;
+                    self.config.rules = fresh.rules;
+                    self.config.active_profile = fresh.active_profile;
+                    self.config.default_profile = fresh.default_profile;
+                    crate::config_store::save(&self.config);
+                }
+                self.model = Some(model.clone());
                 let cc = self.cc.clone();
-                Task::perform(async move { Arc::new(crate::fans::FanBackend::build(inv, cc).await) }, Message::FanBackend)
+                Task::perform(async move { Arc::new(crate::fans::FanBackend::build(model, inv, cc).await) }, Message::FanBackend)
             }
             Message::Controller(ok) => {
                 self.controller_ready = ok;
@@ -1273,10 +1294,11 @@ impl App {
                     // Re-send the new profile's outputs; ones it drops are released by the engine.
                     self.fan_engine.invalidate();
                     let inv = self.inventory.clone();
+                    let model = self.model.clone();
                     let cc = (self.effective_fan_owner() == FanOwner::CoolerControl).then(|| (self.cc_client(), pr.cc_mode.clone()));
                     return Task::perform(
                         async move {
-                            let r = crate::apply::apply_profile(pr, inv).await;
+                            let r = crate::apply::apply_profile(pr, inv, model).await;
                             if let Some((cc, Some(mode))) = cc {
                                 if let Err(e) = cc.activate_mode(&mode).await {
                                     return Err(format!("{}; CoolerControl: {e}", r.unwrap_or_else(|e| e)));
@@ -1314,7 +1336,7 @@ impl App {
                     Some(p) => Task::done(Message::ApplyProfile(p.id)),
                     None => Task::none(),
                 },
-                ipc::Command::Duplicate => self.shutdown(),
+                ipc::Command::Duplicate => self.shutdown("another OmaAsus is already running"),
                 ipc::Command::Page(name) => match Page::ALL.iter().find(|p| p.label().eq_ignore_ascii_case(&name) || format!("{p:?}").eq_ignore_ascii_case(&name)) {
                     Some(p) => Task::done(Message::Navigate(*p)),
                     None => Task::none(),
@@ -1356,7 +1378,7 @@ impl App {
                     Some(h) => Task::future(async move { h.shutdown().await }).discard(),
                     None => Task::none(),
                 };
-                Task::batch([closes, bye]).chain(self.shutdown())
+                Task::batch([closes, bye]).chain(self.shutdown("quit requested"))
             }
             Message::OpenWindow => {
                 if self.window_id().is_some() {
@@ -1555,11 +1577,12 @@ impl App {
         };
         let links = row(pages.iter().map(|pg| nav_link(*pg, *pg == self.page).into())).spacing(space::XS).align_y(iced::Alignment::Center);
         let brand = row![widgets::pixel::oma_mark(p, 26.0), iced::widget::text("omaasus").size(size::SMALL).font(theme::font::MONO_MEDIUM).color(p.text)].spacing(space::SM).align_y(iced::Alignment::Center);
-        let gaming_id = self.config.profiles.iter().find(|x| x.name.eq_ignore_ascii_case("gaming")).map(|x| x.id);
+        // The header's quick switch goes to this machine's performance profile.
+        let performance = self.config.profile_by_role(ProfileRole::Performance);
         let header_right = row![
             widgets::pill(p, &self.theme_name, p.text_secondary),
             widgets::pill(p, if self.controller_ready { "helper" } else { "read-only" }, if self.controller_ready { p.brand } else { p.yellow }),
-            widgets::btn(p, "Gaming", widgets::ButtonKind::Primary, gaming_id.map(Message::ApplyProfile)),
+            widgets::btn(p, performance.map(|x| x.name.clone()).unwrap_or_else(|| "Performance".into()), widgets::ButtonKind::Primary, performance.map(|x| Message::ApplyProfile(x.id))),
         ]
         .spacing(space::SM)
         .align_y(iced::Alignment::Center);

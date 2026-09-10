@@ -1,23 +1,26 @@
 //! Profile application engine: turns a `Profile` into concrete writes via the
 //! helper (or direct writes when root) and the daemons.
 
+use oma_hw::asusd::{PlatformProfile, PlatformProxy};
 use oma_hw::helper::Controller;
-use oma_hw::profile::Profile;
+use oma_hw::model::{HardwareModel, Owner};
+use oma_hw::profile::{match_power_mode, Profile};
 use oma_hw::SystemInventory;
 use std::sync::Arc;
 
-pub async fn apply_profile(p: Profile, inv: Option<Arc<SystemInventory>>) -> Result<String, String> {
+pub async fn apply_profile(p: Profile, inv: Option<Arc<SystemInventory>>, model: Option<Arc<HardwareModel>>) -> Result<String, String> {
     let ctl = Controller::connect().await;
     let mut done: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
 
-    // power-profiles-daemon (no privileges needed).
-    if let Some(ppd) = &p.cpu.ppd_profile {
-        if let Ok(conn) = zbus::Connection::system().await {
-            match oma_hw::ppd::set_active(&conn, ppd).await {
-                Ok(()) => done.push(format!("power profile {ppd}")),
-                Err(e) => failed.push(format!("power profile: {e}")),
-            }
+    // Power mode, through whichever component owns it on this machine.
+    if let (Some(wanted), Some(m)) = (&p.cpu.power_mode, &model) {
+        match match_power_mode(wanted, &m.controls.power_modes) {
+            Some(mode) => match set_power_mode(m.controls.power_owner, mode, &ctl).await {
+                Ok(()) => done.push(format!("power mode {mode}")),
+                Err(e) => failed.push(format!("power mode: {e}")),
+            },
+            None => failed.push(format!("power mode {wanted}: this machine has no such mode")),
         }
     }
 
@@ -44,14 +47,7 @@ pub async fn apply_profile(p: Profile, inv: Option<Arc<SystemInventory>>) -> Res
     // NVIDIA.
     if let Some(nv) = &p.gpu.nvidia {
         if oma_hw::nvidia::available() {
-            let mut nv = nv.clone();
-            if !p.cooling.gpu_zero_rpm && nv.fan_percent.is_none() {
-                // keep automatic policy; zero-rpm is firmware default
-            }
-            if let Some(w) = nv.power_limit_w {
-                nv.power_limit_w = Some(w);
-            }
-            match ctl.nvidia_apply(0, &nv).await {
+            match ctl.nvidia_apply(0, nv).await {
                 Ok(errs) if errs.is_empty() => done.push("GPU".into()),
                 Ok(errs) => failed.push(format!("GPU: {}", errs.iter().map(|(s, e)| format!("{s} ({e})")).collect::<Vec<_>>().join(", "))),
                 Err(e) => failed.push(format!("GPU: {e}")),
@@ -68,7 +64,7 @@ pub async fn apply_profile(p: Profile, inv: Option<Arc<SystemInventory>>) -> Res
         }
     }
 
-    // Cooling is handled by the fan engine (next stage); record intent here.
+    // Cooling is handled by the fan engine; record intent here.
     if !p.cooling.fans.is_empty() {
         done.push(format!("{} fan targets", p.cooling.fans.len()));
     }
@@ -79,5 +75,19 @@ pub async fn apply_profile(p: Profile, inv: Option<Arc<SystemInventory>>) -> Res
         Err(format!("{} failed: {}", p.name, failed.join("; ")))
     } else {
         Err(format!("{} partly applied ({}); failed: {}", p.name, done.join(", "), failed.join("; ")))
+    }
+}
+
+async fn set_power_mode(owner: Option<Owner>, mode: &str, ctl: &Controller) -> Result<(), String> {
+    let system = || async { zbus::Connection::system().await.map_err(|e| e.to_string()) };
+    match owner {
+        Some(Owner::Asusd) => {
+            let profile = (0..=4).map(PlatformProfile::from_u32).find(|p| p.label().eq_ignore_ascii_case(mode)).ok_or_else(|| format!("asusd has no {mode} mode"))?;
+            let c = system().await?;
+            PlatformProxy::new(&c).await.map_err(|e| e.to_string())?.set_platform_profile(profile as u32).await.map_err(|e| e.to_string())
+        }
+        Some(Owner::PowerProfilesDaemon) => oma_hw::ppd::set_active(&system().await?, mode).await.map_err(|e| e.to_string()),
+        Some(Owner::Sysfs) => ctl.write("/sys/firmware/acpi/platform_profile", mode).await.map_err(|e| e.to_string()),
+        _ => Err("nothing controls power modes here".into()),
     }
 }

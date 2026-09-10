@@ -258,7 +258,7 @@ mod tests {
     fn ramp_limits_change() {
         let mut e = FanEngine::new(Duration::from_secs(1));
         let mut cooling = CoolingSettings::default();
-        cooling.set(FanTarget::RyujinExternalFans, FanMode::Curve(FanCurve { points: vec![(20.0, 0.0), (60.0, 100.0)], ramp_s: 10.0, hysteresis_c: 0.0, min_duty: 0.0, source: TempSource::Coolant }));
+        cooling.set(FanTarget::new("ryujin:radiator"), FanMode::Curve(FanCurve { points: vec![(20.0, 0.0), (60.0, 100.0)], ramp_s: 10.0, hysteresis_c: 0.0, min_duty: 0.0, source: TempSource::Coolant }));
         let now = Instant::now();
         let t = Temps { coolant: Some(20.0), ..Default::default() };
         let c = e.evaluate(&cooling, &t, now);
@@ -272,18 +272,18 @@ mod tests {
     fn dropped_output_is_released_until_confirmed() {
         let mut e = FanEngine::new(Duration::from_secs(1));
         let now = Instant::now();
-        let cmds = e.evaluate(&fixed(FanTarget::SuperIo(2), 40.0), &Temps::default(), now);
+        let cmds = e.evaluate(&fixed(FanTarget::new("superio:pwm2"), 40.0), &Temps::default(), now);
         e.report(&cmds[0], true, now);
 
         // The next profile no longer drives the output.
         let cmds = e.evaluate(&CoolingSettings::default(), &Temps::default(), now);
-        assert_eq!(cmds, vec![Command::release(&FanTarget::SuperIo(2))]);
+        assert_eq!(cmds, vec![Command::release(&FanTarget::new("superio:pwm2"))]);
         assert!(!e.is_idle());
 
         // Unconfirmed: retried after the pause, not before.
         assert!(e.evaluate(&CoolingSettings::default(), &Temps::default(), now + Duration::from_secs(1)).is_empty());
         let retry = e.evaluate(&CoolingSettings::default(), &Temps::default(), now + RETRY);
-        assert_eq!(retry, vec![Command::release(&FanTarget::SuperIo(2))]);
+        assert_eq!(retry, vec![Command::release(&FanTarget::new("superio:pwm2"))]);
         e.report(&retry[0], true, now + RETRY);
         assert!(e.is_idle());
     }
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn failed_write_is_resent_after_backoff() {
         let mut e = FanEngine::new(Duration::from_secs(1));
-        let cooling = fixed(FanTarget::SuperIo(1), 50.0);
+        let cooling = fixed(FanTarget::new("superio:pwm1"), 50.0);
         let now = Instant::now();
         let cmds = e.evaluate(&cooling, &Temps::default(), now);
         e.report(&cmds[0], false, now);
@@ -303,20 +303,20 @@ mod tests {
     #[test]
     fn release_all_hands_back_everything() {
         let mut e = FanEngine::new(Duration::from_secs(1));
-        let mut cooling = fixed(FanTarget::SuperIo(1), 50.0);
-        cooling.set(FanTarget::NvidiaFans, FanMode::Fixed(70.0));
+        let mut cooling = fixed(FanTarget::new("superio:pwm1"), 50.0);
+        cooling.set(FanTarget::new("nvidia:0:fans"), FanMode::Fixed(70.0));
         let now = Instant::now();
         e.evaluate(&cooling, &Temps::default(), now);
         let released = e.release_all(now);
         assert_eq!(released.len(), 2);
         assert!(released.iter().all(Command::is_release));
-        assert!(e.current(&FanTarget::SuperIo(1)).is_none());
+        assert!(e.current(&FanTarget::new("superio:pwm1")).is_none());
     }
 
     #[test]
     fn invalidate_resends_without_releasing() {
         let mut e = FanEngine::new(Duration::from_secs(1));
-        let cooling = fixed(FanTarget::SuperIo(1), 50.0);
+        let cooling = fixed(FanTarget::new("superio:pwm1"), 50.0);
         let now = Instant::now();
         e.evaluate(&cooling, &Temps::default(), now);
         assert!(e.evaluate(&cooling, &Temps::default(), now).is_empty());
@@ -329,15 +329,15 @@ mod tests {
     #[test]
     fn floor_is_enforced() {
         let mut e = FanEngine::new(Duration::from_secs(1));
-        e.set_floors(BTreeMap::from([(FanTarget::RyujinPump, 60.0)]));
+        e.set_floors(BTreeMap::from([(FanTarget::new("ryujin:pump"), 60.0)]));
         let now = Instant::now();
-        let cmds = e.evaluate(&fixed(FanTarget::RyujinPump, 0.0), &Temps::default(), now);
+        let cmds = e.evaluate(&fixed(FanTarget::new("ryujin:pump"), 0.0), &Temps::default(), now);
         assert_eq!(cmds[0].duty, Some(60.0));
 
         let mut e = FanEngine::new(Duration::from_secs(1));
-        e.set_floors(BTreeMap::from([(FanTarget::RyujinPump, 60.0)]));
+        e.set_floors(BTreeMap::from([(FanTarget::new("ryujin:pump"), 60.0)]));
         let mut cooling = CoolingSettings::default();
-        cooling.set(FanTarget::RyujinPump, FanMode::Curve(FanCurve { points: vec![(20.0, 0.0), (60.0, 100.0)], ramp_s: 0.0, hysteresis_c: 0.0, min_duty: 0.0, source: TempSource::Coolant }));
+        cooling.set(FanTarget::new("ryujin:pump"), FanMode::Curve(FanCurve { points: vec![(20.0, 0.0), (60.0, 100.0)], ramp_s: 0.0, hysteresis_c: 0.0, min_duty: 0.0, source: TempSource::Coolant }));
         let cmds = e.evaluate(&cooling, &Temps { coolant: Some(20.0), ..Default::default() }, now);
         assert_eq!(cmds[0].duty, Some(60.0));
     }

@@ -34,11 +34,25 @@ pub fn load() -> (Config, Option<String>) {
     let p = path();
     match std::fs::read_to_string(&p) {
         Ok(s) => match toml::from_str::<Config>(&s) {
-            Ok(c) => (c, None),
+            Ok(mut c) => {
+                let from = c.schema_version;
+                if c.migrate() {
+                    // Keep the file as it was before rewriting it in the new format.
+                    let backup = p.with_file_name(format!("config.v{from}.toml.bak"));
+                    if let Err(e) = std::fs::copy(&p, &backup) {
+                        tracing::error!(error = %e, "cannot back up the config before migrating it; not saving");
+                        READ_ONLY.store(true, Ordering::Relaxed);
+                        return (c, Some(format!("Could not back up {} before updating it, so changes won't be saved", p.display())));
+                    }
+                    tracing::info!(backup = %backup.display(), "config migrated to schema {}", oma_hw::profile::SCHEMA);
+                    write_atomic(&p, &c);
+                }
+                (c, None)
+            }
             Err(e) => {
                 tracing::error!(error = %e, path = %p.display(), "config unreadable");
                 let aside = p.with_file_name(format!("config.toml.broken-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
-                let c = Config::with_builtin_profiles();
+                let c = Config::empty();
                 match std::fs::rename(&p, &aside) {
                     Ok(()) => {
                         write_atomic(&p, &c);
@@ -52,16 +66,32 @@ pub fn load() -> (Config, Option<String>) {
                 }
             }
         },
+        // First run: profiles are generated once the hardware model is known.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let c = Config::with_builtin_profiles();
+            let c = Config::empty();
             write_atomic(&p, &c);
             (c, None)
         }
         Err(e) => {
             tracing::error!(error = %e, path = %p.display(), "cannot read config; saving disabled");
             READ_ONLY.store(true, Ordering::Relaxed);
-            (Config::with_builtin_profiles(), Some(format!("Cannot read {} ({e}); running with defaults and not saving", p.display())))
+            (Config::empty(), Some(format!("Cannot read {} ({e}); running with defaults and not saving", p.display())))
         }
+    }
+}
+
+/// The user's hardware knowledge overrides (`quirks.toml`, next to the config).
+pub fn load_quirks() -> (oma_hw::knowledge::Overrides, Option<String>) {
+    let p = path().with_file_name("quirks.toml");
+    match std::fs::read_to_string(&p) {
+        Ok(text) => match oma_hw::knowledge::Overrides::parse(&text) {
+            Ok(o) => {
+                tracing::info!(path = %p.display(), "using hardware overrides");
+                (o, None)
+            }
+            Err(e) => (Default::default(), Some(format!("{} ignored: {e}", p.display()))),
+        },
+        Err(_) => (Default::default(), None),
     }
 }
 

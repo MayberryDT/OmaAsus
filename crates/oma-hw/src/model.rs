@@ -24,6 +24,41 @@ impl DeviceId {
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DeviceId {
+    /// Reads ids, and the fixed fan names of config v1 as the ids the model
+    /// gives the same outputs.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Id(String),
+            Legacy(Legacy),
+        }
+        #[derive(serde::Deserialize)]
+        enum Legacy {
+            SuperIo(u32),
+            LianLiChannel(u8),
+            CoolerControl { device_uid: String, channel: String },
+        }
+        Ok(DeviceId(match Repr::deserialize(d)? {
+            Repr::Id(s) => match s.as_str() {
+                "RyujinPump" => "ryujin:pump".into(),
+                "RyujinInternalFan" => "ryujin:block-fan".into(),
+                "RyujinExternalFans" => "ryujin:radiator".into(),
+                "NvidiaFans" => "nvidia:0:fans".into(),
+                _ => s,
+            },
+            Repr::Legacy(Legacy::SuperIo(n)) => format!("superio:pwm{n}"),
+            Repr::Legacy(Legacy::LianLiChannel(c)) => format!("lianli:0:ch{c}"),
+            Repr::Legacy(Legacy::CoolerControl { device_uid, channel }) => format!("cc:{device_uid}:{channel}"),
+        }))
+    }
 }
 
 impl fmt::Display for DeviceId {
@@ -97,6 +132,16 @@ pub enum Release {
     SafeFixed(f64),
 }
 
+/// The temperature a new software curve for an output should follow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum CurveInput {
+    Cpu,
+    Gpu,
+    /// The hotter of the two: the usual case-fan driver.
+    CpuOrGpu,
+    Coolant,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FanCaps {
     /// Takes a fixed duty or a software curve.
@@ -108,6 +153,7 @@ pub struct FanCaps {
     pub release: Release,
     /// Speed at 100 %, for showing speed as a share of it.
     pub max_rpm: Option<u32>,
+    pub curve_input: CurveInput,
 }
 
 /// How an output is driven.
@@ -227,6 +273,7 @@ pub struct Note {
 pub struct HardwareModel {
     pub identity: Identity,
     pub platform: Platform,
+    pub cpu: crate::cpu::CpuInfo,
     pub fans: Vec<FanOutput>,
     pub sensors: Vec<Sensor>,
     pub gpus: Vec<Gpu>,
@@ -262,7 +309,7 @@ impl HardwareModel {
             Owner::Firmware
         };
 
-        let mut model = Self { identity, platform: raw.system.platform.clone(), fans, sensors, gpus, lighting, controls, fan_owner, notes };
+        let mut model = Self { identity, platform: raw.system.platform.clone(), cpu: raw.system.cpu.clone(), fans, sensors, gpus, lighting, controls, fan_owner, notes };
         let hidden: BTreeSet<&str> = overrides.hide.iter().map(String::as_str).collect();
         if !hidden.is_empty() {
             model.fans.retain(|f| !hidden.contains(f.id.0.as_str()));
@@ -350,7 +397,14 @@ fn fans(raw: &RawInventory, id: &Identity, o: &Overrides, sensors: &[Sensor], no
                     id: DeviceId(fan_id),
                     label,
                     tach,
-                    caps: FanCaps { duty: false, firmware_curve: Some(CurveSpec { points: curve.points, temp: CurveTemp::Firmware }), min_duty: 0.0, release: Release::Auto, max_rpm: max_rpm.map(|m| m.0) },
+                    caps: FanCaps {
+                        duty: false,
+                        firmware_curve: Some(CurveSpec { points: curve.points, temp: CurveTemp::Firmware }),
+                        min_duty: 0.0,
+                        release: Release::Auto,
+                        max_rpm: max_rpm.map(|m| m.0),
+                        curve_input: if fan == "GPU" { CurveInput::Gpu } else { CurveInput::Cpu },
+                    },
                     backend,
                 });
             }
@@ -362,7 +416,7 @@ fn fans(raw: &RawInventory, id: &Identity, o: &Overrides, sensors: &[Sensor], no
             id: DeviceId(format!("nvidia:{}:fans", g.index)),
             label: format!("{} fans", g.name),
             tach: None,
-            caps: FanCaps { duty: true, firmware_curve: None, min_duty: 0.0, release: Release::Auto, max_rpm: None },
+            caps: FanCaps { duty: true, firmware_curve: None, min_duty: 0.0, release: Release::Auto, max_rpm: None, curve_input: CurveInput::Gpu },
             backend: FanBackend::Nvidia { gpu: g.index, fans: g.num_fans },
         });
     }
@@ -376,7 +430,7 @@ fn fans(raw: &RawInventory, id: &Identity, o: &Overrides, sensors: &[Sensor], no
                 id: DeviceId(format!("lianli:{n}:ch{c}")),
                 label: if hubs.len() > 1 { format!("Lian Li hub {} channel {c}", n + 1) } else { format!("Lian Li channel {c}") },
                 tach: None,
-                caps: FanCaps { duty: true, firmware_curve: None, min_duty: 0.0, release: Release::Auto, max_rpm: None },
+                caps: FanCaps { duty: true, firmware_curve: None, min_duty: 0.0, release: Release::Auto, max_rpm: None, curve_input: CurveInput::CpuOrGpu },
                 backend: FanBackend::LianLi { path: hub.path.clone(), channel: c },
             });
         }
@@ -413,7 +467,7 @@ fn pwm_output(d: &HwmonDevice, p: &crate::hwmon::PwmChannel, id: &Identity, sens
         id: DeviceId(out_id),
         label,
         tach: d.fans.iter().find(|f| f.index == p.index).and_then(|f| tach(sensors, &d.name, &f.label)),
-        caps: FanCaps { duty: true, firmware_curve, min_duty: quirk.map(|q| q.min_duty).unwrap_or(0.0), release, max_rpm: None },
+        caps: FanCaps { duty: true, firmware_curve, min_duty: quirk.map(|q| q.min_duty).unwrap_or(0.0), release, max_rpm: None, curve_input: quirk.map(|q| q.curve_input).unwrap_or(CurveInput::CpuOrGpu) },
         backend: FanBackend::Hwmon { dir: d.path.clone(), index: p.index },
     }
 }
@@ -524,4 +578,29 @@ fn controls(raw: &RawInventory) -> PlatformControls {
         c.gpu_owner = Some(Owner::Supergfxd);
     }
     c
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(serde::Deserialize)]
+    struct Assignment {
+        target: DeviceId,
+    }
+
+    fn read(toml_text: &str) -> String {
+        toml::from_str::<Assignment>(toml_text).expect(toml_text).target.0
+    }
+
+    #[test]
+    fn v1_fan_names_read_as_model_ids() {
+        assert_eq!(read(r#"target = "asusd:fan:CPU""#), "asusd:fan:CPU");
+        assert_eq!(read(r#"target = "RyujinPump""#), "ryujin:pump");
+        assert_eq!(read(r#"target = "RyujinExternalFans""#), "ryujin:radiator");
+        assert_eq!(read(r#"target = "NvidiaFans""#), "nvidia:0:fans");
+        assert_eq!(read("[target]\nSuperIo = 3"), "superio:pwm3");
+        assert_eq!(read("[target]\nLianLiChannel = 2"), "lianli:0:ch2");
+        assert_eq!(read("[target.CoolerControl]\ndevice_uid = \"abc\"\nchannel = \"fan1\""), "cc:abc:fan1");
+    }
 }

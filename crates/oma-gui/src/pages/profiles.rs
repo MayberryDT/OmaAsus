@@ -102,7 +102,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 if n.persistence == Some(true) { v.push("persistence".into()); }
                 if v.is_empty() { "unchanged".into() } else { v.join(" · ") }
             }).unwrap_or_else(|| "unchanged".into());
-            let fans = pr.cooling.fans.iter().map(|f| format!("{}: {}", f.target.label(), match &f.mode { FanMode::Auto => "auto".into(), FanMode::Fixed(d) => format!("{d:.0}%"), FanMode::Curve(c) => format!("curve on {}", c.source.label()), FanMode::HardwareCurve(c) => format!("hw curve on {}", c.source.label()) })).collect::<Vec<_>>();
+            let fans = pr.cooling.fans.iter().map(|f| format!("{}: {}", app.model.as_ref().and_then(|m| m.fan(f.target.as_str())).map(|o| o.label.clone()).unwrap_or_else(|| format!("{} (not on this machine)", f.target)), match &f.mode { FanMode::Auto => "auto".into(), FanMode::Fixed(d) => format!("{d:.0}%"), FanMode::Curve(c) => format!("curve on {}", c.source.label()), FanMode::HardwareCurve(c) => format!("hw curve on {}", c.source.label()) })).collect::<Vec<_>>();
             let fans_el: Element<Message> = if fans.is_empty() { widgets::dim(p, "no fan overrides") } else { Column::with_children(fans.into_iter().map(|s| widgets::mono(p, s, size::SMALL)).collect::<Vec<_>>()).spacing(2.0).into() };
             let actions = row![
                 widgets::btn(p, "Activate", widgets::ButtonKind::Primary, Some(Message::Profiles(ProfilesMsg::Apply(pr.id)))),
@@ -121,7 +121,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     accents,
                     widgets::rule(p),
                     widgets::eyebrow(p, "What this profile changes"),
-                    detail("Power profile", pr.cpu.ppd_profile.clone().unwrap_or_else(|| "unchanged".into())),
+                    detail("Power mode", pr.cpu.power_mode.clone().unwrap_or_else(|| "unchanged".into())),
                     detail("CPU", cpu),
                     detail("GPU", gpu),
                     detail("CoolerControl mode", pr.cc_mode.clone().map(|m| app.cc_modes.iter().find(|x| x.uid == m).map(|x| x.name.clone()).unwrap_or(m)).unwrap_or_else(|| "none".into())),

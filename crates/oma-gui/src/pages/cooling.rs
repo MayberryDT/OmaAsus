@@ -27,10 +27,10 @@ pub enum CoolingMsg {
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let p = app.palette;
-    let Some(inv) = app.inventory.as_ref() else { return widgets::dim(p, "Detecting cooling hardware…") };
+    let (Some(inv), Some(model)) = (app.inventory.as_ref(), app.model.as_deref()) else { return widgets::dim(p, "Detecting cooling hardware…") };
     let snap = app.snapshot.as_ref();
     let snap_ref: Option<&crate::telemetry::Snapshot> = snap.map(|s| &**s);
-    let available = crate::fans::FanBackend::available(inv, snap_ref);
+    let available = crate::fans::FanBackend::available(model, snap_ref);
     let profile = app.active_profile();
     let owner_effective = app.effective_fan_owner();
 
@@ -106,16 +106,22 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 FanMode::Curve(_) => "curve",
                 FanMode::HardwareCurve(_) => "hw",
             };
-            let hw_ok = matches!(target, FanTarget::SuperIo(_));
-            let mut kinds = vec![("Auto", "auto"), ("Fixed", "fixed"), ("Curve", "curve")];
-            if hw_ok {
+            // Only the modes this output supports.
+            let caps = available.iter().find(|a| a.target == target).map(|a| a.caps.clone());
+            let takes_duty = caps.as_ref().is_some_and(|c| c.duty);
+            let mut kinds = vec![("Auto", "auto")];
+            if takes_duty {
+                kinds.extend([("Fixed", "fixed"), ("Curve", "curve")]);
+            }
+            if takes_duty && caps.as_ref().is_some_and(|c| c.firmware_curve.is_some()) {
                 kinds.push(("Hardware curve", "hw"));
             }
             let kind_row = Row::with_children(kinds.into_iter().map(|(l, k)| widgets::btn(p, l, if k == kind { widgets::ButtonKind::Primary } else { widgets::ButtonKind::Ghost }, Some(Message::Cooling(CoolingMsg::Mode(target.clone(), k))))).collect::<Vec<_>>()).spacing(space::SM).wrap();
             let live_duty = app.fan_engine_duty(&target);
             let floor = app.fan_engine.floor(&target);
             let body: Element<Message> = match mode {
-                FanMode::Auto => widgets::dim(p, "Firmware / driver default behaviour. Pick Fixed or Curve to take control.").into(),
+                FanMode::Auto if takes_duty => widgets::dim(p, "Firmware / driver default behaviour. Pick Fixed or Curve to take control.").into(),
+                FanMode::Auto => widgets::dim(p, "Runs the firmware's curve for the current power mode. Editing firmware curves from OmaAsus is coming next.").into(),
                 FanMode::Fixed(d) => column![
                     row![widgets::eyebrow(p, "Duty"), widgets::hfill(), widgets::mono(p, format!("{d:.0}%"), size::SMALL)],
                     slider(floor..=100.0, d.max(floor), |v| Message::Cooling(CoolingMsg::Fixed(v))).step(1.0).style(slider_style(p)),
@@ -123,7 +129,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .spacing(space::SM)
                 .into(),
                 FanMode::Curve(c) | FanMode::HardwareCurve(c) => {
-                    let temps = snap.map(|s| crate::fans::temps_from(s, &inv.hwmon));
+                    let temps = snap.map(|s| crate::fans::temps_from(s));
                     let now_t = temps.as_ref().and_then(|t| t.resolve(&c.source));
                     let live = now_t.map(|t| (t, live_duty.unwrap_or_else(|| c.duty_at(t))));
                     let mut sources = vec![TempSource::CpuTctl, TempSource::Gpu, TempSource::CpuGpuMax, TempSource::Coolant, TempSource::Vrm, TempSource::Motherboard];
@@ -170,7 +176,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     .into()
                 }
             };
-            let name = available.iter().find(|a| a.target == target).map(|a| a.label.clone()).unwrap_or_else(|| target.label());
+            let name = available.iter().find(|a| a.target == target).map(|a| a.label.clone()).unwrap_or_else(|| target.to_string());
             widgets::card(
                 p,
                 column![
