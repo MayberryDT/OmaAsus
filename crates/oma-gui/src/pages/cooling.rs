@@ -113,11 +113,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
             }
             let kind_row = Row::with_children(kinds.into_iter().map(|(l, k)| widgets::btn(p, l, if k == kind { widgets::ButtonKind::Primary } else { widgets::ButtonKind::Ghost }, Some(Message::Cooling(CoolingMsg::Mode(target.clone(), k))))).collect::<Vec<_>>()).spacing(space::SM).wrap();
             let live_duty = app.fan_engine_duty(&target);
+            let floor = app.fan_engine.floor(&target);
             let body: Element<Message> = match mode {
                 FanMode::Auto => widgets::dim(p, "Firmware / driver default behaviour. Pick Fixed or Curve to take control.").into(),
                 FanMode::Fixed(d) => column![
                     row![widgets::eyebrow(p, "Duty"), widgets::hfill(), widgets::mono(p, format!("{d:.0}%"), size::SMALL)],
-                    slider(0.0..=100.0, *d, |v| Message::Cooling(CoolingMsg::Fixed(v))).step(1.0).style(slider_style(p)),
+                    slider(floor..=100.0, d.max(floor), |v| Message::Cooling(CoolingMsg::Fixed(v))).step(1.0).style(slider_style(p)),
                 ]
                 .spacing(space::SM)
                 .into(),
@@ -148,7 +149,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                         widgets::eyebrow(p, "Temperature source"),
                         src_row,
                         row![
-                            column![row![widgets::eyebrow(p, "Minimum duty"), widgets::hfill(), widgets::mono(p, format!("{:.0}%", c.min_duty), size::SMALL)], slider(0.0..=100.0, c.min_duty, |v| Message::Cooling(CoolingMsg::MinDuty(v))).step(1.0).style(slider_style(p))].spacing(space::XS).width(Length::Fill),
+                            column![row![widgets::eyebrow(p, "Minimum duty"), widgets::hfill(), widgets::mono(p, format!("{:.0}%", c.min_duty.max(floor)), size::SMALL)], slider(floor..=100.0, c.min_duty.max(floor), |v| Message::Cooling(CoolingMsg::MinDuty(v))).step(1.0).style(slider_style(p))].spacing(space::XS).width(Length::Fill),
                             column![row![widgets::eyebrow(p, "Ramp (s / full sweep)"), widgets::hfill(), widgets::mono(p, format!("{:.0}s", c.ramp_s), size::SMALL)], slider(0.0..=30.0, c.ramp_s, |v| Message::Cooling(CoolingMsg::Ramp(v))).step(1.0).style(slider_style(p))].spacing(space::XS).width(Length::Fill),
                             column![row![widgets::eyebrow(p, "Hysteresis"), widgets::hfill(), widgets::mono(p, format!("{:.1}°", c.hysteresis_c), size::SMALL)], slider(0.0..=10.0, c.hysteresis_c, |v| Message::Cooling(CoolingMsg::Hysteresis(v))).step(0.5).style(slider_style(p))].spacing(space::XS).width(Length::Fill),
                         ]

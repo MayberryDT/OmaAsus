@@ -143,7 +143,7 @@ pub enum Message {
     Cooling(CoolingMsg),
     CcReady(bool, Vec<oma_hw::coolercontrol::CcMode>),
     FanBackend(Arc<crate::fans::FanBackend>),
-    FanResult(Result<(), String>),
+    FanResult(oma_hw::fanengine::Command, Result<(), String>),
     Lighting(LightingMsg),
     Profiles(ProfilesMsg),
     Automation(AutomationMsg),
@@ -194,7 +194,7 @@ pub fn run(overlay_only: bool) -> Result<(), iced_exwlshell::Error> {
 
 impl App {
     fn boot(overlay_only: bool) -> (Self, Task<Message>) {
-        let config = crate::config_store::load();
+        let (config, config_notice) = crate::config_store::load();
         let (palette, theme_name) = theme::load();
         tracing::info!(theme = %theme_name, "using Omarchy theme");
         let app = Self {
@@ -209,7 +209,7 @@ impl App {
             controller_ready: false,
             surfaces: HashMap::new(),
             overlay_only,
-            toast: None,
+            toast: config_notice.map(|n| (n, false)),
             toast_at: None,
             cpu_edit: oma_hw::cpu::control_state(),
             cpu_synced: false,
@@ -350,8 +350,10 @@ impl App {
             CoolingMsg::Select(t) => self.cooling_sel = Some(t),
             CoolingMsg::Owner(o) => {
                 self.config.fan_owner = o;
-                self.fan_engine.reset();
                 crate::config_store::save(&self.config);
+                // Hand every output back before another owner (or firmware) takes over.
+                let cmds = self.fan_engine.release_all(std::time::Instant::now());
+                return self.dispatch_fan_cmds(cmds);
             }
             CoolingMsg::Mode(t, kind) => {
                 let src = default_source.clone();
@@ -822,26 +824,25 @@ impl App {
 
     /// Run the software fan engine for one telemetry frame.
     fn fan_tick(&mut self, snap: &telemetry::Snapshot) -> Task<Message> {
+        // Commands can only be written once the backend exists; until then the
+        // engine must not advance, or it would record duties that never landed.
+        let Some(be) = self.fan_backend.clone() else { return Task::none() };
+        let now = std::time::Instant::now();
         if self.effective_fan_owner() != FanOwner::OmaAsus {
-            if self.fan_engine.current(&FanTarget::RyujinPump).is_some() || !self.fan_engine_is_idle() {
-                // Owner changed away from us: release everything once.
-                let cmds = self.fan_engine.evaluate(&Default::default(), &Default::default(), std::time::Instant::now());
-                return self.dispatch_fan_cmds(cmds);
+            if self.fan_engine.is_idle() {
+                return Task::none();
             }
-            return Task::none();
+            // Owner changed away from us: release everything, retried until confirmed.
+            let cmds = self.fan_engine.evaluate(&Default::default(), &Default::default(), now);
+            return self.dispatch_fan_cmds(cmds);
         }
         let (Some(inv), Some(pr)) = (self.inventory.clone(), self.active_profile().cloned()) else { return Task::none() };
         let temps = crate::fans::temps_from(snap, &inv.hwmon);
-        let cmds = self.fan_engine.evaluate(&pr.cooling, &temps, std::time::Instant::now());
+        // Drive only outputs this machine has; assignments for absent devices stay in the profile.
+        let mut cooling = pr.cooling;
+        cooling.fans.retain(|f| be.has(&f.target));
+        let cmds = self.fan_engine.evaluate(&cooling, &temps, now);
         self.dispatch_fan_cmds(cmds)
-    }
-
-    fn fan_engine_is_idle(&self) -> bool {
-        // cheap proxy: no known targets are being driven
-        [FanTarget::RyujinPump, FanTarget::RyujinExternalFans, FanTarget::RyujinInternalFan, FanTarget::NvidiaFans, FanTarget::LianLiChannel(1), FanTarget::LianLiChannel(2), FanTarget::LianLiChannel(3), FanTarget::LianLiChannel(4)]
-            .iter()
-            .chain((1..=7).map(|i| FanTarget::SuperIo(i)).collect::<Vec<_>>().iter())
-            .all(|t| self.fan_engine.current(t).is_none())
     }
 
     fn dispatch_fan_cmds(&mut self, cmds: Vec<oma_hw::fanengine::Command>) -> Task<Message> {
@@ -851,8 +852,33 @@ impl App {
         let Some(be) = self.fan_backend.clone() else { return Task::none() };
         Task::batch(cmds.into_iter().map(move |c| {
             let be = be.clone();
-            Task::perform(async move { be.apply(c).await }, Message::FanResult)
+            Task::perform(
+                async move {
+                    let r = be.apply(c.clone()).await;
+                    (c, r)
+                },
+                |(c, r)| Message::FanResult(c, r),
+            )
         }))
+    }
+
+    /// The one way out: hand every fan back to firmware and persist the
+    /// config, then exit.
+    fn shutdown(&mut self) -> Task<Message> {
+        let cmds = self.fan_engine.release_all(std::time::Instant::now());
+        crate::config_store::flush();
+        let Some(be) = self.fan_backend.clone().filter(|_| !cmds.is_empty()) else { return iced::exit() };
+        Task::perform(
+            async move {
+                for c in cmds {
+                    if let Err(e) = be.apply(c.clone()).await {
+                        tracing::warn!(target = ?c.target, error = %e, "could not release fan on exit");
+                    }
+                }
+            },
+            |_| Message::DismissToastNoop,
+        )
+        .chain(iced::exit())
     }
 
 
@@ -916,7 +942,7 @@ impl App {
             self.overlay_phase = None;
         }
         if kind == Surface::Window && !self.overlay_only && self.overlay_id().is_none() && !self.lives_in_tray() {
-            return iced::exit();
+            return self.shutdown();
         }
         Task::none()
     }
@@ -1091,10 +1117,12 @@ impl App {
                 Task::none()
             }
             Message::FanBackend(b) => {
+                self.fan_engine.set_floors(b.floors());
                 self.fan_backend = Some(b);
                 Task::none()
             }
-            Message::FanResult(r) => {
+            Message::FanResult(cmd, r) => {
+                self.fan_engine.report(&cmd, r.is_ok(), std::time::Instant::now());
                 if let Err(e) = r {
                     self.fan_errors += 1;
                     if self.fan_errors <= 3 || self.fan_errors % 60 == 0 {
@@ -1107,7 +1135,8 @@ impl App {
                 if let Some(pr) = self.config.profile(id).cloned() {
                     self.config.active_profile = id;
                     crate::config_store::save(&self.config);
-                    self.fan_engine.reset();
+                    // Re-send the new profile's outputs; ones it drops are released by the engine.
+                    self.fan_engine.invalidate();
                     let inv = self.inventory.clone();
                     let cc = (self.effective_fan_owner() == FanOwner::CoolerControl).then(|| (self.cc_client(), pr.cc_mode.clone()));
                     return Task::perform(
@@ -1150,6 +1179,7 @@ impl App {
                     Some(p) => Task::done(Message::ApplyProfile(p.id)),
                     None => Task::none(),
                 },
+                ipc::Command::Duplicate => self.shutdown(),
                 ipc::Command::Page(name) => match Page::ALL.iter().find(|p| p.label().eq_ignore_ascii_case(&name) || format!("{p:?}").eq_ignore_ascii_case(&name)) {
                     Some(p) => Task::done(Message::Navigate(*p)),
                     None => Task::none(),
@@ -1191,7 +1221,7 @@ impl App {
                     Some(h) => Task::future(async move { h.shutdown().await }).discard(),
                     None => Task::none(),
                 };
-                Task::batch([closes, bye]).chain(iced::exit())
+                Task::batch([closes, bye]).chain(self.shutdown())
             }
             Message::OpenWindow => {
                 if self.window_id().is_some() {

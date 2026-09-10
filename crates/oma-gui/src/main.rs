@@ -44,6 +44,16 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             let overlay_only = args.iter().any(|a| a == "--overlay");
+            let rt = tokio::runtime::Runtime::new()?;
+            if rt.block_on(ipc::running()) {
+                // One fan engine per session: hand the request to the running instance.
+                if !overlay_only {
+                    rt.block_on(ipc::send(&["window".to_string()]))?;
+                }
+                tracing::info!("OmaAsus is already running");
+                return Ok(());
+            }
+            drop(rt);
             app::run(overlay_only).map_err(|e| anyhow::anyhow!("{e}"))
         }
     }

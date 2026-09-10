@@ -17,6 +17,8 @@ pub enum Command {
     Profile(String),
     Page(String),
     Quit,
+    /// Another instance already owns the bus name; this one must exit.
+    Duplicate,
 }
 
 struct Service {
@@ -78,9 +80,15 @@ pub fn stream() -> impl Stream<Item = Command> {
         if let Err(e) = conn.object_server().at(PATH, Service { tx }).await {
             tracing::error!(error = %e, "cannot register IPC object");
         }
-        match conn.request_name(NAME).await {
-            Ok(_) => tracing::info!("IPC ready on {NAME}"),
-            Err(e) => tracing::warn!(error = %e, "another OmaAsus instance owns {NAME}; IPC disabled here"),
+        use zbus::fdo::{RequestNameFlags, RequestNameReply};
+        match conn.request_name_with_flags(NAME, RequestNameFlags::DoNotQueue.into()).await {
+            Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => tracing::info!("IPC ready on {NAME}"),
+            Ok(_) => {
+                // A second fan engine would fight the first over the same outputs.
+                tracing::warn!("another OmaAsus instance owns {NAME}; exiting");
+                let _ = out.send(Command::Duplicate).await;
+            }
+            Err(e) => tracing::warn!(error = %e, "cannot own {NAME}; IPC disabled here"),
         }
         while let Some(cmd) = rx.recv().await {
             if out.send(cmd).await.is_err() {
@@ -91,7 +99,6 @@ pub fn stream() -> impl Stream<Item = Command> {
     })
 }
 
-/// Client side: forward a CLI verb to the running instance.
 /// Is an instance already serving `com.omaasus.App`?
 pub async fn running() -> bool {
     let Ok(conn) = zbus::Connection::session().await else { return false };
@@ -101,6 +108,7 @@ pub async fn running() -> bool {
     }
 }
 
+/// Client side: forward a CLI verb to the running instance.
 pub async fn send(args: &[String]) -> anyhow::Result<()> {
     let conn = zbus::Connection::session().await?;
     let p = AppProxy::new(&conn).await?;

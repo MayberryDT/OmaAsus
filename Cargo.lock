@@ -3461,6 +3461,7 @@ name = "oma-helper"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures-util",
  "hidapi",
  "oma-hw",
  "serde",

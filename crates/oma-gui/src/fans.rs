@@ -8,9 +8,12 @@ use oma_hw::hwmon::{HwmonDevice, PwmChannel, PwmEnable};
 use oma_hw::lianli::LianLiHub;
 use oma_hw::profile::{FanCurve, FanTarget};
 use oma_hw::SystemInventory;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+/// Ryujin pump: never below this duty, since it has no curve of its own once driven.
+const PUMP_MIN_DUTY: f64 = 60.0;
 
 #[derive(Clone)]
 pub struct FanBackend {
@@ -87,10 +90,34 @@ impl FanBackend {
         v
     }
 
+    /// Whether this machine has the output, so absent ones are never driven.
+    pub fn has(&self, target: &FanTarget) -> bool {
+        match target {
+            FanTarget::RyujinPump | FanTarget::RyujinInternalFan | FanTarget::RyujinExternalFans => self.ryujin.is_some(),
+            FanTarget::SuperIo(n) => self.superio.contains_key(n),
+            FanTarget::LianLiChannel(c) => !self.lianli.is_empty() && (1..=4).contains(c),
+            FanTarget::NvidiaFans => self.has_nvidia,
+            FanTarget::CoolerControl { .. } => self.cc.is_some(),
+        }
+    }
+
+    /// Per-output minimum duty the fan engine must respect.
+    pub fn floors(&self) -> BTreeMap<FanTarget, f64> {
+        let mut floors = BTreeMap::new();
+        if self.ryujin.is_some() {
+            floors.insert(FanTarget::RyujinPump, PUMP_MIN_DUTY);
+        }
+        floors
+    }
+
     pub async fn apply(&self, cmd: Command) -> Result<(), String> {
         let now = std::time::Instant::now();
-        if self.quarantine.lock().unwrap().get(&cmd.target).is_some_and(|until| *until > now) {
+        if cmd.is_release() && !self.has(&cmd.target) {
+            // Nothing is attached, so there is nothing to hand back.
             return Ok(());
+        }
+        if self.quarantine.lock().unwrap().get(&cmd.target).is_some_and(|until| *until > now) {
+            return Err(format!("{}: device stalled recently; retrying shortly", cmd.target.label()));
         }
         let target = cmd.target.clone();
         let started = std::time::Instant::now();
