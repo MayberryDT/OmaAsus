@@ -131,7 +131,10 @@ pub async fn apply_profile(p: Profile, cx: Context) -> Report {
             target.governor = info.available_governors.first().cloned().unwrap_or_default();
         }
         if let Some(epp) = &target.epp {
-            if !info.available_epp.is_empty() && !info.available_epp.contains(epp) {
+            // A one-entry list is the governor pinning EPP, not the CPU's choices.
+            if info.available_epp.len() > 1 && !info.available_epp.contains(epp) {
+                // Say so rather than silently writing less than the profile asks for.
+                r.skipped.push(format!("EPP {epp} (this CPU offers {})", info.available_epp.join(" ")));
                 target.epp = None;
             }
         }

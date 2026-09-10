@@ -103,6 +103,21 @@ fn online_cpus() -> Vec<u32> {
     parse_cpu_list(&s)
 }
 
+/// The EPP values the CPU accepts. Under the `performance` governor,
+/// amd-pstate-epp pins EPP and reports only `performance` as available, so a
+/// list read then would make every other preference look unsupported for the
+/// rest of the session. That forced single entry means "unknown": fall back to
+/// the fixed set the EPP drivers define.
+pub fn epp_choices(reported: Vec<String>, governor: Option<&str>) -> Vec<String> {
+    const STANDARD: [&str; 5] = ["default", "performance", "balance_performance", "balance_power", "power"];
+    let forced = governor == Some("performance") && reported.len() == 1 && reported[0] == "performance";
+    if forced {
+        STANDARD.iter().map(|s| s.to_string()).collect()
+    } else {
+        reported
+    }
+}
+
 /// Where boost goes. Per policy when the kernel offers it (amd-pstate on
 /// 6.11+): power-profiles-daemon restores boost per policy when it leaves
 /// power-saver, and those writes fail with EINVAL while the global knob is 0,
@@ -174,7 +189,7 @@ pub fn cpu_info() -> CpuInfo {
         scaling_driver: sysfs::read_string(policy_attr(0, "scaling_driver")),
         amd_pstate_status: sysfs::read_string(Path::new(CPU_ROOT).join("amd_pstate/status")),
         available_governors: split(policy_attr(0, "scaling_available_governors")),
-        available_epp: split(policy_attr(0, "energy_performance_available_preferences")),
+        available_epp: epp_choices(split(policy_attr(0, "energy_performance_available_preferences")), sysfs::read_string(policy_attr(0, "scaling_governor")).as_deref()),
         cpuinfo_min_khz: sysfs::read_u64(policy_attr(0, "cpuinfo_min_freq")).unwrap_or(0),
         cpuinfo_max_khz: sysfs::read_u64(policy_attr(0, "cpuinfo_max_freq")).unwrap_or(0),
         has_boost: sysfs::exists(boost_path()),
@@ -383,6 +398,17 @@ pub fn plan_writes(info: &CpuInfo, target: &CpuControlState) -> Vec<(PathBuf, St
 #[cfg(test)]
 mod boost_tests {
     use super::*;
+
+    #[test]
+    fn forced_single_epp_under_performance_governor_means_unknown() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(epp_choices(v(&["performance"]), Some("performance")).len(), 5);
+        // Any real list, or the same entry under another governor, is taken as reported.
+        assert_eq!(epp_choices(v(&["performance"]), Some("powersave")), v(&["performance"]));
+        let full = v(&["default", "performance", "balance_performance", "balance_power", "power", "custom"]);
+        assert_eq!(epp_choices(full.clone(), Some("performance")), full);
+        assert!(epp_choices(vec![], None).is_empty());
+    }
 
     #[test]
     fn global_knob_only_without_per_policy_boost() {
