@@ -65,6 +65,7 @@ pub struct App {
     pub surfaces: HashMap<Id, Surface>,
     pub overlay_only: bool,
     pub toast: Option<(String, bool)>,
+    pub toast_at: Option<std::time::Instant>,
     pub cpu_edit: oma_hw::cpu::CpuControlState,
     pub cpu_synced: bool,
     pub gpu_edit: oma_hw::nvidia::NvidiaControl,
@@ -184,6 +185,7 @@ impl App {
             surfaces: HashMap::new(),
             overlay_only,
             toast: None,
+            toast_at: None,
             cpu_edit: oma_hw::cpu::control_state(),
             cpu_synced: false,
             gpu_edit: oma_hw::nvidia::NvidiaControl::default(),
@@ -907,6 +909,16 @@ impl App {
             }
             Message::Tick(now) => {
                 self.now = now;
+                // Success toasts fade after a few seconds; errors stay until dismissed.
+                if self.toast.is_some() && self.toast_at.is_none() {
+                    self.toast_at = Some(now);
+                }
+                if let (Some((_, true)), Some(at)) = (&self.toast, self.toast_at) {
+                    if now.duration_since(at) > std::time::Duration::from_secs(6) {
+                        self.toast = None;
+                        self.toast_at = None;
+                    }
+                }
                 widgets::set_phase(now.duration_since(self.t0).as_secs_f32());
                 widgets::set_thermal(self.smooth.heat, self.smooth.load);
                 if let Some(s) = &self.snapshot {
@@ -1004,6 +1016,7 @@ impl App {
                     Ok(s) => (s, true),
                     Err(e) => (e, false),
                 });
+                self.toast_at = Some(std::time::Instant::now());
                 Task::none()
             }
             Message::DismissToast => {
