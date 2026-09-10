@@ -10,11 +10,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
     responsive(move |size| view_inner(app, false, size)).into()
 }
 
-/// Narrow layout for the overlay panel.
-pub fn view_compact(app: &App) -> Element<'_, Message> {
-    responsive(move |size| view_inner(app, true, size)).into()
-}
-
 /// Everything below derives its scale from the real viewport, so the page
 /// composes itself for any window without scrolling.
 fn view_inner(app: &App, compact: bool, size_avail: iced::Size) -> Element<'_, Message> {
@@ -161,7 +156,6 @@ fn view_inner(app: &App, compact: bool, size_avail: iced::Size) -> Element<'_, M
         .map(|s| {
             s.fans
                 .iter()
-                .filter(|f| f.rpm > 0 || f.label.starts_with("Pump") || f.freshness != crate::telemetry::Freshness::Live)
                 .take(list_rows)
                 .map(|f| widgets::fan_row(p, f))
                 .collect()

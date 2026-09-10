@@ -9,6 +9,7 @@ pub mod dashboard;
 pub mod gpu;
 pub mod lighting;
 pub mod profiles;
+pub mod quick;
 pub mod settings;
 
 use serde::{Deserialize, Serialize};

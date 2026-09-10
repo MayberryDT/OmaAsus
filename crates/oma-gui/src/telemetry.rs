@@ -60,6 +60,8 @@ pub struct Snapshot {
     pub cpu: CpuTelemetry,
     pub nvidia: Option<NvidiaTelemetry>,
     pub amd: Option<AmdGpuTelemetry>,
+    /// `amd` comes from an integrated GPU (APU), whose power is the package's.
+    pub amd_integrated: bool,
     /// Board / EC / AIO temperatures (label, °C).
     pub temps: Vec<Reading>,
     pub fans: Vec<FanReading>,
@@ -74,6 +76,31 @@ pub struct Snapshot {
     pub hwmon_temps: std::collections::BTreeMap<(String, String), f64>,
     /// Super I/O tachometers by pwm index (rpm), for the Cooling page.
     pub superio_rpm: std::collections::BTreeMap<u32, u64>,
+}
+
+/// GPU figures for glance views.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpuVitals {
+    pub temp_c: Option<f64>,
+    pub load: Option<f64>,
+    pub power_w: Option<f64>,
+    pub discrete: bool,
+}
+
+impl Snapshot {
+    /// The GPU worth showing: an awake NVIDIA card, else the AMD one.
+    pub fn gpu(&self) -> Option<GpuVitals> {
+        if let Some(n) = &self.nvidia {
+            return Some(GpuVitals { temp_c: n.temp_c.map(f64::from), load: n.util_gpu.map(f64::from), power_w: n.power_w, discrete: true });
+        }
+        self.amd.as_ref().map(|a| GpuVitals { temp_c: a.edge_c.or(a.junction_c), load: a.busy_percent.map(|b| b as f64), power_w: a.power_w, discrete: !self.amd_integrated })
+    }
+
+    /// Package power: RAPL when readable, else an APU's SoC power as its
+    /// integrated GPU reports it.
+    pub fn package_w(&self) -> Option<f64> {
+        self.cpu.package_w.or_else(|| if self.amd_integrated { self.amd.as_ref().and_then(|a| a.power_w) } else { None })
+    }
 }
 
 struct Sampler {
@@ -154,7 +181,9 @@ impl Sampler {
         self.seq += 1;
         let mut s = Snapshot { seq: self.seq, cpu: self.cpu.sample(), ..Default::default() };
         s.nvidia = self.nvidia.as_ref().and_then(|g| g.telemetry().ok());
-        s.amd = self.amd.iter().find(|g| !g.is_integrated).or(self.amd.first()).map(|g| g.telemetry());
+        let amd = self.amd.iter().find(|g| !g.is_integrated).or(self.amd.first());
+        s.amd = amd.map(|g| g.telemetry());
+        s.amd_integrated = amd.is_some_and(|g| g.is_integrated);
         s.cpu_control = oma_hw::cpu::control_state();
         let now = std::time::Instant::now();
         let mut stalled: Vec<String> = Vec::new();
@@ -203,21 +232,27 @@ impl Sampler {
                         if t_dev.elapsed() > STALL {
                             break;
                         }
-                        let rpm = f.read_rpm().unwrap_or(0);
+                        // A failed read is no reading: the fan goes stale, then offline.
+                        let Some(rpm) = f.read_rpm() else { continue };
                         if d.is_super_io() {
                             s.superio_rpm.insert(f.index, rpm);
                         }
                         if d.name == "rog_ryujin" && f.label.starts_with("Pump") {
                             s.pump_rpm = Some(rpm);
                         }
-                        if rpm == 0 && !d.name.starts_with("rog_") {
+                        let key = format!("{}:{}", d.name, f.label);
+                        // 0 rpm is a stopped fan, not a missing one, once the fan is known:
+                        // it has spun before, or the driver names it. Unnamed inputs that
+                        // never spun are unused headers and stay hidden.
+                        let named = f.label != format!("fan{}", f.index);
+                        if rpm == 0 && !named && !self.fans.contains_key(&key) {
                             continue;
                         }
                         if d.name == "rog_ryujin" && rpm == 0 && f.label.starts_with("Controller fan") {
                             continue;
                         }
                         let duty = d.pwms.iter().find(|p| p.index == f.index).map(|p| p.read().value as f64 / 2.55);
-                        pending_fans.push((format!("{}:{}", d.name, f.label), FanReading { label: f.label.clone(), rpm, duty, device: d.friendly_name().to_string(), freshness: Freshness::Live }));
+                        pending_fans.push((key, FanReading { label: f.label.clone(), rpm, duty, device: d.friendly_name().to_string(), freshness: Freshness::Live }));
                     }
                 }
             }

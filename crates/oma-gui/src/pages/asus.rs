@@ -21,6 +21,15 @@ pub enum AsusMsg {
     PptGroup(bool),
     ChargeLimit(f64),
     GfxMode(GfxMode),
+    KbdBrightness(u32),
+}
+
+/// Keyboard backlight through asusd's Aura device.
+#[derive(Debug, Clone)]
+pub struct KbdLight {
+    pub path: String,
+    pub brightness: u32,
+    pub levels: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -32,6 +41,7 @@ pub struct AsusState {
     pub charge_limit: Option<u8>,
     pub attrs: Vec<ArmouryAttr>,
     pub gfx: Option<GfxState>,
+    pub kbd: Option<KbdLight>,
     pub error: Option<String>,
 }
 
@@ -53,6 +63,17 @@ pub async fn load() -> AsusState {
         for a in &objs.armoury_attrs {
             if let Ok(x) = oma_hw::asusd::armoury_attr(&conn, a).await {
                 st.attrs.push(x);
+            }
+        }
+        if let Some(path) = objs.aura_paths.first() {
+            if let Ok(b) = oma_hw::asusd::AuraProxy::builder(&conn).path(path.as_str()) {
+                if let Ok(a) = b.cache_properties(zbus::proxy::CacheProperties::No).build().await {
+                    if let (Ok(brightness), Ok(levels)) = (a.brightness().await, a.supported_brightness().await) {
+                        if !levels.is_empty() {
+                            st.kbd = Some(KbdLight { path: path.clone(), brightness, levels });
+                        }
+                    }
+                }
             }
         }
         st.asusd = Some(objs);

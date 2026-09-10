@@ -44,6 +44,8 @@ pub struct History {
     pub gpu_temp: VecDeque<f32>,
     pub gpu_power: VecDeque<f32>,
     pub coolant: VecDeque<f32>,
+    /// Package power (RAPL, or an APU's SoC power).
+    pub power: VecDeque<f32>,
 }
 
 fn push(v: &mut VecDeque<f32>, x: f32) {
@@ -98,6 +100,15 @@ pub struct App {
     tray_synced: tray::TrayState,
     /// Drop-down animation of the overlay panel.
     overlay_phase: Option<OverlayPhase>,
+    /// power-profiles-daemon, for the panel's power-mode row when asusd isn't the owner.
+    pub ppd: Option<oma_hw::ppd::PpdState>,
+    /// Charge-limit slider position while it is being dragged in the panel.
+    pub quick_charge: Option<f64>,
+    /// Logical height free under the bars on the focused output (Hyprland).
+    screen_h: Option<f32>,
+    /// Current panel surface height and anchor, for resizing it to its content.
+    overlay_h: u32,
+    overlay_anchor: Anchor,
 }
 
 /// The overlay panel slides down from the bar when it opens and folds back up
@@ -129,6 +140,34 @@ fn ease(cur: &mut f32, target: f32, k: f32) {
     *cur += (target - *cur) * k;
 }
 
+fn load_ppd() -> Task<Message> {
+    Task::perform(
+        async {
+            let c = zbus::Connection::system().await.ok()?;
+            oma_hw::ppd::state(&c).await.ok()
+        },
+        Message::PpdLoaded,
+    )
+}
+
+/// Logical height left under the bars on the focused output, from Hyprland.
+fn load_screen() -> Task<Message> {
+    Task::perform(
+        async {
+            let monitors = oma_hw::hypr::request_json("monitors").await.ok()?;
+            let m = monitors.as_array()?.iter().find(|m| m["focused"].as_bool() == Some(true))?;
+            let scale = m["scale"].as_f64().filter(|s| *s > 0.0)?;
+            // Transforms 1, 3, 5 and 7 turn the output by 90°.
+            let rotated = m["transform"].as_i64().is_some_and(|t| t % 2 == 1);
+            let h = m[if rotated { "width" } else { "height" }].as_f64()? / scale;
+            let reserved = m["reserved"].as_array()?;
+            let edge = |i: usize| reserved.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            Some((h - edge(1) - edge(3)) as f32)
+        },
+        Message::ScreenSpace,
+    )
+}
+
 #[to_exwlshell_message(multi)]
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -153,6 +192,9 @@ pub enum Message {
     Tick(std::time::Instant),
     Asus(AsusMsg),
     AsusLoaded(AsusState),
+    Quick(crate::pages::quick::QuickMsg),
+    PpdLoaded(Option<oma_hw::ppd::PpdState>),
+    ScreenSpace(Option<f32>),
     HelperInstalled(Result<String, String>),
     RgbDevices(Result<Vec<oma_hw::rgb::RgbDevice>, String>),
     ApplyProfile(uuid::Uuid),
@@ -239,6 +281,11 @@ impl App {
             tray_hosted: false,
             tray_synced: tray::TrayState::default(),
             overlay_phase: None,
+            ppd: None,
+            quick_charge: None,
+            screen_h: None,
+            overlay_h: 0,
+            overlay_anchor: Anchor::Right | Anchor::Top,
         };
         let inv = Task::perform(async { Arc::new(tokio::task::spawn_blocking(oma_hw::detect::inventory).await.expect("inventory")) }, Message::Inventory);
         let ctl = Task::perform(async { oma_hw::helper::Controller::connect().await.has_helper() }, Message::Controller);
@@ -266,7 +313,7 @@ impl App {
             iced::font::load(theme::font::SANS_BYTES).map(|r| Message::FontLoaded(r.is_ok())),
             iced::font::load(theme::font::MONO_BYTES).map(|r| Message::FontLoaded(r.is_ok())),
         ]);
-        (app, Task::batch([fonts, inv, ctl, nvi, cc, rgb, asus, open]))
+        (app, Task::batch([fonts, inv, ctl, nvi, cc, rgb, asus, load_ppd(), open]))
     }
 
     fn namespace() -> String {
@@ -448,12 +495,54 @@ impl App {
         Task::none()
     }
 
+    fn update_quick(&mut self, m: crate::pages::quick::QuickMsg) -> Task<Message> {
+        use crate::pages::quick::QuickMsg;
+        match m {
+            QuickMsg::OpenPage(pg) => {
+                self.page = pg;
+                Task::batch([Task::done(Message::OpenWindow), self.close_overlay()])
+            }
+            QuickMsg::ChargeDrag(v) => {
+                self.quick_charge = Some(v);
+                Task::none()
+            }
+            QuickMsg::ChargeCommit => match self.quick_charge.take() {
+                Some(v) => {
+                    self.asus.charge_limit = Some(v as u8);
+                    self.update_asus(AsusMsg::ChargeLimit(v))
+                }
+                None => Task::none(),
+            },
+            QuickMsg::PowerProfile(name) => Task::perform(
+                async move {
+                    let c = zbus::Connection::system().await.map_err(|e| e.to_string())?;
+                    oma_hw::ppd::set_active(&c, &name).await.map_err(|e| e.to_string())?;
+                    Ok(format!("Power profile: {name}"))
+                },
+                Message::Applied,
+            )
+            .chain(load_ppd()),
+            QuickMsg::KbdBrightness(v) => self.update_asus(AsusMsg::KbdBrightness(v)),
+        }
+    }
+
     fn update_asus(&mut self, m: AsusMsg) -> Task<Message> {
         use oma_hw::asusd::PlatformProxy;
         let reload = || Task::perform(crate::pages::asus::load(), Message::AsusLoaded);
         let run = |f: std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>| Task::perform(f, Message::Applied).chain(Task::perform(crate::pages::asus::load(), Message::AsusLoaded));
         match m {
             AsusMsg::Refresh => reload(),
+            AsusMsg::KbdBrightness(v) => {
+                let Some(path) = self.asus.kbd.as_ref().map(|k| k.path.clone()) else { return Task::none() };
+                if let Some(k) = &mut self.asus.kbd {
+                    k.brightness = v;
+                }
+                run(Box::pin(async move {
+                    let c = zbus::Connection::system().await.map_err(|e| e.to_string())?;
+                    oma_hw::asusd::AuraProxy::builder(&c).path(path.as_str()).map_err(|e| e.to_string())?.build().await.map_err(|e| e.to_string())?.set_brightness(v).await.map_err(|e| e.to_string())?;
+                    Ok(format!("Keyboard brightness {v}"))
+                }))
+            }
             AsusMsg::Profile(pp) => run(Box::pin(async move {
                 let c = zbus::Connection::system().await.map_err(|e| e.to_string())?;
                 PlatformProxy::new(&c).await.map_err(|e| e.to_string())?.set_platform_profile(pp as u32).await.map_err(|e| e.to_string())?;
@@ -891,16 +980,19 @@ impl App {
     }
 
     fn open_overlay(&mut self) -> Task<Message> {
-        let o = &self.config.overlay;
-        let anchor = match (o.anchor.as_str(), o.height == 0) {
-            ("left", true) => Anchor::Left | Anchor::Top | Anchor::Bottom,
-            ("left", false) => Anchor::Left | Anchor::Top,
-            ("center", _) => Anchor::Top,
-            (_, true) => Anchor::Right | Anchor::Top | Anchor::Bottom,
-            (_, false) => Anchor::Right | Anchor::Top,
+        let anchor = match self.config.overlay.anchor.as_str() {
+            "left" => Anchor::Left | Anchor::Top,
+            "center" => Anchor::Top,
+            _ => Anchor::Right | Anchor::Top,
         };
+        // Sized to its content; `fit_overlay` follows the content afterwards.
+        let (w, max_h) = self.overlay_bounds();
+        let h = crate::pages::quick::layout(self, w as f32, max_h).1 as u32;
+        self.overlay_anchor = anchor;
+        self.overlay_h = h;
+        let o = &self.config.overlay;
         let (id, task) = Message::layershell_open(NewLayerShellSettings {
-            size: if o.height == 0 { LayerSize::fill_height(o.width.max(1)) } else { LayerSize::px(o.width.max(1), o.height.max(1)) },
+            size: LayerSize::px(w, h.max(1)),
             layer: Layer::Overlay,
             anchor,
             margin: Some((o.margin as i32, o.margin as i32, o.margin as i32, o.margin as i32)),
@@ -913,7 +1005,35 @@ impl App {
         });
         self.surfaces.insert(id, Surface::Overlay);
         self.overlay_phase = Some(OverlayPhase::Opening(std::time::Instant::now()));
-        task
+        // Fresh platform state for the controls, and the space under the bar.
+        Task::batch([task, Task::perform(crate::pages::asus::load(), Message::AsusLoaded), load_ppd(), load_screen()])
+    }
+
+    /// Pages this machine has; the ASUS page only with asusd, supergfxd or an ASUS laptop.
+    pub fn visible_pages(&self) -> Vec<Page> {
+        let show_asus = self.asus.asusd.is_some() || self.asus.gfx.is_some() || self.inventory.as_ref().is_some_and(|i| i.platform == oma_hw::Platform::AsusLaptop);
+        Page::ALL.iter().copied().filter(|pg| *pg != Page::Asus || show_asus).collect()
+    }
+
+    /// Panel width and the most height it may take: the space under the bar
+    /// less margins, capped by the configured maximum (0 = no cap).
+    fn overlay_bounds(&self) -> (u32, f32) {
+        let o = &self.config.overlay;
+        let free = self.screen_h.unwrap_or(900.0) - 2.0 * o.margin as f32;
+        let max_h = if o.height > 0 { free.min(o.height as f32) } else { free };
+        (o.width.clamp(360, 640), max_h.max(240.0))
+    }
+
+    /// Resize the panel when its content changed height.
+    fn fit_overlay(&mut self) -> Task<Message> {
+        let Some(id) = self.overlay_id() else { return Task::none() };
+        let (w, max_h) = self.overlay_bounds();
+        let h = crate::pages::quick::layout(self, w as f32, max_h).1 as u32;
+        if h == self.overlay_h {
+            return Task::none();
+        }
+        self.overlay_h = h;
+        Task::done(Message::LayoutChange { id, anchor: self.overlay_anchor, size: LayerSize::px(w, h.max(1)) })
     }
 
     /// Fold the panel up; the surface closes when the animation has finished.
@@ -964,7 +1084,10 @@ impl App {
     }
 
     fn update(&mut self, msg: Message) -> Task<Message> {
+        // Animation ticks don't change the panel's content; skip re-fitting on them.
+        let refit = !matches!(msg, Message::Tick(_));
         let task = self.update_inner(msg);
+        let fit = if refit { self.fit_overlay() } else { Task::none() };
         // Mirror anything the tray menu shows (profiles, open surfaces) after
         // every change, but only push over the bus when it actually differs.
         if let Some(h) = &self.tray {
@@ -972,10 +1095,10 @@ impl App {
             if state != self.tray_synced {
                 self.tray_synced = state.clone();
                 let h = h.clone();
-                return Task::batch([task, Task::future(async move { h.sync(state).await }).discard()]);
+                return Task::batch([task, fit, Task::future(async move { h.sync(state).await }).discard()]);
             }
         }
-        task
+        Task::batch([task, fit])
     }
 
     fn update_inner(&mut self, msg: Message) -> Task<Message> {
@@ -983,10 +1106,13 @@ impl App {
             Message::Telemetry(telemetry::Event::Frame(snap)) => {
                 push(&mut self.hist.cpu_load, snap.cpu.util_total as f32);
                 push(&mut self.hist.cpu_temp, snap.cpu.tctl_c.unwrap_or(0.0) as f32);
-                push(&mut self.hist.gpu_load, snap.nvidia.as_ref().and_then(|n| n.util_gpu).unwrap_or(0) as f32);
-                push(&mut self.hist.gpu_temp, snap.nvidia.as_ref().and_then(|n| n.temp_c).unwrap_or(0) as f32);
+                // The GPU worth showing: an awake discrete card, else the integrated one.
+                let gpu = snap.gpu().unwrap_or_default();
+                push(&mut self.hist.gpu_load, gpu.load.unwrap_or(0.0) as f32);
+                push(&mut self.hist.gpu_temp, gpu.temp_c.unwrap_or(0.0) as f32);
                 push(&mut self.hist.gpu_power, snap.nvidia.as_ref().and_then(|n| n.power_w).unwrap_or(0.0) as f32);
                 push(&mut self.hist.coolant, snap.coolant_c.unwrap_or(0.0) as f32);
+                push(&mut self.hist.power, snap.package_w().unwrap_or(0.0) as f32);
                 if !self.cpu_synced {
                     self.cpu_edit = snap.cpu_control.clone();
                     self.cpu_synced = true;
@@ -1064,11 +1190,11 @@ impl App {
                 if let Some(s) = &self.snapshot {
                     let k = 0.12;
                     ease(&mut self.smooth.cpu_t, s.cpu.tctl_c.unwrap_or(0.0) as f32, k);
-                    ease(&mut self.smooth.gpu_t, s.nvidia.as_ref().and_then(|n| n.temp_c).unwrap_or(0) as f32, k);
+                    ease(&mut self.smooth.gpu_t, s.gpu().and_then(|g| g.temp_c).unwrap_or(0.0) as f32, k);
                     ease(&mut self.smooth.coolant, s.coolant_c.unwrap_or(0.0) as f32, k);
                     ease(&mut self.smooth.gpu_w, s.nvidia.as_ref().and_then(|n| n.power_w).unwrap_or(0.0) as f32, k);
                     ease(&mut self.smooth.cpu_load, s.cpu.util_total as f32, k);
-                    ease(&mut self.smooth.gpu_load, s.nvidia.as_ref().and_then(|n| n.util_gpu).unwrap_or(0) as f32, k);
+                    ease(&mut self.smooth.gpu_load, s.gpu().and_then(|g| g.load).unwrap_or(0.0) as f32, k);
                     let heat = ((self.smooth.cpu_t.max(self.smooth.gpu_t) - 40.0) / 50.0).clamp(0.0, 1.0);
                     ease(&mut self.smooth.heat, heat, 0.05);
                     ease(&mut self.smooth.load, (self.smooth.cpu_load.max(self.smooth.gpu_load) / 100.0).clamp(0.0, 1.0), 0.05);
@@ -1080,6 +1206,15 @@ impl App {
                 Task::none()
             }
             Message::Asus(m) => self.update_asus(m),
+            Message::Quick(m) => self.update_quick(m),
+            Message::PpdLoaded(s) => {
+                self.ppd = s;
+                Task::none()
+            }
+            Message::ScreenSpace(h) => {
+                self.screen_h = h;
+                Task::none()
+            }
             Message::HelperInstalled(r) => {
                 match r {
                     Ok(out) => {
@@ -1373,8 +1508,31 @@ impl App {
         widgets::begin_frame();
         let p = self.palette;
         let is_overlay = self.surfaces.get(&id) == Some(&Surface::Overlay);
+        let shell: Element<Message> = if is_overlay {
+            // The tray drop-down is its own composition, sized to its content.
+            let (w, max_h) = self.overlay_bounds();
+            crate::pages::quick::layout(self, w as f32, max_h).0
+        } else {
+            self.window_shell()
+        };
+
+        let (heat, load) = widgets::thermal();
+        let progress = if is_overlay { self.overlay_progress() } else { 1.0 };
+        let ambient = shader(widgets::ambient::Ambient { p, time: self.now.duration_since(self.t0).as_secs_f32(), heat, load, cell: 10.0, alpha: if is_overlay { self.config.overlay.opacity.clamp(0.5, 1.0) * progress } else { 1.0 }, intensity: if is_overlay { 0.7 } else { 1.0 } })
+            .width(Length::Fill)
+            .height(Length::Fill);
+        let content_layer = container(shell).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
+            border: iced::Border { color: if is_overlay { p.border_strong } else { iced::Color::TRANSPARENT }, width: if is_overlay { 1.0 } else { 0.0 }, radius: 0.0.into() },
+            ..Default::default()
+        });
+        let content_layer: Element<Message> = if is_overlay { reveal::reveal(content_layer, progress).into() } else { content_layer.into() };
+        stack![ambient, content_layer].width(Length::Fill).height(Length::Fill).into()
+    }
+
+    /// The main window: site header with navigation, toast, then the page.
+    fn window_shell(&self) -> Element<'_, Message> {
+        let p = self.palette;
         let content: Element<Message> = match self.page {
-            Page::Dashboard if is_overlay => crate::pages::dashboard::view_compact(self),
             Page::Dashboard => crate::pages::dashboard::view(self),
             Page::Cpu => crate::pages::cpu::view(self),
             Page::Gpu => crate::pages::gpu::view(self),
@@ -1385,8 +1543,7 @@ impl App {
             Page::Settings => crate::pages::settings::view(self),
             Page::Asus => crate::pages::asus::view(self),
         };
-        let show_asus = self.asus.asusd.is_some() || self.asus.gfx.is_some() || self.inventory.as_ref().map(|i| i.platform == oma_hw::Platform::AsusLaptop).unwrap_or(false);
-        let pages: Vec<Page> = Page::ALL.iter().copied().filter(|pg| *pg != Page::Asus || show_asus).collect();
+        let pages = self.visible_pages();
 
         // Site header: mark, mono nav links, then actions on the right.
         let nav_link = |pg: Page, active: bool| {
@@ -1420,45 +1577,12 @@ impl App {
             None => iced::widget::Space::new().height(0.0).into(),
         };
 
-        let icon_btn = |ic: Icon, msg: Message| iced::widget::button(icons::icon(ic, p.text_secondary, 16.0)).padding(8).style(widgets::button_style(p, widgets::ButtonKind::Ghost)).on_press(msg);
-        let shell: Element<Message> = if is_overlay {
-            let tabs = row(pages.iter().map(|pg| {
-                let active = *pg == self.page;
-                iced::widget::button(iced::widget::text(pg.label()).size(size::CAPTION).font(theme::font::MONO).color(if active { p.text } else { p.text_secondary })).padding([6, 8]).style(widgets::button_style(p, widgets::ButtonKind::Nav { active })).on_press(Message::Navigate(*pg)).into()
-            }))
-            .spacing(2.0)
-            .wrap();
-            container(column![
-                row![brand, widgets::hfill(), icon_btn(Icon::Window, Message::OpenWindow), icon_btn(Icon::Close, Message::ToggleOverlay)].spacing(space::SM).align_y(iced::Alignment::Center),
-                tabs,
-                toast,
-                content
-            ]
-            .spacing(space::LG))
-            .padding(space::LG)
+        let header = container(row![brand, links, widgets::hfill(), header_right].spacing(space::XL).align_y(iced::Alignment::Center))
+            .padding(iced::Padding::from([10.0, space::XL]))
             .width(Length::Fill)
-            .height(Length::Fill)
+            .style(move |_| container::Style { background: Some(Background::Color(theme::alpha(p.bg, 0.86))), border: iced::Border { color: p.border_subtle, width: 1.0, radius: 0.0.into() }, ..Default::default() });
+        column![header, container(column![toast, content].spacing(space::MD).width(Length::Fill).height(Length::Fill)).padding(space::XL).width(Length::Fill).height(Length::Fill)]
+            .spacing(0.0)
             .into()
-        } else {
-            let header = container(row![brand, links, widgets::hfill(), header_right].spacing(space::XL).align_y(iced::Alignment::Center))
-                .padding(iced::Padding::from([10.0, space::XL]))
-                .width(Length::Fill)
-                .style(move |_| container::Style { background: Some(Background::Color(theme::alpha(p.bg, 0.86))), border: iced::Border { color: p.border_subtle, width: 1.0, radius: 0.0.into() }, ..Default::default() });
-            column![header, container(column![toast, content].spacing(space::MD).width(Length::Fill).height(Length::Fill)).padding(space::XL).width(Length::Fill).height(Length::Fill)]
-                .spacing(0.0)
-                .into()
-        };
-
-        let (heat, load) = widgets::thermal();
-        let progress = if is_overlay { self.overlay_progress() } else { 1.0 };
-        let ambient = shader(widgets::ambient::Ambient { p, time: self.now.duration_since(self.t0).as_secs_f32(), heat, load, cell: 10.0, alpha: if is_overlay { self.config.overlay.opacity.clamp(0.5, 1.0) * progress } else { 1.0 }, intensity: if is_overlay { 0.7 } else { 1.0 } })
-            .width(Length::Fill)
-            .height(Length::Fill);
-        let content_layer = container(shell).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
-            border: iced::Border { color: if is_overlay { p.border_strong } else { iced::Color::TRANSPARENT }, width: if is_overlay { 1.0 } else { 0.0 }, radius: 0.0.into() },
-            ..Default::default()
-        });
-        let content_layer: Element<Message> = if is_overlay { reveal::reveal(content_layer, progress).into() } else { content_layer.into() };
-        stack![ambient, content_layer].width(Length::Fill).height(Length::Fill).into()
     }
 }

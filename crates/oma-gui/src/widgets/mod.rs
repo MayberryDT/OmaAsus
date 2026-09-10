@@ -197,7 +197,8 @@ pub fn bar<'a, M: 'a>(p: Palette, frac: f32, color: Color) -> Element<'a, M> {
         .into()
 }
 
-/// One fan/pump line: label, device, duty bar, rpm, duty; dimmed when stale, flagged when offline.
+/// One fan/pump line: label, device, duty bar, rpm, duty; tagged when stopped,
+/// dimmed when stale, flagged when offline.
 pub fn fan_row<'a, M: 'a>(p: Palette, f: &crate::telemetry::FanReading) -> Element<'a, M> {
     use crate::telemetry::Freshness;
     let live = f.freshness == Freshness::Live;
@@ -205,6 +206,8 @@ pub fn fan_row<'a, M: 'a>(p: Palette, f: &crate::telemetry::FanReading) -> Eleme
     let duty = f.duty.unwrap_or(0.0) as f32 / 100.0;
     let frac = if f.duty.is_some() { duty } else { (f.rpm as f32 / 2400.0).min(1.0) };
     let status: Element<M> = match f.freshness {
+        // Answering but not spinning: firmware fan-stop (quiet profiles, idle).
+        Freshness::Live if f.rpm == 0 => pill(p, "stopped", p.text_dim),
         Freshness::Live => iced::widget::Space::new().into(),
         Freshness::Stale => pill(p, "stale", p.warn),
         Freshness::Offline => pill(p, "offline", p.danger),

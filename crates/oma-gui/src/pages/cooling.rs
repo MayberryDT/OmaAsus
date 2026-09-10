@@ -210,7 +210,6 @@ fn fan_readings(app: &App) -> iced::widget::Container<'_, Message> {
         .map(|s| {
             s.fans
                 .iter()
-                .filter(|f| f.rpm > 0 || f.label.starts_with("Pump") || f.freshness != crate::telemetry::Freshness::Live)
                 .map(|f| widgets::fan_row(p, f))
                 .collect()
         })
