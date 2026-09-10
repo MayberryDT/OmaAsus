@@ -4,7 +4,7 @@ use oma_hw::{amdgpu, cpu, detect, hwmon, nvidia};
 use std::time::Duration;
 
 fn usage() -> ! {
-    eprintln!("usage: oma <inventory [--json]|sensors|watch [secs]|nvidia|cpu|daemons|rgb [--set index]|capture [dir]>");
+    eprintln!("usage: oma <inventory [--json]|model [--json] [--from raw-inventory.json]|sensors|watch [secs]|nvidia|cpu|daemons|rgb [--set index]|capture [dir]>");
     std::process::exit(2)
 }
 
@@ -17,6 +17,25 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&inv)?);
             } else {
                 print_inventory(&inv);
+            }
+        }
+        Some("model") => {
+            let raw: oma_hw::capture::RawInventory = match args.iter().position(|a| a == "--from") {
+                Some(i) => {
+                    let path = args.get(i + 1).ok_or_else(|| anyhow::anyhow!("--from needs a raw-inventory.json path"))?;
+                    serde_json::from_str(&std::fs::read_to_string(path)?)?
+                }
+                None => tokio::runtime::Runtime::new()?.block_on(oma_hw::capture::gather()),
+            };
+            let overrides = match std::fs::read_to_string(quirks_path()) {
+                Ok(text) => oma_hw::knowledge::Overrides::parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", quirks_path().display()))?,
+                Err(_) => Default::default(),
+            };
+            let model = oma_hw::model::HardwareModel::build(&raw, &overrides);
+            if args.iter().any(|a| a == "--json") {
+                println!("{}", serde_json::to_string_pretty(&model)?);
+            } else {
+                print_model(&model);
             }
         }
         Some("sensors") => print_sensors(),
@@ -177,6 +196,76 @@ fn print_inventory(inv: &detect::SystemInventory) {
             d.voltages.len(),
             d.powers.len()
         );
+    }
+}
+
+/// The user's knowledge overrides, next to the GUI's config.
+fn quirks_path() -> std::path::PathBuf {
+    let config = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))).unwrap_or_default();
+    config.join("omaasus/quirks.toml")
+}
+
+fn print_model(m: &oma_hw::model::HardwareModel) {
+    let id = &m.identity;
+    println!("Machine  : {} · board {} · family {} · BIOS {}", id.product, id.board, if id.family.is_empty() { "-" } else { &id.family }, id.bios);
+    println!("Fans     : owned by {:?}", m.fan_owner);
+    for f in &m.fans {
+        let mut caps = Vec::new();
+        if f.caps.duty {
+            caps.push("duty".to_string());
+        }
+        if let Some(c) = &f.caps.firmware_curve {
+            caps.push(format!("{}-point curve ({:?} temperature)", c.points, c.temp));
+        }
+        if f.caps.min_duty > 0.0 {
+            caps.push(format!("min {:.0} %", f.caps.min_duty));
+        }
+        if let Some(r) = f.caps.max_rpm {
+            caps.push(format!("max {r} rpm"));
+        }
+        let tach = f.tach.as_ref().map(|t| t.to_string()).unwrap_or_else(|| "-".into());
+        println!("  {:<22} {:<20} {} · tach {tach} · release {:?}", f.id, f.label, caps.join(", "), f.caps.release);
+    }
+    println!("Sensors  :");
+    for s in &m.sensors {
+        println!("  {:<34} {:?}", s.id, s.role);
+    }
+    println!("GPUs     :");
+    for g in &m.gpus {
+        println!("  {:<22} {:?} {} · {} · {:?}", g.id, g.vendor, g.name, if g.integrated { "integrated" } else { "discrete" }, g.power);
+    }
+    println!("Lighting :");
+    for l in &m.lighting {
+        println!("  {:<22} {:<10} modes {:?} brightness {:?}{}", l.id, l.label, l.modes, l.brightness_levels, l.leds.map(|n| format!(" · {n} LEDs")).unwrap_or_default());
+    }
+    let c = &m.controls;
+    println!("Power    : {} of {:?} via {:?}", c.power_mode.as_deref().unwrap_or("-"), c.power_modes, c.power_owner);
+    println!("Graphics : {} of {:?} via {:?}", c.gpu_mode.as_deref().unwrap_or("-"), c.gpu_modes, c.gpu_owner);
+    if let Some(l) = c.charge_limit {
+        println!("Charge   : limit {l} %");
+    }
+    println!("Firmware :");
+    for a in &c.attributes {
+        let range = match (a.min, a.max) {
+            (Some(lo), Some(hi)) => format!("{lo}..{hi}"),
+            _ if !a.choices.is_empty() => format!("{:?}", a.choices),
+            _ => String::new(),
+        };
+        let current = a.current.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
+        let mut flags = Vec::new();
+        if !a.writable {
+            flags.push("read-only".to_string());
+        }
+        if let Some(o) = a.owned_by {
+            flags.push(format!("owned by {o:?}"));
+        }
+        println!("  {:<18} {:>5} {:<10} {}", a.name, current, range, flags.join(", "));
+    }
+    if !m.notes.is_empty() {
+        println!("Knowledge:");
+        for n in &m.notes {
+            println!("  {} ({:?})", n.what, n.source);
+        }
     }
 }
 

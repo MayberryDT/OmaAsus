@@ -19,6 +19,7 @@ pub mod hypr;
 pub mod knowledge;
 pub mod lianli;
 pub mod livedash;
+pub mod model;
 pub mod nvidia;
 pub mod ppd;
 pub mod profile;

@@ -20,3 +20,4 @@ hidapi.workspace = true
 reqwest.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+toml.workspace = true
