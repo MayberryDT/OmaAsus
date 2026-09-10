@@ -1259,9 +1259,23 @@ impl App {
     }
 
     /// Pages this machine has; the ASUS page only with asusd, supergfxd or an ASUS laptop.
+    /// Pages for what this machine has; the one showing stays listed.
     pub fn visible_pages(&self) -> Vec<Page> {
-        let show_asus = self.asus.asusd.is_some() || self.asus.gfx.is_some() || self.inventory.as_ref().is_some_and(|i| i.platform == oma_hw::Platform::AsusLaptop);
-        Page::ALL.iter().copied().filter(|pg| *pg != Page::Asus || show_asus).collect()
+        Page::ALL.iter().copied().filter(|pg| *pg == self.page || self.page_available(*pg)).collect()
+    }
+
+    /// Whether a page has something to control here. Until detection is done
+    /// only pages every machine has are offered, so none disappear later.
+    pub fn page_available(&self, pg: Page) -> bool {
+        let m = self.model.as_deref();
+        match pg {
+            Page::Dashboard | Page::Cpu | Page::Profiles | Page::Automation | Page::Settings => true,
+            Page::Gpu => m.is_some_and(|m| !m.gpus.is_empty()),
+            Page::Cooling => m.is_some_and(|m| !m.fans.is_empty()) || self.cc_connected,
+            Page::Lighting => m.is_some_and(|m| !m.lighting.is_empty()) || self.rgb_server || self.rgb_installed,
+            // An ASUS laptop without asusd gets the page too: it says what to install.
+            Page::Asus => self.asus.asusd.is_some() || self.asus.gfx.is_some() || self.inventory.as_ref().is_some_and(|i| i.platform == oma_hw::Platform::AsusLaptop),
+        }
     }
 
     /// Panel width and the most height it may take: the space under the bar
@@ -1408,6 +1422,9 @@ impl App {
                 }
                 self.model = Some(model.clone());
                 telemetry::set_model(model.clone());
+                if !self.page_available(self.page) {
+                    self.page = Page::Dashboard;
+                }
                 let lights = self.load_lights();
                 let cc = self.cc.clone();
                 Task::batch([Task::perform(async move { Arc::new(crate::fans::FanBackend::build(model, inv, cc).await) }, Message::FanBackend), lights])
@@ -1417,7 +1434,8 @@ impl App {
                 Task::none()
             }
             Message::Navigate(p) => {
-                self.page = p;
+                // A page this machine doesn't have (asked for over IPC) opens the dashboard.
+                self.page = if self.model.is_none() || self.page_available(p) { p } else { Page::Dashboard };
                 Task::none()
             }
             Message::NvidiaInfo(i) => {
@@ -1829,6 +1847,61 @@ impl App {
 
     /// The main window: site header with navigation, toast, then the page.
     fn window_shell(&self) -> Element<'_, Message> {
+        iced::widget::responsive(move |size| self.shell(size.width)).into()
+    }
+
+    /// Navigation that fits the window: labelled links and the status pills
+    /// when there is room, then the links alone, then icons with tooltips.
+    fn header(&self, width: f32) -> Element<'_, Message> {
+        let p = self.palette;
+        let pages = self.visible_pages();
+        // JetBrains Mono advances 0.6 em, so the underline can be sized from the label.
+        let mono = |s: &str| s.chars().count() as f32 * size::SMALL * 0.6;
+        // The header's quick switch goes to this machine's performance profile.
+        let performance = self.config.profile_by_role(ProfileRole::Performance);
+        let perf_name = performance.map(|x| x.name.clone()).unwrap_or_else(|| "Performance".into());
+        let status = if self.controller_ready { "helper" } else { "read-only" };
+        let tier = crate::pages::NavTier::for_width(width, &pages, &perf_name, &[&self.theme_name, status]);
+        let (labels, word, pills) = (tier != crate::pages::NavTier::Icons, tier == crate::pages::NavTier::Full, tier == crate::pages::NavTier::Full);
+
+        let link = |pg: Page| -> Element<'_, Message> {
+            let active = pg == self.page;
+            let tint = if active { p.text } else { p.text_secondary };
+            let under = move |w: f32| container(iced::widget::Space::new().width(Length::Fixed(w)).height(2.0)).style(move |_| container::Style { background: Some(Background::Color(if active { p.brand } else { iced::Color::TRANSPARENT })), ..Default::default() });
+            let body: Element<Message> = if labels {
+                column![iced::widget::text(pg.label()).size(size::SMALL).font(theme::font::MONO).color(tint), under(mono(pg.label()))].spacing(6.0).into()
+            } else {
+                column![icons::icon(pg.icon(), tint, 16.0), under(16.0)].spacing(6.0).align_x(iced::Alignment::Center).into()
+            };
+            let b = iced::widget::button(body).padding(if labels { [6, 10] } else { [6, 8] }).style(widgets::button_style(p, widgets::ButtonKind::Nav { active: false })).on_press(Message::Navigate(pg));
+            if labels {
+                b.into()
+            } else {
+                let tip = container(iced::widget::text(pg.label()).size(size::SMALL).font(theme::font::MONO).color(p.text))
+                    .padding([4, 8])
+                    .style(move |_| container::Style { background: Some(Background::Color(p.surface_2)), border: iced::Border { color: p.border_strong, width: 1.0, radius: 0.0.into() }, ..Default::default() });
+                iced::widget::tooltip(b, tip, iced::widget::tooltip::Position::Bottom).into()
+            }
+        };
+        let links = iced::widget::Row::with_children(pages.iter().map(|pg| link(*pg))).spacing(space::XS).align_y(iced::Alignment::Center).wrap();
+
+        let mut brand = iced::widget::Row::new().spacing(space::SM).align_y(iced::Alignment::Center).push(widgets::pixel::oma_mark(p, 26.0));
+        if word {
+            brand = brand.push(iced::widget::text("omaasus").size(size::SMALL).font(theme::font::MONO_MEDIUM).color(p.text));
+        }
+        let mut right = iced::widget::Row::new().spacing(space::SM).align_y(iced::Alignment::Center);
+        if pills {
+            right = right.push(widgets::pill(p, &self.theme_name, p.text_secondary));
+        }
+        // Without the helper nothing can be changed: that stays visible at any width.
+        if pills || !self.controller_ready {
+            right = right.push(widgets::pill(p, status, if self.controller_ready { p.brand } else { p.yellow }));
+        }
+        right = right.push(widgets::btn(p, perf_name, widgets::ButtonKind::Primary, performance.map(|x| Message::ApplyProfile(x.id))));
+        row![brand, links, widgets::hfill(), right].spacing(space::XL).align_y(iced::Alignment::Center).into()
+    }
+
+    fn shell(&self, width: f32) -> Element<'_, Message> {
         let p = self.palette;
         let content: Element<Message> = match self.page {
             Page::Dashboard => crate::pages::dashboard::view(self),
@@ -1841,28 +1914,6 @@ impl App {
             Page::Settings => crate::pages::settings::view(self),
             Page::Asus => crate::pages::asus::view(self),
         };
-        let pages = self.visible_pages();
-
-        // Site header: mark, mono nav links, then actions on the right.
-        let nav_link = |pg: Page, active: bool| {
-            let label = iced::widget::text(pg.label()).size(size::SMALL).font(theme::font::MONO).color(if active { p.text } else { p.text_secondary });
-            // JetBrains Mono advances 0.6 em, so the underline can be sized from the label.
-            let w = pg.label().chars().count() as f32 * size::SMALL * 0.6;
-            let underline = container(iced::widget::Space::new().width(Length::Fixed(w)).height(2.0)).style(move |_| container::Style { background: Some(Background::Color(if active { p.brand } else { iced::Color::TRANSPARENT })), ..Default::default() });
-            iced::widget::button(column![label, underline].spacing(6.0).width(Length::Shrink)).padding([6, 10]).style(widgets::button_style(p, widgets::ButtonKind::Nav { active: false })).on_press(Message::Navigate(pg))
-        };
-        let links = row(pages.iter().map(|pg| nav_link(*pg, *pg == self.page).into())).spacing(space::XS).align_y(iced::Alignment::Center);
-        let brand = row![widgets::pixel::oma_mark(p, 26.0), iced::widget::text("omaasus").size(size::SMALL).font(theme::font::MONO_MEDIUM).color(p.text)].spacing(space::SM).align_y(iced::Alignment::Center);
-        // The header's quick switch goes to this machine's performance profile.
-        let performance = self.config.profile_by_role(ProfileRole::Performance);
-        let header_right = row![
-            widgets::pill(p, &self.theme_name, p.text_secondary),
-            widgets::pill(p, if self.controller_ready { "helper" } else { "read-only" }, if self.controller_ready { p.brand } else { p.yellow }),
-            widgets::btn(p, performance.map(|x| x.name.clone()).unwrap_or_else(|| "Performance".into()), widgets::ButtonKind::Primary, performance.map(|x| Message::ApplyProfile(x.id))),
-        ]
-        .spacing(space::SM)
-        .align_y(iced::Alignment::Center);
-
         let toast: Element<Message> = match &self.toast {
             Some((msg, ok)) => container(row![widgets::dim(p, msg), widgets::hfill(), iced::widget::button(icons::icon(Icon::Close, p.text_secondary, 14.0)).padding(6).style(widgets::button_style(p, widgets::ButtonKind::Ghost)).on_press(Message::DismissToast)].align_y(iced::Alignment::Center))
                 .padding([8, 12])
@@ -1876,7 +1927,7 @@ impl App {
             None => iced::widget::Space::new().height(0.0).into(),
         };
 
-        let header = container(row![brand, links, widgets::hfill(), header_right].spacing(space::XL).align_y(iced::Alignment::Center))
+        let header = container(self.header(width))
             .padding(iced::Padding::from([10.0, space::XL]))
             .width(Length::Fill)
             .style(move |_| container::Style { background: Some(Background::Color(theme::alpha(p.bg, 0.86))), border: iced::Border { color: p.border_subtle, width: 1.0, radius: 0.0.into() }, ..Default::default() });

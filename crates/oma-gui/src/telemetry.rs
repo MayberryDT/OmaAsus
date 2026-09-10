@@ -81,6 +81,9 @@ pub struct Snapshot {
     pub cpu_control: oma_hw::cpu::CpuControlState,
     /// Every hwmon temperature read this tick: (driver, label) → °C.
     pub hwmon_temps: std::collections::BTreeMap<(String, String), f64>,
+    /// Runtime power of the NVIDIA GPU as the bus reports it (`Absent` when
+    /// switched off or there is none).
+    pub dgpu: Option<DgpuState>,
 }
 
 /// GPU figures for glance views.
@@ -141,6 +144,8 @@ struct NvidiaSource {
     idle_since: Option<std::time::Instant>,
     rest_until: Option<std::time::Instant>,
     next_scan: Option<std::time::Instant>,
+    /// What the last sample found.
+    state: Option<DgpuState>,
 }
 
 impl NvidiaSource {
@@ -150,7 +155,9 @@ impl NvidiaSource {
             self.next_scan = Some(now + NVML_RESCAN);
         }
         let resting = self.rest_until.is_some_and(|t| now < t);
-        if nvml_action(oma_hw::nvidia::power_state(self.device.as_deref()), resting) == NvmlAction::Release {
+        let state = oma_hw::nvidia::power_state(self.device.as_deref());
+        self.state = Some(state);
+        if nvml_action(state, resting) == NvmlAction::Release {
             self.gpu = None;
             self.idle_since = None;
             return None;
@@ -282,6 +289,7 @@ impl Sampler {
         let model = model();
         let mut s = Snapshot { seq: self.seq, cpu: self.cpu.sample(), ..Default::default() };
         s.nvidia = self.nvidia.sample(std::time::Instant::now());
+        s.dgpu = self.nvidia.state;
         let amd = self.amd.iter().find(|g| !g.is_integrated).or(self.amd.first());
         s.amd = amd.map(|g| g.telemetry());
         s.amd_integrated = amd.is_some_and(|g| g.is_integrated);

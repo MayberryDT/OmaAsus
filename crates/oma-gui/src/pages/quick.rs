@@ -304,19 +304,8 @@ fn fans(app: &App) -> Option<Section<'_>> {
 
 fn footer(app: &App) -> Element<'_, Message> {
     let p = app.palette;
-    let icon_of = |pg: Page| match pg {
-        Page::Dashboard => Icon::Dashboard,
-        Page::Cpu => Icon::Cpu,
-        Page::Gpu => Icon::Gpu,
-        Page::Cooling => Icon::Fan,
-        Page::Lighting => Icon::Light,
-        Page::Profiles => Icon::Layers,
-        Page::Automation => Icon::Loop,
-        Page::Asus => Icon::Rog,
-        Page::Settings => Icon::Gear,
-    };
     let links = app.visible_pages().into_iter().map(|pg| {
-        let b = button(icons::icon(icon_of(pg), p.text_secondary, 16.0)).padding(8).style(widgets::button_style(p, widgets::ButtonKind::Nav { active: false })).on_press(Message::Quick(QuickMsg::OpenPage(pg)));
+        let b = button(icons::icon(pg.icon(), p.text_secondary, 16.0)).padding(8).style(widgets::button_style(p, widgets::ButtonKind::Nav { active: false })).on_press(Message::Quick(QuickMsg::OpenPage(pg)));
         tooltip(b, tip(p, pg.label()), tooltip::Position::Top).into()
     });
     container(row(links).spacing(space::XS).align_y(iced::Alignment::Center)).center_x(Length::Fill).center_y(FOOTER).into()

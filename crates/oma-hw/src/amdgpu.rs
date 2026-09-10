@@ -34,6 +34,21 @@ pub struct AmdGpuTelemetry {
 
 pub const PERF_LEVELS: &[&str] = &["auto", "low", "high", "manual", "profile_standard", "profile_min_sclk", "profile_min_mclk", "profile_peak"];
 
+/// A readable name for an amdgpu `power_dpm_force_performance_level` value.
+pub fn perf_level_label(level: &str) -> &str {
+    match level {
+        "auto" => "Auto",
+        "low" => "Low",
+        "high" => "High",
+        "manual" => "Manual",
+        "profile_standard" => "Standard",
+        "profile_min_sclk" => "Min core clock",
+        "profile_min_mclk" => "Min memory clock",
+        "profile_peak" => "Peak",
+        other => other,
+    }
+}
+
 impl AmdGpu {
     pub fn enumerate() -> Vec<Self> {
         let mut out = Vec::new();

@@ -166,10 +166,42 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
 fn amd_only(app: &App) -> Element<'_, Message> {
     let p = app.palette;
-    match amd_card(app) {
-        Some(c) => column![widgets::headline(p, "Graphics"), c].spacing(space::LG).into(),
-        None => widgets::dim(p, "No supported GPU detected."),
+    let cards: Vec<Element<Message>> = [dgpu_card(app), amd_card(app)].into_iter().flatten().collect();
+    if cards.is_empty() {
+        return widgets::dim(p, "No supported GPU detected.");
     }
+    scrollable(Column::with_children(std::iter::once(widgets::headline(p, "Graphics")).chain(cards)).spacing(space::LG)).height(Length::Fill).into()
+}
+
+/// A discrete GPU with nothing to tune right now: what state it is in, and
+/// what brings it back. It is never woken just to be looked at.
+fn dgpu_card(app: &App) -> Option<Element<'_, Message>> {
+    use oma_hw::nvidia::DgpuState;
+    let p = app.palette;
+    let g = app.model.as_ref()?.gpus.iter().find(|g| !g.integrated && g.vendor == oma_hw::model::GpuVendor::Nvidia)?;
+    let gfx = app.asus.gfx.as_ref();
+    let (state, tint, about) = match app.snapshot.as_ref().and_then(|s| s.dgpu) {
+        Some(DgpuState::Active) => ("awake", p.ok, "Reading its details…".to_string()),
+        Some(DgpuState::Suspended) => ("asleep", p.text_dim, "It wakes when a program uses it; its tuning shows here while it's awake.".to_string()),
+        _ => (
+            "off",
+            p.text_faint,
+            match gfx {
+                Some(s) => format!("Switched off by the {} graphics mode. Change the graphics mode to use it.", s.mode.label()),
+                None => "Switched off: it isn't on the bus.".to_string(),
+            },
+        ),
+    };
+    let mut col = column![
+        row![widgets::title(p, "Discrete graphics"), widgets::hfill(), widgets::pill(p, state, tint)].align_y(iced::Alignment::Center),
+        widgets::dim(p, &g.name),
+        widgets::body(p, about),
+    ]
+    .spacing(space::MD);
+    if state == "off" && gfx.is_some() {
+        col = col.push(widgets::btn(p, "Graphics mode", widgets::ButtonKind::Ghost, Some(Message::Navigate(crate::pages::Page::Asus))));
+    }
+    Some(widgets::card(p, col).width(Length::Fill).into())
 }
 
 fn amd_card(app: &App) -> Option<Element<'_, Message>> {
@@ -180,7 +212,7 @@ fn amd_card(app: &App) -> Option<Element<'_, Message>> {
     let level = t.perf_level.clone().unwrap_or_else(|| "auto".into());
     let chips: Vec<Element<Message>> = oma_hw::amdgpu::PERF_LEVELS
         .iter()
-        .map(|l| widgets::btn(p, *l, if *l == level { widgets::ButtonKind::Primary } else { widgets::ButtonKind::Ghost }, Some(Message::Gpu(GpuMsg::AmdLevel(l.to_string())))))
+        .map(|l| widgets::btn(p, oma_hw::amdgpu::perf_level_label(l), if *l == level { widgets::ButtonKind::Primary } else { widgets::ButtonKind::Ghost }, Some(Message::Gpu(GpuMsg::AmdLevel(l.to_string())))))
         .collect();
     Some(
         widgets::card(
