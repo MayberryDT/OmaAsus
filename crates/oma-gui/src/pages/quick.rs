@@ -262,8 +262,7 @@ fn controls(app: &App, width: f32) -> Option<Section<'_>> {
     }
 
     if let Some(k) = &app.asus.kbd {
-        const NAMES: [&str; 4] = ["Off", "Low", "Med", "High"];
-        let labels: Vec<String> = k.levels.iter().map(|l| if k.levels.len() == NAMES.len() { NAMES.get(*l as usize).map(|s| s.to_string()).unwrap_or_else(|| l.to_string()) } else { l.to_string() }).collect();
+        let labels = oma_hw::lighting::level_names(&k.levels);
         let n = chip_rows(labels.iter().map(String::as_str), strip_w);
         let chips = k.levels.iter().zip(&labels).map(|(l, name)| chip(p, name, *l == k.brightness, Some(Message::Quick(QuickMsg::KbdBrightness(*l))))).collect();
         rows.push(control(p, "Keyboard", strip(chips), strip_height(n)));

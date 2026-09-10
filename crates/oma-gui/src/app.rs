@@ -88,6 +88,13 @@ pub struct App {
     pub rgb_sel: usize,
     pub rgb_hex: String,
     pub rgb_thermal: bool,
+    pub rgb_installed: bool,
+    /// What each lighting device in the model shows now, by device id.
+    pub lights: std::collections::BTreeMap<String, oma_hw::lighting::LightState>,
+    /// A model lighting device picked on the Lighting page (else an OpenRGB one).
+    pub light_sel: Option<String>,
+    /// Slash brightness while its slider is dragged.
+    pub slash_drag: Option<u8>,
     pub profile_sel: Option<uuid::Uuid>,
     pub auto_state: AutoState,
     pub helper_log: String,
@@ -295,6 +302,10 @@ impl App {
             rgb_sel: 0,
             rgb_hex: String::new(),
             rgb_thermal: false,
+            rgb_installed: oma_hw::rgb::installed(),
+            lights: Default::default(),
+            light_sel: None,
+            slash_drag: None,
             profile_sel: None,
             auto_state: AutoState::default(),
             helper_log: String::new(),
@@ -620,6 +631,14 @@ impl App {
                 if let Some(k) = &mut self.asus.kbd {
                     k.brightness = v;
                 }
+                // The Lighting page shows the same keyboard.
+                for d in self.model.iter().flat_map(|m| &m.lighting) {
+                    if matches!(&d.backend, oma_hw::model::LightingBackend::AsusdAura { path: p } if *p == path) {
+                        if let Some(oma_hw::lighting::LightState::Aura { level, .. }) = self.lights.get_mut(d.id.as_str()) {
+                            *level = v;
+                        }
+                    }
+                }
                 run(Box::pin(async move {
                     let c = zbus::Connection::system().await.map_err(|e| e.to_string())?;
                     oma_hw::asusd::AuraProxy::builder(&c).path(path.as_str()).map_err(|e| e.to_string())?.build().await.map_err(|e| e.to_string())?.set_brightness(v).await.map_err(|e| e.to_string())?;
@@ -908,23 +927,135 @@ impl App {
         Task::perform(async { oma_hw::rgb::devices().await.map_err(|e| e.to_string()) }, Message::RgbDevices)
     }
 
+    /// Read what the model's lighting devices show.
+    fn load_lights(&self) -> Task<Message> {
+        let Some(m) = self.model.clone().filter(|m| !m.lighting.is_empty()) else { return Task::none() };
+        Task::perform(async move { oma_hw::lighting::read_all(&m.lighting).await }, |s| Message::Lighting(LightingMsg::Loaded(s)))
+    }
+
+    /// Keep lighting for a device in the active profile.
+    fn remember_light(&mut self, key: String, mode: oma_hw::profile::LightingMode, brightness: Option<u8>) {
+        let id = self.config.active_profile;
+        if let Some(pr) = self.config.profiles.iter_mut().find(|p| p.id == id) {
+            if let Some(b) = brightness {
+                pr.lighting.device_brightness.insert(key.clone(), b);
+            }
+            pr.lighting.zones.insert(key, mode);
+            crate::config_store::save(&self.config);
+        }
+    }
+
+    fn light_device(&self, id: &str) -> Option<oma_hw::model::LightingDevice> {
+        self.model.as_ref()?.lighting.iter().find(|d| d.id.as_str() == id).cloned()
+    }
+
+    /// Show `mode` on a lighting device from the model and keep it in the active profile.
+    fn show_light(&mut self, id: String, mode: oma_hw::profile::LightingMode) -> Task<Message> {
+        let Some(device) = self.light_device(&id) else { return Task::none() };
+        // The profile keeps the brightness the device has now unless it already has one.
+        let kept = self.active_profile().and_then(|p| p.lighting.device_brightness.get(&id).copied()).filter(|b| *b > 0);
+        let now = self.lights.get(&id).map(|s| oma_hw::lighting::percent_of(&device, s)).filter(|b| *b > 0);
+        self.remember_light(id.clone(), mode.clone(), if kept.is_none() { now } else { None });
+        let brightness = self.active_profile().and_then(|p| p.lighting.brightness_for(&id));
+        let accent = self.active_profile().map(|p| p.accent).unwrap_or(oma_hw::profile::Rgb::new(255, 61, 104));
+        Task::perform(
+            async move {
+                let c = zbus::Connection::system().await.map_err(|e| e.to_string())?;
+                oma_hw::lighting::apply(&c, &device, &mode, brightness, accent).await
+            },
+            Self::after_light,
+        )
+    }
+
+    fn after_light(r: Result<(), String>) -> Message {
+        match r {
+            Ok(()) => Message::Lighting(LightingMsg::Reload),
+            Err(e) => Message::Applied(Err(e)),
+        }
+    }
+
     fn update_lighting(&mut self, m: LightingMsg) -> Task<Message> {
+        use oma_hw::lighting::LightState;
         use oma_hw::profile::{LightingMode, Rgb};
         let sel = self.rgb_sel.min(self.rgb_devices.len().saturating_sub(1));
         let dev_index = self.rgb_devices.get(sel).map(|d| d.index);
         let dev_name = self.rgb_devices.get(sel).map(|d| d.name.clone());
         let remember = |app: &mut App, name: Option<String>, mode: LightingMode| {
             if let Some(n) = name {
-                let id = app.config.active_profile;
-                if let Some(pr) = app.config.profiles.iter_mut().find(|p| p.id == id) {
-                    pr.lighting.zones.insert(format!("openrgb:{n}"), mode);
-                }
+                app.remember_light(format!("openrgb:{n}"), mode, None);
             }
+        };
+        let model_ids = |app: &App, colour: bool| -> Vec<String> {
+            app.model.iter().flat_map(|m| &m.lighting).filter(|d| !colour || (matches!(d.backend, oma_hw::model::LightingBackend::AsusdAura { .. }) && d.modes.contains(&0))).map(|d| d.id.to_string()).collect()
         };
         match m {
             LightingMsg::Refresh => {
                 self.rgb_server = oma_hw::rgb::server_running();
-                return if self.rgb_server { Self::rgb_refresh() } else { Task::none() };
+                let rgb = if self.rgb_server { Self::rgb_refresh() } else { Task::none() };
+                return Task::batch([rgb, self.load_lights()]);
+            }
+            LightingMsg::Reload => return self.load_lights(),
+            LightingMsg::Loaded(states) => {
+                self.lights = states.into_iter().collect();
+                // Keep the ASUS page's keyboard brightness in step.
+                if let (Some(k), Some(m)) = (&mut self.asus.kbd, &self.model) {
+                    for d in &m.lighting {
+                        if matches!(&d.backend, oma_hw::model::LightingBackend::AsusdAura { path } if *path == k.path) {
+                            if let Some(LightState::Aura { level, .. }) = self.lights.get(d.id.as_str()) {
+                                k.brightness = *level;
+                            }
+                        }
+                    }
+                }
+            }
+            LightingMsg::SelectDevice(id) => {
+                self.light_sel = Some(id);
+                self.slash_drag = None;
+            }
+            LightingMsg::Show(id, mode) => return self.show_light(id, mode),
+            LightingMsg::Level(id, pct) => {
+                self.slash_drag = None;
+                let (Some(device), Some(state)) = (self.light_device(&id), self.lights.get(&id)) else { return Task::none() };
+                let on = match state {
+                    LightState::Slash { enabled, .. } => *enabled,
+                    LightState::Aura { .. } => pct > 0,
+                };
+                let mode = if on { oma_hw::lighting::lit_mode(state) } else { LightingMode::Off };
+                self.remember_light(id, mode, Some(pct));
+                return Task::perform(
+                    async move {
+                        let c = zbus::Connection::system().await.map_err(|e| e.to_string())?;
+                        oma_hw::lighting::set_brightness(&c, &device, pct).await
+                    },
+                    Self::after_light,
+                );
+            }
+            LightingMsg::SlashDrag(pct) => self.slash_drag = Some(pct),
+            LightingMsg::SlashRelease(id) => {
+                if let Some(pct) = self.slash_drag {
+                    return self.update_lighting(LightingMsg::Level(id, pct));
+                }
+            }
+            LightingMsg::SlashOption(id, option, on) => {
+                let Some(device) = self.light_device(&id) else { return Task::none() };
+                if let Some(LightState::Slash { options, .. }) = self.lights.get_mut(&id) {
+                    options.iter_mut().filter(|(o, _)| *o == option).for_each(|(_, v)| *v = on);
+                }
+                return Task::perform(
+                    async move {
+                        let c = zbus::Connection::system().await.map_err(|e| e.to_string())?;
+                        oma_hw::lighting::set_slash_option(&c, &device, option, on).await
+                    },
+                    Self::after_light,
+                );
+            }
+            LightingMsg::Forget(key) => {
+                let id = self.config.active_profile;
+                if let Some(pr) = self.config.profiles.iter_mut().find(|p| p.id == id) {
+                    pr.lighting.zones.remove(&key);
+                    pr.lighting.device_brightness.remove(&key);
+                }
+                crate::config_store::save(&self.config);
             }
             LightingMsg::StartServer => {
                 if let Err(e) = oma_hw::rgb::start_server() {
@@ -945,7 +1076,10 @@ impl App {
                     Message::RgbDevices,
                 );
             }
-            LightingMsg::Select(i) => self.rgb_sel = i,
+            LightingMsg::Select(i) => {
+                self.rgb_sel = i;
+                self.light_sel = None;
+            }
             LightingMsg::Hex(s) => {
                 self.rgb_hex = s.clone();
                 if let Some(c) = crate::pages::lighting::parse_hex(&s) {
@@ -953,17 +1087,19 @@ impl App {
                 }
             }
             LightingMsg::Color(c) => {
+                self.rgb_hex = c.hex();
+                if let Some(d) = crate::pages::lighting::selected_model(self).cloned() {
+                    let breathing = matches!(self.lights.get(d.id.as_str()), Some(LightState::Aura { listed: 1, level: 1.., .. }));
+                    return self.show_light(d.id.to_string(), if breathing { LightingMode::Breathing(c) } else { LightingMode::Static(c) });
+                }
                 let Some(idx) = dev_index else { return Task::none() };
                 remember(self, dev_name, LightingMode::Static(c));
-                self.rgb_hex = c.hex();
                 return Task::batch([Task::perform(async move { oma_hw::rgb::set_static(idx, (c.r, c.g, c.b)).await.map(|_| String::new()).map_err(|e| e.to_string()) }, |r| match r { Ok(_) => Message::Lighting(LightingMsg::Refresh), Err(e) => Message::Applied(Err(e)) })]);
             }
             LightingMsg::Mode(idx, mode) => {
                 let name = self.rgb_devices.iter().find(|d| d.index == idx).map(|d| d.name.clone());
                 let is_rainbow = self.rgb_devices.iter().find(|d| d.index == idx).and_then(|d| d.modes.get(mode)).map(|m| m.name.to_ascii_lowercase().contains("rainbow") || m.name.to_ascii_lowercase().contains("spectrum")).unwrap_or(false);
-                if is_rainbow {
-                    remember(self, name, LightingMode::Rainbow);
-                }
+                remember(self, name, if is_rainbow { LightingMode::Rainbow } else { LightingMode::Firmware(mode as u32) });
                 return Task::perform(async move { oma_hw::rgb::set_mode(idx, mode).await.map_err(|e| e.to_string()) }, |r| match r { Ok(_) => Message::Lighting(LightingMsg::Refresh), Err(e) => Message::Applied(Err(e)) });
             }
             LightingMsg::Off(idx) => {
@@ -972,27 +1108,31 @@ impl App {
                 return Task::perform(async move { oma_hw::rgb::turn_off(idx).await.map_err(|e| e.to_string()) }, |r| match r { Ok(_) => Message::Lighting(LightingMsg::Refresh), Err(e) => Message::Applied(Err(e)) });
             }
             LightingMsg::AllOff => {
+                let mut tasks: Vec<Task<Message>> = model_ids(self, false).into_iter().map(|id| self.show_light(id, LightingMode::Off)).collect();
                 let idxs: Vec<usize> = self.rgb_devices.iter().map(|d| d.index).collect();
                 let names: Vec<String> = self.rgb_devices.iter().map(|d| d.name.clone()).collect();
                 for n in names {
                     remember(self, Some(n), LightingMode::Off);
                 }
-                return Task::perform(async move { for i in idxs { let _ = oma_hw::rgb::turn_off(i).await; } Ok::<_, String>(()) }, |_| Message::Lighting(LightingMsg::Refresh));
+                if !idxs.is_empty() {
+                    tasks.push(Task::perform(async move { for i in idxs { let _ = oma_hw::rgb::turn_off(i).await; } Ok::<_, String>(()) }, |_| Message::Lighting(LightingMsg::Refresh)));
+                }
+                return Task::batch(tasks);
             }
             LightingMsg::SyncAccent => {
                 let accent = self.active_profile().map(|p| p.accent).unwrap_or(Rgb::new(255, 61, 104));
+                let mut tasks: Vec<Task<Message>> = model_ids(self, true).into_iter().map(|id| self.show_light(id, LightingMode::Static(accent))).collect();
                 let idxs: Vec<usize> = self.rgb_devices.iter().map(|d| d.index).collect();
                 let names: Vec<String> = self.rgb_devices.iter().map(|d| d.name.clone()).collect();
                 for n in names {
                     remember(self, Some(n), LightingMode::Static(accent));
                 }
-                return Task::perform(async move { for i in idxs { let _ = oma_hw::rgb::set_static(i, (accent.r, accent.g, accent.b)).await; } Ok::<_, String>(()) }, |_| Message::Lighting(LightingMsg::Refresh));
+                if !idxs.is_empty() {
+                    tasks.push(Task::perform(async move { for i in idxs { let _ = oma_hw::rgb::set_static(i, (accent.r, accent.g, accent.b)).await; } Ok::<_, String>(()) }, |_| Message::Lighting(LightingMsg::Refresh)));
+                }
+                return Task::batch(tasks);
             }
             LightingMsg::ThermalToggle => self.rgb_thermal = !self.rgb_thermal,
-            LightingMsg::SaveToProfile => {
-                crate::config_store::save(&self.config);
-                self.toast = Some(("Lighting saved into the active profile".into(), true));
-            }
         }
         Task::none()
     }
@@ -1261,8 +1401,9 @@ impl App {
                     crate::config_store::save(&self.config);
                 }
                 self.model = Some(model.clone());
+                let lights = self.load_lights();
                 let cc = self.cc.clone();
-                Task::perform(async move { Arc::new(crate::fans::FanBackend::build(model, inv, cc).await) }, Message::FanBackend)
+                Task::batch([Task::perform(async move { Arc::new(crate::fans::FanBackend::build(model, inv, cc).await) }, Message::FanBackend), lights])
             }
             Message::Controller(ok) => {
                 self.controller_ready = ok;
@@ -1420,7 +1561,7 @@ impl App {
                     });
                     self.toast_at = Some(std::time::Instant::now());
                 }
-                Task::none()
+                self.load_lights()
             }
             Message::System(ev) => {
                 let reason = match ev {

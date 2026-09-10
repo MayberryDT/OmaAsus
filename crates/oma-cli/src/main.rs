@@ -4,8 +4,39 @@ use oma_hw::{amdgpu, cpu, detect, hwmon, nvidia};
 use std::time::Duration;
 
 fn usage() -> ! {
-    eprintln!("usage: oma <inventory [--json]|model [--json] [--from raw-inventory.json]|curves [set <mode> <fan> <temp:duty,...> | off <mode> <fan>]|sensors|watch [secs]|nvidia|cpu|daemons|rgb [--set index]|capture [dir]>");
+    eprintln!("usage: oma <inventory [--json]|model [--json] [--from raw-inventory.json]|curves [set <mode> <fan> <temp:duty,...> | off <mode> <fan>]|lighting [show <device> <off|rainbow|effect>[:#RRGGBB] [brightness%]]|sensors|watch [secs]|nvidia|cpu|daemons|rgb [--set index]|capture [dir]>");
     std::process::exit(2)
+}
+
+/// User overrides from quirks.toml, if there is one.
+fn overrides() -> anyhow::Result<oma_hw::knowledge::Overrides> {
+    match std::fs::read_to_string(quirks_path()) {
+        Ok(text) => oma_hw::knowledge::Overrides::parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", quirks_path().display())),
+        Err(_) => Ok(Default::default()),
+    }
+}
+
+/// `off`, `rainbow`, or one of the device's effects by name or number, with an
+/// optional `:#RRGGBB` colour (white when not given).
+fn parse_lighting(device: &oma_hw::model::LightingDevice, spec: &str) -> anyhow::Result<(oma_hw::profile::LightingMode, oma_hw::profile::Rgb)> {
+    use oma_hw::profile::{LightingMode, Rgb};
+    let (name, hex) = spec.split_once(':').unwrap_or((spec, ""));
+    let colour = if hex.is_empty() {
+        Rgb::new(255, 255, 255)
+    } else {
+        let v = u32::from_str_radix(hex.trim_start_matches('#'), 16).map_err(|_| anyhow::anyhow!("colour as #RRGGBB, not {hex}"))?;
+        Rgb::new((v >> 16) as u8, (v >> 8) as u8, v as u8)
+    };
+    let effect = device.modes.iter().copied().find(|m| oma_hw::lighting::mode_name(device, *m).eq_ignore_ascii_case(name) || m.to_string() == name);
+    let mode = match (name.to_ascii_lowercase().as_str(), effect) {
+        ("off", _) => LightingMode::Off,
+        ("rainbow", None) => LightingMode::Rainbow,
+        (_, Some(0)) if matches!(device.backend, oma_hw::model::LightingBackend::AsusdAura { .. }) => LightingMode::Static(colour),
+        (_, Some(1)) if matches!(device.backend, oma_hw::model::LightingBackend::AsusdAura { .. }) => LightingMode::Breathing(colour),
+        (_, Some(m)) => LightingMode::Firmware(m),
+        _ => anyhow::bail!("{} has no effect {name:?}; it has {}", device.label, device.modes.iter().map(|m| oma_hw::lighting::mode_name(device, *m)).collect::<Vec<_>>().join(", ")),
+    };
+    Ok((mode, colour))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -27,11 +58,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 None => tokio::runtime::Runtime::new()?.block_on(oma_hw::capture::gather()),
             };
-            let overrides = match std::fs::read_to_string(quirks_path()) {
-                Ok(text) => oma_hw::knowledge::Overrides::parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", quirks_path().display()))?,
-                Err(_) => Default::default(),
-            };
-            let model = oma_hw::model::HardwareModel::build(&raw, &overrides);
+            let model = oma_hw::model::HardwareModel::build(&raw, &overrides()?);
             if args.iter().any(|a| a == "--json") {
                 println!("{}", serde_json::to_string_pretty(&model)?);
             } else {
@@ -76,6 +103,39 @@ fn main() -> anyhow::Result<()> {
                                 let points: Vec<String> = c.points().iter().map(|(t, d)| format!("{t:.0}:{d:.1}")).collect();
                                 println!("{:<12} {:<4} {:<4} {}", PlatformProfile::from_u32(profile).label(), c.fan, if c.enabled { "on" } else { "off" }, points.join(","));
                             }
+                        }
+                    }
+                }
+                anyhow::Ok(())
+            })?;
+        }
+        Some("lighting") => {
+            use oma_hw::lighting;
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async {
+                let model = oma_hw::model::HardwareModel::build(&oma_hw::capture::gather().await, &overrides()?);
+                let conn = zbus::Connection::system().await?;
+                match args.get(1).map(String::as_str) {
+                    Some("show") => {
+                        let which = args.get(2).ok_or_else(|| anyhow::anyhow!("which device? an id or label from `oma lighting`"))?;
+                        let device = model.lighting.iter().find(|d| d.id.as_str() == which || d.label.eq_ignore_ascii_case(which)).ok_or_else(|| anyhow::anyhow!("no lighting device {which}"))?;
+                        let (mode, colour) = parse_lighting(device, args.get(3).map(String::as_str).unwrap_or(""))?;
+                        let brightness = args.get(4).map(|b| b.trim_end_matches('%').parse::<u8>()).transpose()?;
+                        lighting::apply(&conn, device, &mode, brightness, colour).await.map_err(|e| anyhow::anyhow!(e))?;
+                        println!("{}: {}", device.label, lighting::describe_on(device, &mode));
+                    }
+                    Some(_) => usage(),
+                    None => {
+                        if model.lighting.is_empty() {
+                            println!("no lighting devices from asusd (OpenRGB devices: `oma rgb`)");
+                        }
+                        for d in &model.lighting {
+                            let now = match lighting::read(&conn, d).await {
+                                Ok(s) => format!("{} at {}%", lighting::describe_on(d, &lighting::mode_of(&s)), lighting::percent_of(d, &s)),
+                                Err(e) => format!("unreadable ({e})"),
+                            };
+                            println!("{:<24} {:<10} {now}", d.id, d.label);
+                            println!("{:<24} effects: {}", "", d.modes.iter().map(|m| lighting::mode_name(d, *m)).collect::<Vec<_>>().join(", "));
                         }
                     }
                 }

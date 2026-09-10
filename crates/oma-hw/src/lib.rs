@@ -18,6 +18,7 @@ pub mod hwmon;
 pub mod hypr;
 pub mod knowledge;
 pub mod lianli;
+pub mod lighting;
 pub mod livedash;
 pub mod model;
 pub mod nvidia;

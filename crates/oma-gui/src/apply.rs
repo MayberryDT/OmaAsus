@@ -165,7 +165,40 @@ pub async fn apply_profile(p: Profile, cx: Context) -> Report {
         }
     }
 
-    // 5. Graphics mode: switching can log you out or need a reboot, so a
+    checkpoint!();
+
+    // 5. Lighting, on the devices this machine has.
+    if !p.lighting.zones.is_empty() {
+        let conn = zbus::Connection::system().await.ok();
+        let mut openrgb: Option<Result<Vec<oma_hw::rgb::RgbDevice>, String>> = None;
+        for (key, mode) in &p.lighting.zones {
+            if let Some(name) = key.strip_prefix("openrgb:") {
+                if openrgb.is_none() {
+                    openrgb = Some(oma_hw::rgb::devices().await.map_err(|_| "OpenRGB isn't running".to_string()));
+                }
+                match openrgb.as_ref() {
+                    Some(Ok(devices)) => match oma_hw::lighting::apply_openrgb(devices, name, mode).await {
+                        Ok(()) => r.applied.push(format!("{name} {}", oma_hw::lighting::describe(mode))),
+                        Err(e) => r.skipped.push(e),
+                    },
+                    _ => r.skipped.push(format!("{name} (OpenRGB isn't running)")),
+                }
+            } else if let Some(device) = cx.model.as_ref().and_then(|m| m.lighting.iter().find(|d| d.id.as_str() == key)) {
+                let Some(conn) = &conn else {
+                    r.failed.push(format!("{}: no system bus", device.label));
+                    continue;
+                };
+                match oma_hw::lighting::apply(conn, device, mode, p.lighting.brightness_for(key), p.accent).await {
+                    Ok(()) => r.applied.push(format!("{} {}", device.label, oma_hw::lighting::describe_on(device, mode))),
+                    Err(e) => r.failed.push(e),
+                }
+            } else {
+                r.skipped.push(format!("{key} (not on this machine)"));
+            }
+        }
+    }
+
+    // 6. Graphics mode: switching can log you out or need a reboot, so a
     //    profile never does it on its own.
     if let Some(mode) = &p.gfx_mode {
         r.skipped.push(format!("graphics mode {mode} (switch it on the ASUS page)"));

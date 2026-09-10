@@ -281,11 +281,46 @@ pub fn aura_device_label(device_type: Option<u32>) -> &'static str {
     }
 }
 
-/// asusd lists Aura modes by enum value but keys `AllModeData` by position,
-/// and there is no mode 9: Pulse is listed as 10 and keyed as 9 (verified on a
-/// GA403WR, asusd 6.4); Comet and Flash follow the same shift (asusctl notes).
+/// asusd lists Aura modes by enum value, and `LedMode`/`LedModeData` read and
+/// write that value, but `AllModeData` numbers them by position, and there is
+/// no mode 9: Pulse is 10 everywhere except `AllModeData`, where it is 9
+/// (verified on a GA403WR, asusd 6.4: writing 9 fails "incorrect type");
+/// Comet and Flash follow the same shift (asusctl notes).
 pub fn aura_mode_data_key(listed: u32) -> u32 {
     if listed >= 10 { listed - 1 } else { listed }
+}
+
+/// Name of an Aura mode, by asusd's listed number.
+pub fn aura_mode_name(listed: u32) -> &'static str {
+    crate::asusd::aura_mode::label(aura_mode_data_key(listed))
+}
+
+/// Slash bar animations: asusd `Mode` value and name (G-Helper SlashDevice.cs
+/// and asusctl; the GA403WR reports 16 = Bounce, verified).
+pub const SLASH_MODES: &[(u32, &str)] = &[
+    (0x06, "Static"),
+    (0x10, "Bounce"),
+    (0x12, "Slash"),
+    (0x13, "Loading"),
+    (0x1D, "Bit stream"),
+    (0x1A, "Transmission"),
+    (0x19, "Flow"),
+    (0x25, "Flux"),
+    (0x24, "Phantom"),
+    (0x26, "Spectrum"),
+    (0x32, "Hazard"),
+    (0x33, "Interfacing"),
+    (0x34, "Ramp"),
+    (0x42, "Game over"),
+    (0x43, "Start"),
+    (0x44, "Buzzer"),
+];
+
+/// The Slash animation that shows a steady bar.
+pub const SLASH_STATIC: u32 = 0x06;
+
+pub fn slash_mode_name(mode: u32) -> Option<&'static str> {
+    SLASH_MODES.iter().find(|(m, _)| *m == mode).map(|(_, n)| *n)
 }
 
 #[cfg(test)]

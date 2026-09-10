@@ -203,13 +203,27 @@ pub enum LightingMode {
     Thermal { source: TempSource, cool: Rgb, hot: Rgb, min_c: f64, max_c: f64 },
     /// Direct per-LED colours (OpenRGB direct mode).
     Direct(Vec<Rgb>),
+    /// One of the device's own effects, by its number (an asusd Aura mode as
+    /// asusd lists it, a Slash animation, an OpenRGB mode index).
+    Firmware(u32),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct LightingSettings {
-    /// Keyed by OpenRGB device name (or asusd Aura zone).
+    /// Keyed by device: a model `DeviceId` (`asusd:slash`) or `openrgb:<name>`.
     pub zones: BTreeMap<String, LightingMode>,
+    /// Brightness for every device in percent; 0 leaves each as it is.
     pub brightness: u8,
+    /// Brightness per device in percent, over `brightness`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub device_brightness: BTreeMap<String, u8>,
+}
+
+impl LightingSettings {
+    /// The brightness to set on a device, if the profile sets one.
+    pub fn brightness_for(&self, key: &str) -> Option<u8> {
+        self.device_brightness.get(key).copied().or((self.brightness > 0).then_some(self.brightness))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -274,7 +288,7 @@ impl Profile {
             cpu: CpuSettings::default(),
             gpu: GpuSettings::default(),
             cooling: CoolingSettings::default(),
-            lighting: LightingSettings { zones: BTreeMap::new(), brightness: 100 },
+            lighting: LightingSettings::default(),
             lcd: LcdSettings::default(),
             asusd: BTreeMap::new(),
             gfx_mode: None,

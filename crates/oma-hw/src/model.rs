@@ -594,7 +594,9 @@ fn lighting(raw: &RawInventory, id: &Identity, notes: &mut Vec<Note>) -> Vec<Lig
         if let Some((n, source)) = leds {
             notes.push(Note { what: format!("asusd:slash: {n} LEDs"), source });
         }
-        out.push(LightingDevice { id: DeviceId::new("asusd:slash"), label: "Slash".into(), backend: LightingBackend::AsusdSlash { path: s.path.clone() }, modes: Vec::new(), brightness_levels: Vec::new(), leds: leds.map(|l| l.0) });
+        // Brightness is continuous (0-255), so no levels; animations from knowledge.
+        let modes = knowledge::SLASH_MODES.iter().map(|(m, _)| *m).collect();
+        out.push(LightingDevice { id: DeviceId::new("asusd:slash"), label: "Slash".into(), backend: LightingBackend::AsusdSlash { path: s.path.clone() }, modes, brightness_levels: Vec::new(), leds: leds.map(|l| l.0) });
     }
     out
 }

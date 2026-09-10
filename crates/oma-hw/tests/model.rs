@@ -61,7 +61,9 @@ fn ga403wr_gpus_lighting_and_controls() {
     let kb = m.lighting.iter().find(|l| l.label == "Keyboard").expect("keyboard");
     assert_eq!(kb.modes, [0, 1, 2, 3, 10]);
     assert_eq!(kb.brightness_levels, [0, 1, 2, 3]);
-    assert_eq!(m.lighting.iter().find(|l| l.label == "Slash").and_then(|l| l.leds), Some(7));
+    let slash = m.lighting.iter().find(|l| l.label == "Slash").expect("Slash");
+    assert_eq!(slash.leds, Some(7));
+    assert!(slash.modes.contains(&16), "the animation it's showing (Bounce) is one of the known ones");
 
     let c = &m.controls;
     assert_eq!(c.power_modes, ["Quiet", "Balanced", "Performance"]);

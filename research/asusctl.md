@@ -18,7 +18,7 @@ Both trees were cloned and diffed locally; the machine this was researched on (R
 * Bus: **system bus**, well-known name **`xyz.ljones.Asusd`** (since 6.1.0-rc2, Jan 2025). Before that: `org.asuslinux.Daemon`.
 * Root path `/` implements `org.freedesktop.DBus.ObjectManager` — **use `GetManagedObjects` to discover objects**; the `default_path` values baked into the `rog_dbus` proxies are partly stale.
 * Fixed paths: `/xyz/ljones` (Platform, FanCurves, Backlight, XgmLed), `/xyz/ljones/asus_armoury/<sysfs_attr_name>` (one AsusArmoury object per firmware attribute). Hot-plug paths: `/xyz/ljones/aura/<...>` (Aura, Anime, Slash, ScsiAura).
-* Enums cross the wire as **`u` (serde positional variant index)** unless the type carries `#[zvariant(signature = "s")]`, in which case they are the **variant name string**. See §2.3 for the exact table — note that `AuraModeNum::Pulse/Comet/Flash` are 9/10/11 on the wire, not their `= 10/11/12` discriminants.
+* Enums cross the wire as **`u` (serde positional variant index)** unless the type carries `#[zvariant(signature = "s")]`, in which case they are the **variant name string**. See §2.3 for the exact table — note that `AuraModeNum::Pulse/Comet/Flash` are 9/10/11 in `AllModeData`, but `SupportedBasicModes`, `LedMode` and `LedModeData` use their `= 10/11/12` discriminants (verified on asusd 6.4, GA403WR: writing `LedModeData` with 9 fails "incorrect type", 10 selects Pulse).
 * All "tunables" (ppt_*, nv_*, panel_od, mini_led_mode, boot_sound, gpu_mux_mode, dgpu_disable, egpu_enable, mcu_powersave, charge_mode, screen_auto_brightness, apu_mem, cores_*) are **not** Platform properties any more; each is an `xyz.ljones.AsusArmoury` object with `CurrentValue`/`MinValue`/`MaxValue`/`DefaultValue`/`PossibleValues`/`ScalarIncrement`. PPT-class values are stored **per (profile × AC/DC)** and only written to sysfs when `Platform.EnablePptGroup` is true. GPU-class values are **queued** and applied by `asus-shutdown.service` at shutdown.
 * `rog_dbus` is **not on crates.io**; it must be a git dependency and it pulls the whole `asusd` crate (udev/libusb/inotify). Writing your own `#[proxy]` traits from §1 is lighter and lets you support both `org.asuslinux.*` and `xyz.ljones.*`.
 * `asusctl` (CLI) hard-refuses to run when its version string differs from `Platform.Version` — a CLI fallback must be the same version as the installed daemon.
@@ -434,7 +434,7 @@ pub struct DeviceState { pub slash_enabled: bool, pub slash_brightness: u8, pub 
 | `PlatformProfile` | `u` | 0 Balanced, 1 Performance, 2 Quiet, 3 LowPower, 4 Custom |
 | `CPUEPP` | `u` | 0 Default, 1 Performance, 2 BalancePerformance, 3 BalancePower, 4 Power |
 | `Properties`, `FirmwareAttribute`, `FanCurvePU`, `Speed`, `Direction` (rog_aura), `AnimeType`, `Anim*`, scsi `Speed` | `s` | variant name, e.g. `"ThrottlePolicy"`, `"PptPl1Spl"`, `"CPU"`, `"Med"`, `"Left"`, `"GA402"`, `"SeeYa"` |
-| `AuraModeNum` | `u` | 0 Static … 8 Ripple, **9 Pulse, 10 Comet, 11 Flash** (positional, not 10/11/12) |
+| `AuraModeNum` | `u` | 0 Static … 8 Ripple, then **10 Pulse, 11 Comet, 12 Flash** in `SupportedBasicModes`/`LedMode`/`LedModeData`; **9/10/11** (positional) only in `AllModeData` keys and values (verified asusd 6.4) |
 | `AuraZone`, `LedBrightness`, `Brightness` (anime) | `u` | positional = discriminant |
 | `AuraDeviceType` | `u` | 0..5 as listed, **6 = Unknown** (not 255) |
 | `PowerZones` | `u` | 0 Logo … 6 Ally, **7 = None** |

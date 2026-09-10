@@ -79,6 +79,11 @@ pub fn server_running() -> bool {
 }
 
 /// Spawn `openrgb --server` detached (user session). Returns immediately.
+/// Whether the `openrgb` program is on `PATH`.
+pub fn installed() -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join("openrgb").is_file()))
+}
+
 pub fn start_server() -> anyhow::Result<()> {
     std::process::Command::new("openrgb")
         .args(["--server", "--noautoconnect"])
