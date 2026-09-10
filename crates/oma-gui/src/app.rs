@@ -677,7 +677,10 @@ impl App {
             }
         };
         match m {
-            LightingMsg::Refresh => return Self::rgb_refresh(),
+            LightingMsg::Refresh => {
+                self.rgb_server = oma_hw::rgb::server_running();
+                return if self.rgb_server { Self::rgb_refresh() } else { Task::none() };
+            }
             LightingMsg::StartServer => {
                 if let Err(e) = oma_hw::rgb::start_server() {
                     self.toast = Some((format!("Cannot start OpenRGB: {e}"), false));
@@ -852,7 +855,8 @@ impl App {
                         self.gpu_edit.fan_percent = if n.fan_policy_manual.iter().any(|m| *m) { Some(n.fan_percent.clone()) } else { None };
                     }
                 }
-                let task = Task::batch([self.fan_tick(&snap), self.rgb_thermal_tick(&snap)]);
+                let rgb_probe = if !self.rgb_server && snap.seq % 20 == 5 && oma_hw::rgb::server_running() { Self::rgb_refresh() } else { Task::none() };
+                let task = Task::batch([self.fan_tick(&snap), self.rgb_thermal_tick(&snap), rgb_probe]);
                 self.snapshot = Some(snap);
                 let auto = if self.snapshot.as_ref().map(|s| s.seq % 2 == 0).unwrap_or(false) { self.auto_evaluate() } else { Task::none() };
                 Task::batch([task, auto])

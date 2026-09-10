@@ -1,7 +1,7 @@
 //! Minimal polkit authorization check via `org.freedesktop.PolicyKit1.Authority`.
 
 use std::collections::HashMap;
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::zvariant::Value;
 
 #[zbus::proxy(
     interface = "org.freedesktop.PolicyKit1.Authority",
@@ -17,7 +17,7 @@ trait Authority {
         details: HashMap<&str, &str>,
         flags: u32,
         cancellation_id: &str,
-    ) -> zbus::Result<(bool, bool, HashMap<String, OwnedValue>)>;
+    ) -> zbus::Result<(bool, bool, HashMap<String, String>)>;
 }
 
 /// Ask polkit whether the D-Bus `sender` may perform `action_id`.

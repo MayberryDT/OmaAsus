@@ -43,7 +43,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let status: Element<Message> = if app.rgb_server {
         row![widgets::pill(p, format!("OpenRGB · {} devices", app.rgb_devices.len()), p.ok), widgets::btn(p, "Rescan", widgets::ButtonKind::Ghost, Some(Message::Lighting(LightingMsg::Refresh)))].spacing(space::SM).align_y(iced::Alignment::Center).into()
     } else {
-        row![widgets::pill(p, "OpenRGB server not running", p.warn), widgets::btn(p, "Start OpenRGB server", widgets::ButtonKind::Primary, Some(Message::Lighting(LightingMsg::StartServer)))].spacing(space::SM).align_y(iced::Alignment::Center).into()
+        row![widgets::pill(p, "OpenRGB server not running", p.warn), widgets::btn(p, "Start OpenRGB server", widgets::ButtonKind::Primary, Some(Message::Lighting(LightingMsg::StartServer))), widgets::btn(p, "Re-check", widgets::ButtonKind::Ghost, Some(Message::Lighting(LightingMsg::Refresh)))].spacing(space::SM).align_y(iced::Alignment::Center).into()
     };
     let header = widgets::card(
         p,

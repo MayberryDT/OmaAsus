@@ -4,7 +4,7 @@ use oma_hw::{amdgpu, cpu, detect, hwmon, nvidia};
 use std::time::Duration;
 
 fn usage() -> ! {
-    eprintln!("usage: oma <inventory [--json]|sensors|watch [secs]|nvidia|cpu|daemons>");
+    eprintln!("usage: oma <inventory [--json]|sensors|watch [secs]|nvidia|cpu|daemons|rgb [index]>");
     std::process::exit(2)
 }
 
@@ -85,6 +85,24 @@ fn main() -> anyhow::Result<()> {
                 }
                 if oma_hw::hypr::available() {
                     println!("hyprland active: {:?}", oma_hw::hypr::active_window().await.map(|w| (w.class, w.fullscreen)));
+                }
+            });
+        }
+        Some("rgb") => {
+            let rt = tokio::runtime::Runtime::new()?;
+            println!("server_running={}", oma_hw::rgb::server_running());
+            rt.block_on(async {
+                match oma_hw::rgb::devices().await {
+                    Ok(d) => {
+                        for x in &d {
+                            println!("[{}] {} · {} · {} LEDs · modes={:?} active={}", x.index, x.name, x.kind, x.leds, x.modes.iter().map(|m| m.name.clone()).collect::<Vec<_>>(), x.active_mode);
+                        }
+                        if let Some(a) = args.get(1) {
+                            let idx: usize = a.parse().unwrap_or(0);
+                            println!("set_static({idx}) -> {:?}", oma_hw::rgb::set_static(idx, (255, 61, 104)).await.map_err(|e| e.to_string()));
+                        }
+                    }
+                    Err(e) => println!("devices error: {e:#}"),
                 }
             });
         }

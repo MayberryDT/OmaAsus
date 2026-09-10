@@ -18,6 +18,5 @@ nvml-wrapper.workspace = true
 nvml-wrapper-sys = "0.9"
 hidapi.workspace = true
 reqwest.workspace = true
-openrgb2 = "0.4"
 chrono.workspace = true
 uuid.workspace = true
