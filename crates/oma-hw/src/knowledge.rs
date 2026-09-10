@@ -267,6 +267,38 @@ pub fn sensor_role(driver: &str, label: &str, integrated_gpu: bool) -> SensorRol
     }
 }
 
+/// What a tachometer reads, where that isn't simply a fan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TachRole {
+    Fan,
+    Pump,
+    /// Shown only while spinning: a header that is often empty.
+    WhenSpinning,
+    /// Firmware's own copy of a fan another driver reports by name.
+    Duplicate,
+}
+
+pub fn tach_role(driver: &str, label: &str) -> TachRole {
+    match (driver, label) {
+        ("rog_ryujin", l) if l.starts_with("Pump") => TachRole::Pump,
+        ("rog_ryujin", l) if l.starts_with("Controller fan") => TachRole::WhenSpinning,
+        // The ACPI fan object mirrors a fan the platform driver names
+        // (GA403WR: acpi_fan fan1 tracks asus cpu_fan, verified).
+        ("acpi_fan", _) => TachRole::Duplicate,
+        _ => TachRole::Fan,
+    }
+}
+
+/// Temperature inputs that read nothing useful: unconnected Super I/O inputs,
+/// and EC copies of what the CPU's own sensor reports.
+pub fn sensor_hidden(driver: &str, label: &str) -> bool {
+    match driver {
+        n if n.starts_with("nct6") => ["PCH", "AUXTIN", "PECI", "TSI", "CPUTIN", "SYSTIN"].iter().any(|p| label.starts_with(p)),
+        "asusec" => matches!(label, "CPU" | "CPU Package" | "T_Sensor"),
+        _ => false,
+    }
+}
+
 /// Firmware attributes that switch or power off GPUs. supergfxd owns them when it runs.
 pub fn is_gpu_switch(attr: &str) -> bool {
     matches!(attr, "dgpu_disable" | "gpu_mux_mode" | "egpu_enable")
@@ -381,5 +413,15 @@ mod tests {
     fn aura_mode_keys_skip_the_missing_nine() {
         assert_eq!(aura_mode_data_key(3), 3);
         assert_eq!(aura_mode_data_key(10), 9);
+    }
+
+    #[test]
+    fn tachs_and_inputs_that_need_care() {
+        assert_eq!(tach_role("rog_ryujin", "Pump speed"), TachRole::Pump);
+        assert_eq!(tach_role("rog_ryujin", "Controller fan 1 speed"), TachRole::WhenSpinning);
+        assert_eq!(tach_role("acpi_fan", "fan1"), TachRole::Duplicate);
+        assert_eq!(tach_role("asus", "cpu_fan"), TachRole::Fan);
+        assert!(sensor_hidden("nct6799", "AUXTIN3") && sensor_hidden("asusec", "T_Sensor"));
+        assert!(!sensor_hidden("asusec", "VRM") && !sensor_hidden("k10temp", "Tctl"));
     }
 }

@@ -204,7 +204,9 @@ pub fn fan_row<'a, M: 'a>(p: Palette, f: &crate::telemetry::FanReading) -> Eleme
     let live = f.freshness == Freshness::Live;
     let tc = if live { p.text } else { p.text_faint };
     let duty = f.duty.unwrap_or(0.0) as f32 / 100.0;
-    let frac = if f.duty.is_some() { duty } else { (f.rpm as f32 / 2400.0).min(1.0) };
+    // Against the fan's top speed when known, else the fastest it has been seen to run.
+    let top = f.max_rpm.unwrap_or(f.peak_rpm.max(1000)) as f32;
+    let frac = if f.duty.is_some() { duty } else { (f.rpm as f32 / top).min(1.0) };
     let status: Element<M> = match f.freshness {
         // Answering but not spinning: firmware fan-stop (quiet profiles, idle).
         Freshness::Live if f.rpm == 0 => pill(p, "stopped", p.text_dim),

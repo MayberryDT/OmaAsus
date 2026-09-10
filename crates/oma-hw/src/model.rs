@@ -406,7 +406,7 @@ fn sensors(raw: &RawInventory) -> Vec<Sensor> {
             }
             out.push(Sensor { id: DeviceId(id), label: label.to_string(), role, kind, driver: d.name.clone(), input: input.clone() });
         };
-        for t in &d.temps {
+        for t in d.temps.iter().filter(|t| !knowledge::sensor_hidden(&d.name, &t.label)) {
             push(&t.label, SensorKind::Temperature, knowledge::sensor_role(&d.name, &t.label, igpu), &t.input);
         }
         for p in &d.powers {

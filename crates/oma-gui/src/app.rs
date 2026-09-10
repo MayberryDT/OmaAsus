@@ -142,6 +142,12 @@ pub struct Smooth {
     pub gpu_t: f32,
     pub coolant: f32,
     pub gpu_w: f32,
+    /// A discrete GPU's power while it is awake, else the package's.
+    pub power_w: f32,
+    /// Most package power seen, to scale it when no limit is reported.
+    pub power_peak: f32,
+    /// The fastest fan.
+    pub fan_rpm: f32,
     pub cpu_load: f32,
     pub gpu_load: f32,
     pub heat: f32,
@@ -1401,6 +1407,7 @@ impl App {
                     crate::config_store::save(&self.config);
                 }
                 self.model = Some(model.clone());
+                telemetry::set_model(model.clone());
                 let lights = self.load_lights();
                 let cc = self.cc.clone();
                 Task::batch([Task::perform(async move { Arc::new(crate::fans::FanBackend::build(model, inv, cc).await) }, Message::FanBackend), lights])
@@ -1460,6 +1467,13 @@ impl App {
                     ease(&mut self.smooth.gpu_t, s.gpu().and_then(|g| g.temp_c).unwrap_or(0.0) as f32, k);
                     ease(&mut self.smooth.coolant, s.coolant_c.unwrap_or(0.0) as f32, k);
                     ease(&mut self.smooth.gpu_w, s.nvidia.as_ref().and_then(|n| n.power_w).unwrap_or(0.0) as f32, k);
+                    let power = s.nvidia.as_ref().and_then(|n| n.power_w).or_else(|| s.package_w()).unwrap_or(0.0) as f32;
+                    ease(&mut self.smooth.power_w, power, k);
+                    if s.nvidia.is_none() {
+                        self.smooth.power_peak = self.smooth.power_peak.max(power);
+                    }
+                    let fastest = s.fans.iter().filter(|f| f.freshness == telemetry::Freshness::Live).map(|f| f.rpm).max().unwrap_or(0);
+                    ease(&mut self.smooth.fan_rpm, fastest as f32, k);
                     ease(&mut self.smooth.cpu_load, s.cpu.util_total as f32, k);
                     ease(&mut self.smooth.gpu_load, s.gpu().and_then(|g| g.load).unwrap_or(0.0) as f32, k);
                     let heat = ((self.smooth.cpu_t.max(self.smooth.gpu_t) - 40.0) / 50.0).clamp(0.0, 1.0);

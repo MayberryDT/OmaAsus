@@ -10,6 +10,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
     responsive(move |size| view_inner(app, false, size)).into()
 }
 
+fn gauge<'a>(p: theme::Palette, value: f32, max: f32, label: &str, unit: &str, color: iced::Color, inner: Option<(f32, iced::Color)>) -> Element<'a, Message> {
+    canvas(Gauge { palette: p, value, min: 0.0, max, label: label.into(), unit: unit.into(), color, decimals: 0, inner }).width(Length::Fill).height(Length::Fill).into()
+}
+
+/// A round scale a little above the most power seen: never less than 25 W.
+fn power_scale(peak: f32) -> f32 {
+    ((peak * 1.25).max(25.0) / 5.0).ceil() * 5.0
+}
+
 /// Everything below derives its scale from the real viewport, so the page
 /// composes itself for any window without scrolling.
 fn view_inner(app: &App, compact: bool, size_avail: iced::Size) -> Element<'_, Message> {
@@ -37,9 +46,14 @@ fn view_inner(app: &App, compact: bool, size_avail: iced::Size) -> Element<'_, M
     )
     .spacing(space::SM)
     .wrap();
+    let has_coolant = app.model.as_ref().is_some_and(|m| m.sensor_for(oma_hw::model::SensorRole::Coolant).is_some()) || snap.is_some_and(|s| s.coolant_c.is_some());
+    let mut series = vec![(&app.hist.gpu_temp, 25.0, 90.0, p.gpu), (&app.hist.cpu_temp, 30.0, 95.0, p.accent)];
+    if has_coolant {
+        series.insert(0, (&app.hist.coolant, 20.0, 50.0, p.coolant));
+    }
     let ridge = canvas(Ridge {
         palette: p,
-        series: vec![(&app.hist.coolant, 20.0, 50.0, p.coolant), (&app.hist.gpu_temp, 25.0, 90.0, p.gpu), (&app.hist.cpu_temp, 30.0, 95.0, p.accent)],
+        series,
         capacity: crate::app::HISTORY,
         phase: app.now.duration_since(app.t0).as_secs_f32() * 0.08,
     })
@@ -80,33 +94,46 @@ fn view_inner(app: &App, compact: bool, size_avail: iced::Size) -> Element<'_, M
     let hero = widgets::glow_card(p, hero_body).width(Length::Fill);
 
     let sm = app.smooth;
-    let cpu_t = sm.cpu_t;
-    let gpu_t = sm.gpu_t;
-    let cool_t = sm.coolant;
     let cpu_load = sm.cpu_load / 100.0;
     let gpu_load = sm.gpu_load / 100.0;
-    let gpu_w = sm.gpu_w;
-    let gpu_lim = snap.and_then(|s| s.nvidia.as_ref().and_then(|n| n.power_limit_w)).unwrap_or(450.0) as f32;
-
-    let g = move |value: f32, max: f32, label: &str, unit: &str, color, inner: Option<(f32, iced::Color)>| {
-        canvas(Gauge { palette: p, value, min: 0.0, max, label: label.into(), unit: unit.into(), color, decimals: 0, inner }).width(Length::Fill).height(Length::Fill)
+    let gpu = snap.and_then(|s| s.gpu());
+    let gpu_name = if gpu.is_some_and(|g| !g.discrete) { "iGPU" } else { "GPU" };
+    // Power: an awake discrete GPU's against the limit it reports, else the
+    // package's against the most it has drawn.
+    let nvidia = snap.is_some_and(|s| s.nvidia.is_some());
+    let nv_limit = snap.and_then(|s| s.nvidia.as_ref().and_then(|n| n.power_limit_w)).map(|l| l as f32);
+    let (power_name, power_max) = match (nvidia, nv_limit) {
+        (true, Some(limit)) => ("GPU power", limit),
+        (true, None) => ("GPU power", power_scale(sm.power_w)),
+        (false, _) => ("Power", power_scale(sm.power_peak)),
     };
-    let gauges_row = Row::new()
-        .spacing(space::LG)
-        .push(g(cpu_t, 95.0, "CPU", "°C", theme::thermal(&p, cpu_t as f64, 35.0, 95.0), Some((cpu_load, p.cpu))))
-        .push(g(gpu_t, 90.0, "GPU", "°C", theme::thermal(&p, gpu_t as f64, 30.0, 85.0), Some((gpu_load, p.gpu))))
-        .push(g(cool_t, 50.0, "Coolant", "°C", theme::thermal(&p, cool_t as f64, 22.0, 45.0), None))
-        .push(g(gpu_w, gpu_lim.max(1.0), "GPU power", "W", p.power, None));
+    let fastest = snap.and_then(|s| s.fans.iter().filter(|f| f.freshness == crate::telemetry::Freshness::Live).max_by_key(|f| f.rpm));
+    let fan_max = fastest.map(|f| f.max_rpm.unwrap_or((f.peak_rpm as f64 * 1.1) as u64).max(1000) as f32).unwrap_or(1000.0);
+
+    // Gauges for what this machine has.
+    let mut dials: Vec<Element<Message>> = vec![gauge(p, sm.cpu_t, 95.0, "CPU", "°C", theme::thermal(&p, sm.cpu_t as f64, 35.0, 95.0), Some((cpu_load, p.cpu)))];
+    if gpu.is_some() {
+        dials.push(gauge(p, sm.gpu_t, 90.0, gpu_name, "°C", theme::thermal(&p, sm.gpu_t as f64, 30.0, 85.0), Some((gpu_load, p.gpu))));
+    }
+    if has_coolant {
+        dials.push(gauge(p, sm.coolant, 50.0, "Coolant", "°C", theme::thermal(&p, sm.coolant as f64, 22.0, 45.0), None));
+    } else if fastest.is_some() {
+        dials.push(gauge(p, sm.fan_rpm, fan_max, "Fans", "rpm", p.fan, None));
+    }
+    dials.push(gauge(p, sm.power_w, power_max.max(1.0), power_name, "W", p.power, None));
     let gauges: Element<Message> = if compact {
-        column![
-            row![g(cpu_t, 95.0, "CPU", "°C", theme::thermal(&p, cpu_t as f64, 35.0, 95.0), Some((cpu_load, p.cpu))), g(gpu_t, 90.0, "GPU", "°C", theme::thermal(&p, gpu_t as f64, 30.0, 85.0), Some((gpu_load, p.gpu)))].spacing(space::SM).height(Length::Fill),
-            row![g(cool_t, 50.0, "Coolant", "°C", theme::thermal(&p, cool_t as f64, 22.0, 45.0), None), g(gpu_w, gpu_lim.max(1.0), "GPU power", "W", p.power, None)].spacing(space::SM).height(Length::Fill),
-        ]
-        .spacing(space::SM)
-        .height(Length::Fill)
-        .into()
+        let mut rows = Column::new().spacing(space::SM).height(Length::Fill);
+        let mut it = dials.into_iter();
+        while let Some(a) = it.next() {
+            let mut pair = Row::new().spacing(space::SM).height(Length::Fill).push(a);
+            if let Some(b) = it.next() {
+                pair = pair.push(b);
+            }
+            rows = rows.push(pair);
+        }
+        rows.into()
     } else {
-        gauges_row.width(Length::Fill).height(Length::Fill).into()
+        Row::with_children(dials).spacing(space::LG).width(Length::Fill).height(Length::Fill).into()
     };
 
     // Sparkline tiles: big numeral, caption, live line.
@@ -131,26 +158,22 @@ fn view_inner(app: &App, compact: bool, size_avail: iced::Size) -> Element<'_, M
         .height(Length::Fill)
     };
     let cpu_mhz = snap.map(|s| s.cpu.max_core_mhz).unwrap_or(0.0);
-    let gpu_mhz = snap.and_then(|s| s.nvidia.as_ref().and_then(|n| n.graphics_mhz)).unwrap_or(0);
+    let gpu_mhz = snap.and_then(|s| s.nvidia.as_ref().and_then(|n| n.graphics_mhz).map(f64::from).or_else(|| s.amd.as_ref().and_then(|a| a.sclk_mhz))).unwrap_or(0.0);
     let cpu_w = snap.and_then(|s| s.cpu.package_w);
-    let sparks: Element<Message> = if compact {
-        column![
-            spark("CPU load", &app.hist.cpu_load, 0.0, 100.0, p.cpu, format!("{:.0}", cpu_load * 100.0), "%", format!("{cpu_mhz:.0} MHz")),
-            spark("GPU load", &app.hist.gpu_load, 0.0, 100.0, p.gpu, format!("{:.0}", gpu_load * 100.0), "%", format!("{gpu_mhz} MHz")),
-        ]
-        .spacing(space::MD)
-        .height(Length::Fill)
-        .into()
-    } else {
-        row![
-            spark("CPU load", &app.hist.cpu_load, 0.0, 100.0, p.cpu, format!("{:.0}", cpu_load * 100.0), "%", format!("{cpu_mhz:.0} MHz")),
-            spark("GPU load", &app.hist.gpu_load, 0.0, 100.0, p.gpu, format!("{:.0}", gpu_load * 100.0), "%", format!("{gpu_mhz} MHz")),
-            spark("GPU power", &app.hist.gpu_power, 0.0, gpu_lim.max(100.0), p.power, format!("{gpu_w:.0}"), "W", format!("of {gpu_lim:.0} W{}", cpu_w.map(|w| format!(" · CPU {w:.0} W")).unwrap_or_default())),
-        ]
-        .spacing(space::LG)
-        .height(Length::Fill)
-        .into()
-    };
+    let gpu_label = format!("{gpu_name} load");
+    let mut tiles: Vec<Element<Message>> = vec![spark("CPU load", &app.hist.cpu_load, 0.0, 100.0, p.cpu, format!("{:.0}", cpu_load * 100.0), "%", format!("{cpu_mhz:.0} MHz")).into()];
+    if gpu.is_some() {
+        tiles.push(spark(&gpu_label, &app.hist.gpu_load, 0.0, 100.0, p.gpu, format!("{:.0}", gpu_load * 100.0), "%", format!("{gpu_mhz:.0} MHz")).into());
+    }
+    if !compact {
+        let caption = match (nvidia, nv_limit) {
+            (true, Some(limit)) => format!("of {limit:.0} W{}", cpu_w.map(|w| format!(" · CPU {w:.0} W")).unwrap_or_default()),
+            (true, None) => "discrete GPU".into(),
+            (false, _) => "package".into(),
+        };
+        tiles.push(spark(power_name, if nvidia { &app.hist.gpu_power } else { &app.hist.power }, 0.0, power_max.max(1.0), p.power, format!("{:.0}", sm.power_w), "W", caption).into());
+    }
+    let sparks: Element<Message> = if compact { Column::with_children(tiles).spacing(space::MD).height(Length::Fill).into() } else { Row::with_children(tiles).spacing(space::LG).height(Length::Fill).into() };
 
     let fans: Vec<Element<Message>> = snap
         .map(|s| {
@@ -162,7 +185,8 @@ fn view_inner(app: &App, compact: bool, size_avail: iced::Size) -> Element<'_, M
         })
         .unwrap_or_default();
     let fans_el: Element<Message> = if fans.is_empty() { widgets::dim(p, "No tachometer signals yet.") } else { Column::with_children(fans).spacing(space::SM).into() };
-    let fan_card = widgets::card(p, column![widgets::eyebrow(p, "Fans & pump"), fans_el].spacing(space::MD).height(Length::Fill)).width(Length::FillPortion(3)).height(Length::Fill);
+    let fan_title = if snap.is_some_and(|s| s.pump_rpm.is_some()) { "Fans & pump" } else { "Fans" };
+    let fan_card = widgets::card(p, column![widgets::eyebrow(p, fan_title), fans_el].spacing(space::MD).height(Length::Fill)).width(Length::FillPortion(3)).height(Length::Fill);
 
     let temps: Vec<Element<Message>> = snap
         .map(|s| {
@@ -170,7 +194,7 @@ fn view_inner(app: &App, compact: bool, size_avail: iced::Size) -> Element<'_, M
             if let Some(t) = s.vrm_c { v.push(("VRM".into(), t)); }
             if let Some(t) = s.board_c { v.push(("Motherboard".into(), t)); }
             for (i, t) in s.cpu.ccd_c.iter().enumerate() { v.push((format!("CCD{}", i + 1), *t)); }
-            for (i, t) in s.nvme_c.iter().enumerate() { v.push((format!("NVMe {}", i + 1), *t)); }
+            for (i, t) in s.nvme_c.iter().enumerate() { v.push((format!("Drive {}", i + 1), *t)); }
             for (i, t) in s.dimm_c.iter().enumerate() { v.push((format!("DIMM {}", i + 1), *t)); }
             let mut rows: Vec<Element<Message>> = v
                 .into_iter()

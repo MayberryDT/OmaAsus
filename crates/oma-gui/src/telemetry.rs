@@ -6,7 +6,10 @@ use oma_hw::cpu::{CpuMonitor, CpuTelemetry};
 use oma_hw::hwmon::{self, HwmonDevice};
 use oma_hw::nvidia::{DgpuState, NvidiaGpu, NvidiaTelemetry};
 use oma_hw::amdgpu::{AmdGpu, AmdGpuTelemetry};
+use oma_hw::knowledge::{self, TachRole};
 use oma_hw::lianli::LianLiHub;
+use oma_hw::model::{HardwareModel, SensorRole};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Freshness of a channel in the persistent registry.
@@ -35,6 +38,10 @@ pub struct FanReading {
     pub duty: Option<f64>,
     pub device: String,
     pub freshness: Freshness,
+    /// Top speed, when known (knowledge or the user's quirks).
+    pub max_rpm: Option<u64>,
+    /// Fastest seen since start, to scale a fan whose top speed isn't known.
+    pub peak_rpm: u64,
 }
 
 /// Registry entry: last value plus when it was last refreshed.
@@ -74,8 +81,6 @@ pub struct Snapshot {
     pub cpu_control: oma_hw::cpu::CpuControlState,
     /// Every hwmon temperature read this tick: (driver, label) → °C.
     pub hwmon_temps: std::collections::BTreeMap<(String, String), f64>,
-    /// Super I/O tachometers by pwm index (rpm), for the Cooling page.
-    pub superio_rpm: std::collections::BTreeMap<u32, u64>,
 }
 
 /// GPU figures for glance views.
@@ -177,7 +182,39 @@ struct Sampler {
     /// Persistent registries: channels never disappear once discovered.
     fans: std::collections::HashMap<String, Tracked<FanReading>>,
     temps: std::collections::HashMap<String, Tracked<Reading>>,
+    /// Some driver names its fans, so firmware duplicates of them can go.
+    named_tachs: bool,
     seq: u64,
+}
+
+/// The hardware model, for names and limits, once detection has built it.
+static MODEL: std::sync::RwLock<Option<Arc<HardwareModel>>> = std::sync::RwLock::new(None);
+
+pub fn set_model(m: Arc<HardwareModel>) {
+    if let Ok(mut g) = MODEL.write() {
+        *g = Some(m);
+    }
+}
+
+fn model() -> Option<Arc<HardwareModel>> {
+    MODEL.read().ok()?.clone()
+}
+
+/// A fan's name and top speed from the model output it belongs to, by the
+/// output's id or its tachometer's.
+fn fan_identity(model: Option<&HardwareModel>, id: &str, raw: &str) -> (String, Option<u64>) {
+    match model.and_then(|m| m.fans.iter().find(|f| f.id.as_str() == id || f.tach.as_ref().is_some_and(|t| t.as_str() == id))) {
+        Some(f) => (f.label.clone(), f.caps.max_rpm.map(u64::from)),
+        None => (raw.to_string(), None),
+    }
+}
+
+/// A readable name for a temperature the driver only numbers ("temp1").
+fn temp_label(d: &HwmonDevice, label: &str) -> String {
+    match label.strip_prefix("temp").filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) {
+        Some(n) => format!("{} {n}", d.friendly_name()),
+        None => label.replace('_', " "),
+    }
 }
 
 /// A sysfs read that takes longer than this is a stalled device, not a sensor.
@@ -208,26 +245,26 @@ impl Sampler {
                 tracing::warn!(device = %d.name, "hwmon device not answering; quarantined for {}s", QUARANTINE.as_secs());
                 quarantine.insert(d.path.to_string_lossy().into_owned(), std::time::Instant::now() + QUARANTINE);
                 // Register what the device *should* expose, flagged offline, so it stays visible.
-                for f in &d.fans {
-                    let essential = d.name != "rog_ryujin" || f.label.starts_with("Pump");
-                    if essential {
-                        let order = fans.len();
-                        fans.insert(format!("{}:{}", d.name, f.label), Tracked { value: FanReading { label: f.label.clone(), rpm: 0, duty: None, device: d.friendly_name().to_string(), freshness: Freshness::Offline }, last_seen: long_ago, order });
-                    }
+                for f in d.fans.iter().filter(|f| matches!(knowledge::tach_role(&d.name, &f.label), TachRole::Fan | TachRole::Pump)) {
+                    let order = fans.len();
+                    fans.insert(format!("{}:{}", d.name, f.label), Tracked { value: FanReading { label: f.label.clone(), device: d.friendly_name().to_string(), freshness: Freshness::Offline, ..Default::default() }, last_seen: long_ago, order });
                 }
-                if d.name == "rog_ryujin" {
+                // Coolant is what a stalled cooler most needs watching for.
+                for t in d.temps.iter().filter(|t| knowledge::sensor_role(&d.name, &t.label, false) == SensorRole::Coolant) {
                     let order = temps.len();
-                    temps.insert("rog_ryujin:Coolant".into(), Tracked { value: Reading { label: "Coolant".into(), value: 0.0, freshness: Freshness::Offline }, last_seen: long_ago, order });
+                    temps.insert(format!("{}:{}", d.name, t.label), Tracked { value: Reading { label: temp_label(d, &t.label), value: 0.0, freshness: Freshness::Offline }, last_seen: long_ago, order });
                 }
             }
         }
-        Self { cpu: CpuMonitor::new(), nvidia: NvidiaSource::default(), amd: AmdGpu::enumerate(), hwmon, lianli: LianLiHub::enumerate(), quarantine, fans, temps, seq: 0 }
+        let named_tachs = hwmon.iter().any(|d| d.fans.iter().any(|f| knowledge::tach_role(&d.name, &f.label) == TachRole::Fan && f.label != format!("fan{}", f.index)));
+        Self { cpu: CpuMonitor::new(), nvidia: NvidiaSource::default(), amd: AmdGpu::enumerate(), hwmon, lianli: LianLiHub::enumerate(), quarantine, fans, temps, named_tachs, seq: 0 }
     }
 
     fn track_fan(&mut self, key: String, mut r: FanReading, now: std::time::Instant) {
         let order = self.fans.len();
         r.freshness = Freshness::Live;
         let e = self.fans.entry(key).or_insert_with(|| Tracked { value: r.clone(), last_seen: now, order });
+        r.peak_rpm = e.value.peak_rpm.max(r.rpm);
         e.value = r;
         e.last_seen = now;
     }
@@ -242,6 +279,7 @@ impl Sampler {
 
     fn sample(&mut self) -> Snapshot {
         self.seq += 1;
+        let model = model();
         let mut s = Snapshot { seq: self.seq, cpu: self.cpu.sample(), ..Default::default() };
         s.nvidia = self.nvidia.sample(std::time::Instant::now());
         let amd = self.amd.iter().find(|g| !g.is_integrated).or(self.amd.first());
@@ -257,67 +295,65 @@ impl Sampler {
                 continue;
             }
             let t_dev = std::time::Instant::now();
-            match d.name.as_str() {
-                "nvme" => {
-                    if let Some(t) = d.temps.first().and_then(|t| t.read()) {
-                        s.nvme_c.push(t);
-                    }
+            let igpu = self.amd.iter().any(|g| g.is_integrated && g.device_path == d.device_path);
+            let (mut storage, mut memory) = (false, false);
+            for t in &d.temps {
+                if t_dev.elapsed() > STALL {
+                    break;
                 }
-                "spd5118" => {
-                    if let Some(t) = d.temps.first().and_then(|t| t.read()) {
-                        s.dimm_c.push(t);
-                    }
+                if knowledge::sensor_hidden(&d.name, &t.label) {
+                    continue;
                 }
-                "k10temp" | "zenpower" | "coretemp" | "amdgpu" | "iwlwifi_1" | "iwlwifi" => {}
-                _ => {
-                    for t in &d.temps {
-                        if t_dev.elapsed() > STALL {
-                            break;
-                        }
-                        if let Some(v) = t.read() {
-                            s.hwmon_temps.insert((d.name.clone(), t.label.clone()), v);
-                            match (d.name.as_str(), t.label.as_str()) {
-                                ("rog_ryujin", _) => s.coolant_c = Some(v),
-                                ("asusec", "VRM") => s.vrm_c = Some(v),
-                                ("asusec", "Motherboard") => s.board_c = Some(v),
-                                ("asusec", "Water_In") | ("asusec", "Water_Out") => pending_temps.push((format!("{}:{}", d.name, t.label), t.label.replace('_', " "), v)),
-                                ("asusec", "CPU") | ("asusec", "CPU Package") | ("asusec", "T_Sensor") => {}
-                                (n, l) if n.starts_with("nct6") => {
-                                    if !l.starts_with("PCH") && !l.starts_with("AUXTIN") && !l.starts_with("PECI") && !l.starts_with("TSI") && !l.starts_with("CPUTIN") && !l.starts_with("SYSTIN") {
-                                        pending_temps.push((format!("{}:{}", d.name, l), l.to_string(), v));
-                                    }
-                                }
-                                (_, l) => pending_temps.push((format!("{}:{}", d.name, l), l.to_string(), v)),
-                            }
+                let Some(v) = t.read() else { continue };
+                s.hwmon_temps.insert((d.name.clone(), t.label.clone()), v);
+                let key = format!("{}:{}", d.name, t.label);
+                match knowledge::sensor_role(&d.name, &t.label, igpu) {
+                    // Shown with the CPU and GPU figures, or not a component's temperature.
+                    SensorRole::CpuTemp | SensorRole::CpuCore | SensorRole::IgpuTemp | SensorRole::DgpuTemp | SensorRole::GpuHotspot | SensorRole::Wireless => {}
+                    // One reading per drive and memory module: the first is the overall one.
+                    SensorRole::Storage => {
+                        if !std::mem::replace(&mut storage, true) {
+                            s.nvme_c.push(v);
                         }
                     }
-                    for f in &d.fans {
-                        if t_dev.elapsed() > STALL {
-                            break;
+                    SensorRole::Memory => {
+                        if !std::mem::replace(&mut memory, true) {
+                            s.dimm_c.push(v);
                         }
-                        // A failed read is no reading: the fan goes stale, then offline.
-                        let Some(rpm) = f.read_rpm() else { continue };
-                        if d.is_super_io() {
-                            s.superio_rpm.insert(f.index, rpm);
-                        }
-                        if d.name == "rog_ryujin" && f.label.starts_with("Pump") {
-                            s.pump_rpm = Some(rpm);
-                        }
-                        let key = format!("{}:{}", d.name, f.label);
-                        // 0 rpm is a stopped fan, not a missing one, once the fan is known:
-                        // it has spun before, or the driver names it. Unnamed inputs that
-                        // never spun are unused headers and stay hidden.
-                        let named = f.label != format!("fan{}", f.index);
-                        if rpm == 0 && !named && !self.fans.contains_key(&key) {
-                            continue;
-                        }
-                        if d.name == "rog_ryujin" && rpm == 0 && f.label.starts_with("Controller fan") {
-                            continue;
-                        }
-                        let duty = d.pwms.iter().find(|p| p.index == f.index && p.has_duty).map(|p| p.read().value as f64 / 2.55);
-                        pending_fans.push((key, FanReading { label: f.label.clone(), rpm, duty, device: d.friendly_name().to_string(), freshness: Freshness::Live }));
                     }
+                    SensorRole::Vrm => s.vrm_c = s.vrm_c.or(Some(v)),
+                    SensorRole::Board => s.board_c = s.board_c.or(Some(v)),
+                    SensorRole::Coolant => {
+                        s.coolant_c = s.coolant_c.or(Some(v));
+                        pending_temps.push((key, temp_label(d, &t.label), v));
+                    }
+                    _ => pending_temps.push((key, temp_label(d, &t.label), v)),
                 }
+            }
+            for f in &d.fans {
+                if t_dev.elapsed() > STALL {
+                    break;
+                }
+                // A failed read is no reading: the fan goes stale, then offline.
+                let Some(rpm) = f.read_rpm() else { continue };
+                let role = knowledge::tach_role(&d.name, &f.label);
+                if role == TachRole::Duplicate && self.named_tachs {
+                    continue;
+                }
+                if role == TachRole::Pump {
+                    s.pump_rpm = Some(rpm);
+                }
+                let key = format!("{}:{}", d.name, f.label);
+                // 0 rpm is a stopped fan, not a missing one, once the fan is known:
+                // it has spun before, or the driver names it. Unnamed inputs that
+                // never spun are unused headers and stay hidden.
+                let named = f.label != format!("fan{}", f.index);
+                if rpm == 0 && (role == TachRole::WhenSpinning || (!named && !self.fans.contains_key(&key))) {
+                    continue;
+                }
+                let duty = d.pwms.iter().find(|p| p.index == f.index && p.has_duty).map(|p| p.read().value as f64 / 2.55);
+                let (label, max_rpm) = fan_identity(model.as_deref(), &format!("hwmon:{}:{}", d.name, f.label), &f.label);
+                pending_fans.push((key, FanReading { label, rpm, duty, device: d.friendly_name().to_string(), freshness: Freshness::Live, max_rpm, peak_rpm: 0 }));
             }
             if t_dev.elapsed() > STALL {
                 stalled.push(d.path.to_string_lossy().into_owned());
@@ -337,7 +373,8 @@ impl Sampler {
             if let Ok(rpm) = h.read_rpm() {
                 for (c, r) in rpm.iter().enumerate() {
                     if *r > 0 {
-                        pending_fans.push((format!("lianli{i}:{}", c + 1), FanReading { label: format!("Lian Li channel {}", c + 1), rpm: *r as u64, duty: None, device: h.kind.label().to_string(), freshness: Freshness::Live }));
+                        let (label, max_rpm) = fan_identity(model.as_deref(), &format!("lianli:{i}:ch{}", c + 1), &format!("{} channel {}", h.kind.label(), c + 1));
+                        pending_fans.push((format!("lianli{i}:{}", c + 1), FanReading { label, rpm: *r as u64, duty: None, device: h.kind.label().to_string(), freshness: Freshness::Live, max_rpm, peak_rpm: 0 }));
                     }
                 }
             }
