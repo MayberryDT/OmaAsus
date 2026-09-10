@@ -209,18 +209,8 @@ fn fan_readings(app: &App) -> iced::widget::Container<'_, Message> {
         .map(|s| {
             s.fans
                 .iter()
-                .filter(|f| f.rpm > 0 || f.label.starts_with("Pump"))
-                .map(|f| {
-                    row![
-                        column![widgets::body(p, &f.label), widgets::dim(p, &f.device)].spacing(2.0).width(Length::FillPortion(2)),
-                        widgets::bar(p, f.duty.map(|d| d as f32 / 100.0).unwrap_or((f.rpm as f32 / 2400.0).min(1.0)), p.fan),
-                        widgets::mono(p, format!("{:>5} rpm", f.rpm), size::SMALL),
-                        widgets::mono(p, f.duty.map(|d| format!("{d:>3.0}%")).unwrap_or_else(|| "  — ".into()), size::SMALL),
-                    ]
-                    .spacing(space::MD)
-                    .align_y(iced::Alignment::Center)
-                    .into()
-                })
+                .filter(|f| f.rpm > 0 || f.label.starts_with("Pump") || f.freshness != crate::telemetry::Freshness::Live)
+                .map(|f| widgets::fan_row(p, f))
                 .collect()
         })
         .unwrap_or_default();

@@ -9,10 +9,23 @@ use oma_hw::amdgpu::{AmdGpu, AmdGpuTelemetry};
 use oma_hw::lianli::LianLiHub;
 use std::time::Duration;
 
+/// Freshness of a channel in the persistent registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Freshness {
+    /// Updated within the last few seconds.
+    #[default]
+    Live,
+    /// Missed a few polls; last value shown dimmed.
+    Stale,
+    /// Not answering (quarantined / unplugged); last value kept, flagged.
+    Offline,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Reading {
     pub label: String,
     pub value: f64,
+    pub freshness: Freshness,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -21,6 +34,23 @@ pub struct FanReading {
     pub rpm: u64,
     pub duty: Option<f64>,
     pub device: String,
+    pub freshness: Freshness,
+}
+
+/// Registry entry: last value plus when it was last refreshed.
+#[derive(Debug, Clone)]
+struct Tracked<T> {
+    value: T,
+    last_seen: std::time::Instant,
+    order: usize,
+}
+
+const STALE_AFTER: Duration = Duration::from_secs(4);
+const OFFLINE_AFTER: Duration = Duration::from_secs(30);
+
+fn freshness(last_seen: std::time::Instant, now: std::time::Instant) -> Freshness {
+    let age = now.duration_since(last_seen);
+    if age < STALE_AFTER { Freshness::Live } else if age < OFFLINE_AFTER { Freshness::Stale } else { Freshness::Offline }
 }
 
 /// One telemetry frame.
@@ -54,6 +84,9 @@ struct Sampler {
     lianli: Vec<LianLiHub>,
     /// Devices whose sysfs reads stalled (e.g. a wedged USB AIO): skipped until the instant.
     quarantine: std::collections::HashMap<String, std::time::Instant>,
+    /// Persistent registries: channels never disappear once discovered.
+    fans: std::collections::HashMap<String, Tracked<FanReading>>,
+    temps: std::collections::HashMap<String, Tracked<Reading>>,
     seq: u64,
 }
 
@@ -77,13 +110,44 @@ impl Sampler {
     fn new() -> Self {
         let hwmon = hwmon::enumerate();
         let mut quarantine = std::collections::HashMap::new();
+        let mut fans: std::collections::HashMap<String, Tracked<FanReading>> = Default::default();
+        let mut temps: std::collections::HashMap<String, Tracked<Reading>> = Default::default();
+        let long_ago = std::time::Instant::now() - OFFLINE_AFTER;
         for d in &hwmon {
             if !responsive(d) {
                 tracing::warn!(device = %d.name, "hwmon device not answering; quarantined for {}s", QUARANTINE.as_secs());
                 quarantine.insert(d.path.to_string_lossy().into_owned(), std::time::Instant::now() + QUARANTINE);
+                // Register what the device *should* expose, flagged offline, so it stays visible.
+                for f in &d.fans {
+                    let essential = d.name != "rog_ryujin" || f.label.starts_with("Pump");
+                    if essential {
+                        let order = fans.len();
+                        fans.insert(format!("{}:{}", d.name, f.label), Tracked { value: FanReading { label: f.label.clone(), rpm: 0, duty: None, device: d.friendly_name().to_string(), freshness: Freshness::Offline }, last_seen: long_ago, order });
+                    }
+                }
+                if d.name == "rog_ryujin" {
+                    let order = temps.len();
+                    temps.insert("rog_ryujin:Coolant".into(), Tracked { value: Reading { label: "Coolant".into(), value: 0.0, freshness: Freshness::Offline }, last_seen: long_ago, order });
+                }
             }
         }
-        Self { cpu: CpuMonitor::new(), nvidia: NvidiaGpu::open(0).ok(), amd: AmdGpu::enumerate(), hwmon, lianli: LianLiHub::enumerate(), quarantine, seq: 0 }
+        Self { cpu: CpuMonitor::new(), nvidia: NvidiaGpu::open(0).ok(), amd: AmdGpu::enumerate(), hwmon, lianli: LianLiHub::enumerate(), quarantine, fans, temps, seq: 0 }
+    }
+
+    fn track_fan(&mut self, key: String, mut r: FanReading, now: std::time::Instant) {
+        let order = self.fans.len();
+        r.freshness = Freshness::Live;
+        let e = self.fans.entry(key).or_insert_with(|| Tracked { value: r.clone(), last_seen: now, order });
+        e.value = r;
+        e.last_seen = now;
+    }
+
+    fn track_temp(&mut self, key: String, label: String, v: f64, now: std::time::Instant) {
+        let order = self.temps.len();
+        let e = self.temps.entry(key).or_insert_with(|| Tracked { value: Reading { label: label.clone(), value: v, freshness: Freshness::Live }, last_seen: now, order });
+        e.value.value = v;
+        e.value.label = label;
+        e.last_seen = now;
     }
 
     fn sample(&mut self) -> Snapshot {
@@ -94,6 +158,8 @@ impl Sampler {
         s.cpu_control = oma_hw::cpu::control_state();
         let now = std::time::Instant::now();
         let mut stalled: Vec<String> = Vec::new();
+        let mut pending_temps: Vec<(String, String, f64)> = Vec::new();
+        let mut pending_fans: Vec<(String, FanReading)> = Vec::new();
         for d in &self.hwmon {
             if self.quarantine.get(&d.path.to_string_lossy().into_owned()).is_some_and(|until| *until > now) {
                 continue;
@@ -122,14 +188,14 @@ impl Sampler {
                                 ("rog_ryujin", _) => s.coolant_c = Some(v),
                                 ("asusec", "VRM") => s.vrm_c = Some(v),
                                 ("asusec", "Motherboard") => s.board_c = Some(v),
-                                ("asusec", "Water_In") | ("asusec", "Water_Out") => s.temps.push(Reading { label: t.label.replace('_', " "), value: v }),
+                                ("asusec", "Water_In") | ("asusec", "Water_Out") => pending_temps.push((format!("{}:{}", d.name, t.label), t.label.replace('_', " "), v)),
                                 ("asusec", "CPU") | ("asusec", "CPU Package") | ("asusec", "T_Sensor") => {}
                                 (n, l) if n.starts_with("nct6") => {
                                     if !l.starts_with("PCH") && !l.starts_with("AUXTIN") && !l.starts_with("PECI") && !l.starts_with("TSI") && !l.starts_with("CPUTIN") && !l.starts_with("SYSTIN") {
-                                        s.temps.push(Reading { label: l.to_string(), value: v });
+                                        pending_temps.push((format!("{}:{}", d.name, l), l.to_string(), v));
                                     }
                                 }
-                                (_, l) => s.temps.push(Reading { label: l.to_string(), value: v }),
+                                (_, l) => pending_temps.push((format!("{}:{}", d.name, l), l.to_string(), v)),
                             }
                         }
                     }
@@ -151,7 +217,7 @@ impl Sampler {
                             continue;
                         }
                         let duty = d.pwms.iter().find(|p| p.index == f.index).map(|p| p.read().value as f64 / 2.55);
-                        s.fans.push(FanReading { label: f.label.clone(), rpm, duty, device: d.friendly_name().to_string() });
+                        pending_fans.push((format!("{}:{}", d.name, f.label), FanReading { label: f.label.clone(), rpm, duty, device: d.friendly_name().to_string(), freshness: Freshness::Live }));
                     }
                 }
             }
@@ -163,26 +229,37 @@ impl Sampler {
         for key in stalled {
             self.quarantine.insert(key, now + QUARANTINE);
         }
-        // Lian Li hub tachometers (HID input report), every other tick.
-        if self.seq % 2 == 0 {
-            for (i, h) in self.lianli.iter().enumerate() {
-                let key = format!("lianli{i}");
-                if self.quarantine.get(&key).is_some_and(|u| *u > now) {
-                    continue;
-                }
-                let t = std::time::Instant::now();
-                if let Ok(rpm) = h.read_rpm() {
-                    for (c, r) in rpm.iter().enumerate() {
-                        if *r > 0 {
-                            s.fans.push(FanReading { label: format!("Lian Li channel {}", c + 1), rpm: *r as u64, duty: None, device: h.kind.label().to_string() });
-                        }
+        // Lian Li hub tachometers (HID input report).
+        for (i, h) in self.lianli.iter().enumerate() {
+            let key = format!("lianli{i}");
+            if self.quarantine.get(&key).is_some_and(|u| *u > now) {
+                continue;
+            }
+            let t = std::time::Instant::now();
+            if let Ok(rpm) = h.read_rpm() {
+                for (c, r) in rpm.iter().enumerate() {
+                    if *r > 0 {
+                        pending_fans.push((format!("lianli{i}:{}", c + 1), FanReading { label: format!("Lian Li channel {}", c + 1), rpm: *r as u64, duty: None, device: h.kind.label().to_string(), freshness: Freshness::Live }));
                     }
                 }
-                if t.elapsed() > STALL {
-                    self.quarantine.insert(key, now + QUARANTINE);
-                }
+            }
+            if t.elapsed() > STALL {
+                self.quarantine.insert(key, now + QUARANTINE);
             }
         }
+        for (key, label, v) in pending_temps {
+            self.track_temp(key, label, v, now);
+        }
+        for (key, r) in pending_fans {
+            self.track_fan(key, r, now);
+        }
+        // Emit the registries in discovery order with freshness flags.
+        let mut fans: Vec<&Tracked<FanReading>> = self.fans.values().collect();
+        fans.sort_by_key(|t| t.order);
+        s.fans = fans.into_iter().map(|t| FanReading { freshness: freshness(t.last_seen, now), ..t.value.clone() }).collect();
+        let mut temps: Vec<&Tracked<Reading>> = self.temps.values().collect();
+        temps.sort_by_key(|t| t.order);
+        s.temps = temps.into_iter().map(|t| Reading { freshness: freshness(t.last_seen, now), ..t.value.clone() }).collect();
         s
     }
 }

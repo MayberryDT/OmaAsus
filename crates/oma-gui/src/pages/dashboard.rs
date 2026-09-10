@@ -159,21 +159,9 @@ fn view_inner(app: &App, compact: bool, size_avail: iced::Size) -> Element<'_, M
         .map(|s| {
             s.fans
                 .iter()
-                .filter(|f| f.rpm > 0 || f.label.starts_with("Pump"))
+                .filter(|f| f.rpm > 0 || f.label.starts_with("Pump") || f.freshness != crate::telemetry::Freshness::Live)
                 .take(list_rows)
-                .map(|f| {
-                    let duty = f.duty.unwrap_or(0.0) as f32 / 100.0;
-                    let frac = if f.duty.is_some() { duty } else { (f.rpm as f32 / 2400.0).min(1.0) };
-                    row![
-                        column![widgets::body(p, &f.label), widgets::dim(p, &f.device)].spacing(1.0).width(Length::FillPortion(3)),
-                        widgets::bar(p, frac, p.fan),
-                        widgets::mono(p, format!("{:>5} rpm", f.rpm), size::SMALL),
-                        widgets::mono(p, f.duty.map(|d| format!("{d:>3.0}%")).unwrap_or_else(|| "  — ".into()), size::SMALL),
-                    ]
-                    .spacing(space::MD)
-                    .align_y(iced::Alignment::Center)
-                    .into()
-                })
+                .map(|f| widgets::fan_row(p, f))
                 .collect()
         })
         .unwrap_or_default();
@@ -188,15 +176,19 @@ fn view_inner(app: &App, compact: bool, size_avail: iced::Size) -> Element<'_, M
             for (i, t) in s.cpu.ccd_c.iter().enumerate() { v.push((format!("CCD{}", i + 1), *t)); }
             for (i, t) in s.nvme_c.iter().enumerate() { v.push((format!("NVMe {}", i + 1), *t)); }
             for (i, t) in s.dimm_c.iter().enumerate() { v.push((format!("DIMM {}", i + 1), *t)); }
-            for r in &s.temps { v.push((r.label.clone(), r.value)); }
-            v.into_iter()
-                .take(list_rows)
+            let mut rows: Vec<Element<Message>> = v
+                .into_iter()
                 .map(|(l, t)| {
                     row![widgets::dim(p, l), widgets::hfill(), iced::widget::text(format!("{t:.0}°")).size(size::BODY).font(theme::font::MONO).color(theme::thermal(&p, t, 30.0, 90.0))]
                         .align_y(iced::Alignment::Center)
                         .into()
                 })
-                .collect()
+                .collect();
+            for r in &s.temps {
+                rows.push(widgets::temp_row(p, r));
+            }
+            rows.truncate(list_rows);
+            rows
         })
         .unwrap_or_default();
     let temp_card = widgets::card(p, column![widgets::eyebrow(p, "Temperatures"), Column::with_children(temps).spacing(space::XS)].spacing(space::MD).height(Length::Fill)).width(Length::FillPortion(2)).height(Length::Fill);

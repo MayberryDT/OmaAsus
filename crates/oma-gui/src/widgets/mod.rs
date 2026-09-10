@@ -8,7 +8,7 @@ pub mod ridge;
 pub mod sparkline;
 
 use crate::theme::{self, Palette, radius, size, space};
-use iced::widget::{button, container, row, text, Column};
+use iced::widget::{button, column, container, row, text, Column};
 use iced::{Background, Border, Color, Element, Length, Shadow};
 
 /// Layered glass card: a gradient hairline (outer) around a gradient glass
@@ -203,4 +203,37 @@ pub fn bar<'a, M: 'a>(p: Palette, frac: f32, color: Color) -> Element<'a, M> {
         .width(Length::Fill)
         .style(move |_| container::Style { background: Some(Background::Color(p.glass_strong)), border: Border { radius: radius::PILL.into(), ..Default::default() }, ..Default::default() })
         .into()
+}
+
+/// One fan/pump line: label, device, duty bar, rpm, duty; dimmed when stale, flagged when offline.
+pub fn fan_row<'a, M: 'a>(p: Palette, f: &crate::telemetry::FanReading) -> Element<'a, M> {
+    use crate::telemetry::Freshness;
+    let live = f.freshness == Freshness::Live;
+    let tc = if live { p.text } else { p.text_faint };
+    let duty = f.duty.unwrap_or(0.0) as f32 / 100.0;
+    let frac = if f.duty.is_some() { duty } else { (f.rpm as f32 / 2400.0).min(1.0) };
+    let status: Element<M> = match f.freshness {
+        Freshness::Live => iced::widget::Space::new().into(),
+        Freshness::Stale => pill(p, "stale", p.warn),
+        Freshness::Offline => pill(p, "offline", p.danger),
+    };
+    row![
+        column![text(f.label.clone()).size(size::BODY).font(theme::font::BODY).color(tc), dim(p, f.device.clone())].spacing(1.0).width(Length::FillPortion(3)),
+        status,
+        bar(p, frac, if live { p.fan } else { theme::alpha(p.fan, 0.35) }),
+        text(format!("{:>5} rpm", f.rpm)).size(size::SMALL).font(theme::font::MONO).color(tc),
+        text(f.duty.map(|d| format!("{d:>3.0}%")).unwrap_or_else(|| "  — ".into())).size(size::SMALL).font(theme::font::MONO).color(tc),
+    ]
+    .spacing(space::MD)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+/// One temperature line from the registry, dimmed when stale.
+pub fn temp_row<'a, M: 'a>(p: Palette, r: &crate::telemetry::Reading) -> Element<'a, M> {
+    use crate::telemetry::Freshness;
+    let live = r.freshness == Freshness::Live;
+    let col = if live { theme::thermal(&p, r.value, 30.0, 90.0) } else { p.text_faint };
+    let value = if r.freshness == Freshness::Offline && r.value == 0.0 { "—".to_string() } else { format!("{:.0}°", r.value) };
+    row![dim(p, r.label.clone()), hfill(), text(value).size(size::BODY).font(theme::font::MONO).color(col)].align_y(iced::Alignment::Center).into()
 }
