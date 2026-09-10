@@ -4,6 +4,7 @@ use iced::widget::canvas::{self, Frame, Path, Stroke};
 use iced::{Color, Point, Rectangle, Renderer, Theme, mouse};
 use std::f32::consts::PI;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Dashboard,
@@ -28,10 +29,6 @@ pub struct IconView {
 
 pub fn icon<'a, M: 'a>(icon: Icon, color: Color, size: f32) -> iced::Element<'a, M> {
     canvas(IconView { icon, color, glow: None }).width(size).height(size).into()
-}
-
-pub fn icon_glow<'a, M: 'a>(icon: Icon, color: Color, glow: Color, size: f32) -> iced::Element<'a, M> {
-    canvas(IconView { icon, color, glow: Some(glow) }).width(size).height(size).into()
 }
 
 impl<M> canvas::Program<M> for IconView {
@@ -127,10 +124,39 @@ impl<M> canvas::Program<M> for IconView {
                 f.stroke(&Path::line(pt(-0.9, -0.3), pt(0.9, -0.3)), st.clone());
             }
             Icon::Logo => {
-                // OmaAsus mark: a ring cut by a diagonal blade.
-                let thick = Stroke::default().with_width(s * 0.11).with_color(self.color).with_line_cap(canvas::LineCap::Round);
-                f.stroke(&Path::new(|b| b.arc(canvas::path::Arc { center: c, radius: r, start_angle: (0.62 * PI).into(), end_angle: (2.28 * PI).into() })), thick.clone());
-                f.stroke(&Path::line(pt(-0.35, 0.95), pt(0.55, -0.85)), thick);
+                // OmaAsus mark: a glossy liquid drop-orb with an iris ring and a blade of light.
+                let rr = s * 0.30;
+                for (k, a) in [(1.6, 0.05), (1.32, 0.09), (1.12, 0.15)] {
+                    f.fill(&Path::circle(c, rr * k), Color { a, ..self.color });
+                }
+                // Drop body: circle with a tail toward the top-right. Angles: 0 = right, π/2 = down.
+                let a0: f32 = 0.20; // tangent on the right
+                let a1: f32 = -1.75 + 2.0 * PI; // tangent near the top (≈ -100°)
+                let tip = Point::new(c.x + rr * 1.02, c.y - rr * 1.02);
+                let drop = Path::new(|b| {
+                    b.move_to(tip);
+                    b.quadratic_curve_to(Point::new(c.x + rr * 1.05, c.y - rr * 0.25), Point::new(c.x + rr * a0.cos(), c.y + rr * a0.sin()));
+                    b.arc(canvas::path::Arc { center: c, radius: rr, start_angle: a0.into(), end_angle: a1.into() });
+                    b.quadratic_curve_to(Point::new(c.x + rr * 0.25, c.y - rr * 1.05), tip);
+                    b.close();
+                });
+                f.fill(
+                    &drop,
+                    canvas::Fill {
+                        style: canvas::Style::Gradient(canvas::Gradient::Linear(canvas::gradient::Linear::new(Point::new(c.x - rr, c.y - rr), Point::new(c.x + rr * 0.7, c.y + rr)).add_stop(0.0, lighten(self.color, 0.55)).add_stop(0.5, self.color).add_stop(1.0, darken(self.color, 0.5)))),
+                        rule: canvas::fill::Rule::NonZero,
+                    },
+                );
+                // Iris ring.
+                f.stroke(&Path::circle(c, rr * 0.5), Stroke::default().with_width(s * 0.075).with_color(Color::from_rgba(0.02, 0.02, 0.05, 0.85)));
+                f.stroke(&Path::circle(c, rr * 0.5), Stroke::default().with_width(s * 0.028).with_color(Color { a: 0.95, ..lighten(self.color, 0.65) }));
+                // Blade of light.
+                let (b0, b1) = (Point::new(c.x - rr * 0.45, c.y + rr * 0.72), Point::new(c.x + rr * 0.5, c.y - rr * 0.82));
+                f.stroke(&Path::line(b0, b1), Stroke::default().with_width(s * 0.10).with_color(Color::from_rgba(0.02, 0.02, 0.05, 0.9)).with_line_cap(canvas::LineCap::Round));
+                f.stroke(&Path::line(b0, b1), Stroke::default().with_width(s * 0.038).with_color(Color::WHITE).with_line_cap(canvas::LineCap::Round));
+                // Specular highlight + sparkle.
+                f.fill(&ellipse(Point::new(c.x - rr * 0.40, c.y - rr * 0.42), rr * 0.30, rr * 0.15, -0.7), Color::from_rgba(1.0, 1.0, 1.0, 0.9));
+                f.fill(&Path::circle(Point::new(c.x + rr * 0.3, c.y + rr * 0.5), rr * 0.07), Color::from_rgba(1.0, 1.0, 1.0, 0.7));
             }
         }
         vec![f.into_geometry()]
@@ -139,4 +165,27 @@ impl<M> canvas::Program<M> for IconView {
 
 fn canvas<M, P: canvas::Program<M>>(p: P) -> canvas::Canvas<P, M> {
     canvas::Canvas::new(p)
+}
+
+fn lighten(c: Color, t: f32) -> Color {
+    Color::from_rgba(c.r + (1.0 - c.r) * t, c.g + (1.0 - c.g) * t, c.b + (1.0 - c.b) * t, c.a)
+}
+
+fn darken(c: Color, t: f32) -> Color {
+    Color::from_rgba(c.r * (1.0 - t), c.g * (1.0 - t), c.b * (1.0 - t), c.a)
+}
+
+/// Ellipse path (four cubic segments), rotated by `rot` radians about its centre.
+pub fn ellipse(center: Point, rx: f32, ry: f32, rot: f32) -> Path {
+    let k = 0.5523;
+    let (cs, sn) = (rot.cos(), rot.sin());
+    let tr = |x: f32, y: f32| Point::new(center.x + x * cs - y * sn, center.y + x * sn + y * cs);
+    Path::new(|b| {
+        b.move_to(tr(rx, 0.0));
+        b.bezier_curve_to(tr(rx, ry * k), tr(rx * k, ry), tr(0.0, ry));
+        b.bezier_curve_to(tr(-rx * k, ry), tr(-rx, ry * k), tr(-rx, 0.0));
+        b.bezier_curve_to(tr(-rx, -ry * k), tr(-rx * k, -ry), tr(0.0, -ry));
+        b.bezier_curve_to(tr(rx * k, -ry), tr(rx, -ry * k), tr(rx, 0.0));
+        b.close();
+    })
 }

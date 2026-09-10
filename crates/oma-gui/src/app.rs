@@ -15,7 +15,7 @@ use crate::theme::{self, Palette, size, space};
 use crate::widgets;
 use crate::{ipc, telemetry};
 use crate::widgets::icons::{self, Icon};
-use iced::widget::{column, container, row, shader, stack, Column};
+use iced::widget::{column, container, row, shader, stack};
 use iced::window::Id;
 use iced::{Background, Element, Length, Subscription, Task, Theme};
 use iced_exwlshell::actions::IcedXdgWindowSettings;
@@ -54,6 +54,7 @@ fn push(v: &mut VecDeque<f32>, x: f32) {
 
 pub struct App {
     pub palette: Palette,
+    pub theme_name: String,
     pub page: Page,
     pub config: Config,
     pub snapshot: Option<Arc<telemetry::Snapshot>>,
@@ -127,6 +128,7 @@ pub enum Message {
     Automation(AutomationMsg),
     Auto(AutoEvent),
     Settings(SettingsMsg),
+    FontLoaded(bool),
     Tick(std::time::Instant),
     Asus(AsusMsg),
     AsusLoaded(AsusState),
@@ -142,15 +144,21 @@ pub enum Message {
 }
 
 pub fn run(overlay_only: bool) -> Result<(), iced_exwlshell::Error> {
+    // Load the bundled fonts straight into the font system the widgets shape
+    // with, so family lookups resolve no matter how the shell wires fonts.
+    {
+        let mut fs = iced::advanced::graphics::text::font_system().write().expect("font system");
+        fs.load_font(std::borrow::Cow::Borrowed(theme::font::SANS_BYTES));
+        fs.load_font(std::borrow::Cow::Borrowed(theme::font::MONO_BYTES));
+    }
     daemon(move || App::boot(overlay_only), App::namespace, App::update, App::view)
         .title(App::title)
         .theme(App::theme)
         .style(App::style)
         .subscription(App::subscription)
-        .font(theme::font::BODY_BYTES)
-        .font(theme::font::DISPLAY_BYTES)
+        .font(theme::font::SANS_BYTES)
         .font(theme::font::MONO_BYTES)
-        .default_font(theme::font::BODY)
+        .default_font(theme::font::SANS)
         .settings(Settings {
             layer_settings: LayerShellSettings { start_mode: StartMode::Background, ..Default::default() },
             ..Default::default()
@@ -161,9 +169,11 @@ pub fn run(overlay_only: bool) -> Result<(), iced_exwlshell::Error> {
 impl App {
     fn boot(overlay_only: bool) -> (Self, Task<Message>) {
         let config = crate::config_store::load();
-        let accent = config.profile(config.active_profile).map(|p| (p.accent.r, p.accent.g, p.accent.b)).unwrap_or((255, 61, 104));
+        let (palette, theme_name) = theme::load();
+        tracing::info!(theme = %theme_name, "using Omarchy theme");
         let app = Self {
-            palette: theme::OBSIDIAN.with_accent(accent),
+            palette,
+            theme_name,
             page: Page::Dashboard,
             config,
             snapshot: None,
@@ -219,7 +229,13 @@ impl App {
         );
         let rgb = if app.rgb_server { Task::perform(async { oma_hw::rgb::devices().await.map_err(|e| e.to_string()) }, Message::RgbDevices) } else { Task::none() };
         let asus = Task::perform(crate::pages::asus::load(), Message::AsusLoaded);
-        (app, Task::batch([inv, ctl, nvi, cc, rgb, asus, open]))
+        // iced_exwlshell's daemon does not apply `Settings::fonts`; the runtime font
+        // action does, so bundle-load through tasks (fallback fonts otherwise).
+        let fonts = Task::batch([
+            iced::font::load(theme::font::SANS_BYTES).map(|r| Message::FontLoaded(r.is_ok())),
+            iced::font::load(theme::font::MONO_BYTES).map(|r| Message::FontLoaded(r.is_ok())),
+        ]);
+        (app, Task::batch([fonts, inv, ctl, nvi, cc, rgb, asus, open]))
     }
 
     fn namespace() -> String {
@@ -567,9 +583,6 @@ impl App {
                 if let Some(pr) = self.config.profiles.iter_mut().find(|p| p.id == id) {
                     pr.accent = c;
                 }
-                if id == self.config.active_profile {
-                    self.palette = theme::OBSIDIAN.with_accent((c.r, c.g, c.b));
-                }
                 crate::config_store::save(&self.config);
             }
         }
@@ -886,8 +899,16 @@ impl App {
             Message::Profiles(m) => self.update_profiles(m),
             Message::Automation(m) => self.update_automation(m),
             Message::Settings(m) => self.update_settings(m),
+            Message::FontLoaded(ok) => {
+                if !ok {
+                    tracing::warn!("a bundled font failed to load");
+                }
+                Task::none()
+            }
             Message::Tick(now) => {
                 self.now = now;
+                widgets::set_phase(now.duration_since(self.t0).as_secs_f32());
+                widgets::set_thermal(self.smooth.heat, self.smooth.load);
                 if let Some(s) = &self.snapshot {
                     let k = 0.12;
                     ease(&mut self.smooth.cpu_t, s.cpu.tctl_c.unwrap_or(0.0) as f32, k);
@@ -959,7 +980,6 @@ impl App {
             Message::ApplyProfile(id) => {
                 if let Some(pr) = self.config.profile(id).cloned() {
                     self.config.active_profile = id;
-                    self.palette = theme::OBSIDIAN.with_accent((pr.accent.r, pr.accent.g, pr.accent.b));
                     crate::config_store::save(&self.config);
                     self.fan_engine.reset();
                     let inv = self.inventory.clone();
@@ -1164,6 +1184,7 @@ impl App {
     }
 
     fn view(&self, id: Id) -> Element<'_, Message> {
+        widgets::begin_frame();
         let p = self.palette;
         let is_overlay = self.surfaces.get(&id) == Some(&Surface::Overlay);
         let content: Element<Message> = match self.page {
@@ -1180,104 +1201,74 @@ impl App {
         };
         let show_asus = self.asus.asusd.is_some() || self.asus.gfx.is_some() || self.inventory.as_ref().map(|i| i.platform == oma_hw::Platform::AsusLaptop).unwrap_or(false);
         let pages: Vec<Page> = Page::ALL.iter().copied().filter(|pg| *pg != Page::Asus || show_asus).collect();
-        let page_icon = |pg: Page| match pg {
-            Page::Dashboard => Icon::Dashboard,
-            Page::Cpu => Icon::Cpu,
-            Page::Gpu => Icon::Gpu,
-            Page::Cooling => Icon::Fan,
-            Page::Lighting => Icon::Light,
-            Page::Profiles => Icon::Layers,
-            Page::Automation => Icon::Loop,
-            Page::Asus => Icon::Rog,
-            Page::Settings => Icon::Gear,
-        };
-        let nav = Column::with_children(
-            pages
-                .iter()
-                .map(|pg| {
-                    let active = *pg == self.page;
-                    let label = row![
-                        icons::icon(page_icon(*pg), if active { p.accent } else { p.text_faint }, 18.0),
-                        iced::widget::text(pg.label()).size(size::BODY).font(if active { theme::font::BODY_MEDIUM } else { theme::font::BODY }),
-                    ]
-                    .spacing(space::MD)
-                    .align_y(iced::Alignment::Center);
-                    iced::widget::button(label).width(Length::Fill).padding([10, 14]).style(widgets::button_style(p, widgets::ButtonKind::Nav { active })).on_press(Message::Navigate(*pg)).into()
-                })
-                .collect::<Vec<_>>(),
-        )
-        .spacing(space::XS)
-        .width(Length::Fixed(208.0));
 
-        let brand = row![
-            icons::icon_glow(Icon::Logo, p.accent, p.accent, 34.0),
-            column![
-                iced::widget::text("OMAASUS").size(size::LEAD).font(theme::font::DISPLAY_MEDIUM).color(p.text),
-                iced::widget::text(widgets::tracked("control atelier")).size(size::MICRO).font(theme::font::BODY_MEDIUM).color(p.text_faint),
-            ]
-            .spacing(1.0),
+        // Site header: mark, mono nav links, then actions on the right.
+        let nav_link = |pg: Page, active: bool| {
+            let label = iced::widget::text(pg.label()).size(size::SMALL).font(theme::font::MONO).color(if active { p.text } else { p.text_secondary });
+            // JetBrains Mono advances 0.6 em, so the underline can be sized from the label.
+            let w = pg.label().chars().count() as f32 * size::SMALL * 0.6;
+            let underline = container(iced::widget::Space::new().width(Length::Fixed(w)).height(2.0)).style(move |_| container::Style { background: Some(Background::Color(if active { p.brand } else { iced::Color::TRANSPARENT })), ..Default::default() });
+            iced::widget::button(column![label, underline].spacing(6.0).width(Length::Shrink)).padding([6, 10]).style(widgets::button_style(p, widgets::ButtonKind::Nav { active: false })).on_press(Message::Navigate(pg))
+        };
+        let links = row(pages.iter().map(|pg| nav_link(*pg, *pg == self.page).into())).spacing(space::XS).align_y(iced::Alignment::Center);
+        let brand = row![widgets::pixel::oma_mark(p, 26.0), iced::widget::text("omaasus").size(size::SMALL).font(theme::font::MONO_MEDIUM).color(p.text)].spacing(space::SM).align_y(iced::Alignment::Center);
+        let gaming_id = self.config.profiles.iter().find(|x| x.name.eq_ignore_ascii_case("gaming")).map(|x| x.id);
+        let header_right = row![
+            widgets::pill(p, &self.theme_name, p.text_secondary),
+            widgets::pill(p, if self.controller_ready { "helper" } else { "read-only" }, if self.controller_ready { p.brand } else { p.yellow }),
+            widgets::btn(p, "Gaming", widgets::ButtonKind::Primary, gaming_id.map(Message::ApplyProfile)),
         ]
         .spacing(space::SM)
         .align_y(iced::Alignment::Center);
 
         let toast: Element<Message> = match &self.toast {
-            Some((msg, ok)) => container(row![widgets::body(p, msg), widgets::hfill(), iced::widget::button(icons::icon(Icon::Close, p.text_dim, 14.0)).padding(6).style(widgets::button_style(p, widgets::ButtonKind::Ghost)).on_press(Message::DismissToast)].align_y(iced::Alignment::Center))
+            Some((msg, ok)) => container(row![widgets::dim(p, msg), widgets::hfill(), iced::widget::button(icons::icon(Icon::Close, p.text_secondary, 14.0)).padding(6).style(widgets::button_style(p, widgets::ButtonKind::Ghost)).on_press(Message::DismissToast)].align_y(iced::Alignment::Center))
                 .padding([8, 12])
                 .width(Length::Fill)
                 .style(move |_| container::Style {
-                    background: Some(Background::Color(theme::alpha(if *ok { p.ok } else { p.danger }, 0.14))),
-                    border: iced::Border { color: theme::alpha(if *ok { p.ok } else { p.danger }, 0.4), width: 1.0, radius: theme::radius::MD.into() },
+                    background: Some(Background::Color(p.surface)),
+                    border: iced::Border { color: if *ok { p.brand } else { p.red }, width: 1.0, radius: 0.0.into() },
                     ..Default::default()
                 })
                 .into(),
             None => iced::widget::Space::new().height(0.0).into(),
         };
 
-        let icon_btn = |ic: Icon, msg: Message| iced::widget::button(icons::icon(ic, p.text_dim, 16.0)).padding(9).style(widgets::button_style(p, widgets::ButtonKind::Ghost)).on_press(msg);
+        let icon_btn = |ic: Icon, msg: Message| iced::widget::button(icons::icon(ic, p.text_secondary, 16.0)).padding(8).style(widgets::button_style(p, widgets::ButtonKind::Ghost)).on_press(msg);
         let shell: Element<Message> = if is_overlay {
             let tabs = row(pages.iter().map(|pg| {
                 let active = *pg == self.page;
-                iced::widget::button(icons::icon(page_icon(*pg), if active { p.accent } else { p.text_faint }, 18.0)).padding([7, 11]).style(widgets::button_style(p, widgets::ButtonKind::Nav { active })).on_press(Message::Navigate(*pg)).into()
+                iced::widget::button(iced::widget::text(pg.label()).size(size::CAPTION).font(theme::font::MONO).color(if active { p.text } else { p.text_secondary })).padding([6, 8]).style(widgets::button_style(p, widgets::ButtonKind::Nav { active })).on_press(Message::Navigate(*pg)).into()
             }))
-            .spacing(space::XS);
-            column![
+            .spacing(2.0)
+            .wrap();
+            container(column![
                 row![brand, widgets::hfill(), icon_btn(Icon::Window, Message::OpenWindow), icon_btn(Icon::Close, Message::Close(id))].spacing(space::SM).align_y(iced::Alignment::Center),
                 tabs,
                 toast,
                 content
             ]
-            .spacing(space::LG)
+            .spacing(space::LG))
+            .padding(space::LG)
+            .width(Length::Fill)
+            .height(Length::Fill)
             .into()
         } else {
-            let footer = column![
-                widgets::rule(p),
-                row![widgets::dim(p, format!("v{}", env!("CARGO_PKG_VERSION"))), widgets::hfill(), widgets::dim(p, if self.controller_ready { "helper ●" } else { "read-only ○" })].align_y(iced::Alignment::Center),
-            ]
-            .spacing(space::SM);
-            row![
-                column![brand, nav, widgets::vfill(), footer].spacing(space::XL).width(Length::Fixed(224.0)).height(Length::Fill),
-                column![toast, content].spacing(space::MD).width(Length::Fill).height(Length::Fill),
-            ]
-            .spacing(space::XL)
-            .into()
+            let header = container(row![brand, links, widgets::hfill(), header_right].spacing(space::XL).align_y(iced::Alignment::Center))
+                .padding(iced::Padding::from([10.0, space::XL]))
+                .width(Length::Fill)
+                .style(move |_| container::Style { background: Some(Background::Color(theme::alpha(p.bg, 0.86))), border: iced::Border { color: p.border_subtle, width: 1.0, radius: 0.0.into() }, ..Default::default() });
+            column![header, container(column![toast, content].spacing(space::MD).width(Length::Fill).height(Length::Fill)).padding(space::XL).width(Length::Fill).height(Length::Fill)]
+                .spacing(0.0)
+                .into()
         };
 
-        let o = &self.config.overlay;
-        let ambient = shader(widgets::ambient::Ambient {
-            accent: p.accent,
-            accent2: theme::complement(p.accent),
-            heat: self.smooth.heat,
-            load: self.smooth.load,
-            time: self.now.duration_since(self.t0).as_secs_f32(),
-            intensity: if is_overlay { 0.75 } else { 1.0 },
-            radius: if is_overlay { theme::radius::LG } else { 0.0 },
-            alpha: if is_overlay { o.opacity.clamp(0.5, 1.0) } else { 1.0 },
-        })
-        .width(Length::Fill)
-        .height(Length::Fill);
-
-        let content_layer = container(shell).padding(space::XL).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
-            border: iced::Border { color: if is_overlay { theme::alpha(iced::Color::WHITE, 0.12) } else { iced::Color::TRANSPARENT }, width: if is_overlay { 1.0 } else { 0.0 }, radius: if is_overlay { theme::radius::LG.into() } else { 0.0.into() } },
+        let (heat, load) = widgets::thermal();
+        let ambient = shader(widgets::ambient::Ambient { p, time: self.now.duration_since(self.t0).as_secs_f32(), heat, load, cell: 10.0, alpha: if is_overlay { self.config.overlay.opacity.clamp(0.5, 1.0) } else { 1.0 }, intensity: if is_overlay { 0.7 } else { 1.0 } })
+            .width(Length::Fill)
+            .height(Length::Fill);
+        let content_layer = container(shell).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
+            border: iced::Border { color: if is_overlay { p.border_strong } else { iced::Color::TRANSPARENT }, width: if is_overlay { 1.0 } else { 0.0 }, radius: 0.0.into() },
             ..Default::default()
         });
         stack![ambient, content_layer].width(Length::Fill).height(Length::Fill).into()

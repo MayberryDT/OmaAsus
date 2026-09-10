@@ -50,9 +50,11 @@ fn view_inner(app: &App, compact: bool, size_avail: iced::Size) -> Element<'_, M
     })
     .width(Length::Fill)
     .height(Length::Fill);
+    let name = profile.map(|pr| pr.name.clone()).unwrap_or_else(|| "—".into());
+    let cell = (hero_pt / 6.5).clamp(5.0, 13.0);
     let title_block = column![
         widgets::eyebrow(p, "Active profile"),
-        iced::widget::text(profile.map(|pr| pr.name.clone()).unwrap_or_else(|| "—".into())).size(hero_pt).font(theme::font::DISPLAY_LIGHT).color(p.text).line_height(1.0),
+        widgets::pixel::pixel_label(p, name, cell),
         row![
             widgets::pill(p, mode, p.accent),
             widgets::pill(p, if app.controller_ready { "helper connected" } else { "read-only" }, if app.controller_ready { p.ok } else { p.warn }),
