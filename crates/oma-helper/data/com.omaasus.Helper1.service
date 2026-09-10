@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=com.omaasus.Helper1
+Exec=/usr/bin/oma-helper
+User=root
+SystemdService=oma-helper.service

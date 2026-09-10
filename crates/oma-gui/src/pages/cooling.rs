@@ -1,0 +1,238 @@
+//! Cooling page: fan targets, per-target mode, interactive curve editor,
+//! and the fan-engine owner selector (OmaAsus vs CoolerControl).
+
+use crate::app::{App, Message};
+use crate::pages::cpu::slider_style;
+use crate::theme::{size, space};
+use crate::widgets::{self, curve::{CurveEditor, CurveEvent}};
+use iced::widget::{canvas, column, row, scrollable, slider, Column, Row};
+use iced::{Element, Length};
+use oma_hw::profile::{FanCurve, FanMode, FanOwner, FanTarget, TempSource};
+
+#[derive(Debug, Clone)]
+pub enum CoolingMsg {
+    Select(FanTarget),
+    Mode(FanTarget, &'static str),
+    Curve(CurveEvent),
+    Fixed(f64),
+    Source(TempSource),
+    MinDuty(f64),
+    Ramp(f64),
+    Hysteresis(f64),
+    Preset(&'static str),
+    Owner(FanOwner),
+    CcMode(String),
+    CcRefresh,
+}
+
+pub fn view(app: &App) -> Element<'_, Message> {
+    let p = app.palette;
+    let Some(inv) = app.inventory.as_ref() else { return widgets::dim(p, "Detecting cooling hardware…") };
+    let snap = app.snapshot.as_ref();
+    let fans: Vec<crate::telemetry::FanReading> = snap.map(|s| s.fans.clone()).unwrap_or_default();
+    let available = crate::fans::FanBackend::available(inv, &fans);
+    let profile = app.active_profile();
+    let owner_effective = app.effective_fan_owner();
+
+    // ---- owner card --------------------------------------------------------
+    let owner_chip = |label: &str, o: FanOwner| widgets::btn(p, label, if app.config.fan_owner == o { widgets::ButtonKind::Primary } else { widgets::ButtonKind::Ghost }, Some(Message::Cooling(CoolingMsg::Owner(o))));
+    let status = match owner_effective {
+        FanOwner::OmaAsus => widgets::pill(p, "OmaAsus fan engine active", p.ok),
+        FanOwner::CoolerControl => widgets::pill(p, if app.cc_connected { "CoolerControl connected" } else { "CoolerControl detected — sign in under Settings" }, if app.cc_connected { p.ok } else { p.warn }),
+        _ => widgets::pill(p, "Fans left to firmware", p.text_dim),
+    };
+    let owner = widgets::card(
+        p,
+        column![
+            row![widgets::title(p, "Fan engine"), widgets::hfill(), status].align_y(iced::Alignment::Center),
+            widgets::dim(p, "Choose who drives the fans. CoolerControl (when installed) keeps its own curves; OmaAsus then activates a CoolerControl Mode per profile. The OmaAsus engine evaluates the curves below itself, through the privileged helper."),
+            Row::with_children(vec![owner_chip("Automatic", FanOwner::Auto), owner_chip("OmaAsus", FanOwner::OmaAsus), owner_chip("CoolerControl", FanOwner::CoolerControl), owner_chip("Off", FanOwner::None)]).spacing(space::SM).wrap(),
+        ]
+        .spacing(space::MD),
+    )
+    .width(Length::Fill);
+
+    if owner_effective == FanOwner::CoolerControl {
+        let modes: Vec<Element<Message>> = app
+            .cc_modes
+            .iter()
+            .map(|m| {
+                let active = profile.and_then(|pr| pr.cc_mode.as_ref()) == Some(&m.uid);
+                widgets::btn(p, &m.name, if active { widgets::ButtonKind::Primary } else { widgets::ButtonKind::Ghost }, Some(Message::Cooling(CoolingMsg::CcMode(m.uid.clone()))))
+            })
+            .collect();
+        let cc_card = widgets::card(
+            p,
+            column![
+                row![widgets::title(p, "CoolerControl mode for this profile"), widgets::hfill(), widgets::btn(p, "Refresh", widgets::ButtonKind::Ghost, Some(Message::Cooling(CoolingMsg::CcRefresh)))].align_y(iced::Alignment::Center),
+                widgets::dim(p, format!("Profile “{}” activates the selected CoolerControl Mode when applied. Create Modes in CoolerControl (Modes → save current settings).", profile.map(|x| x.name.as_str()).unwrap_or("—"))),
+                if modes.is_empty() { widgets::dim(p, if app.cc_connected { "No Modes defined yet." } else { "Not connected." }) } else { Row::with_children(modes).spacing(space::SM).wrap().into() },
+            ]
+            .spacing(space::MD),
+        )
+        .width(Length::Fill);
+        return scrollable(column![owner, cc_card, fan_readings(app)].spacing(space::LG).padding(iced::Padding::from([0.0, space::XS]))).into();
+    }
+
+    // ---- targets list -------------------------------------------------------
+    let Some(profile_ref) = profile else { return widgets::dim(p, "No active profile.") };
+    let cooling: &oma_hw::profile::CoolingSettings = &profile_ref.cooling;
+    let selected = app.cooling_sel.clone().or_else(|| available.first().map(|a| a.target.clone()));
+    let list: Vec<Element<Message>> = available
+        .iter()
+        .map(|a| {
+            let is_sel = Some(&a.target) == selected.as_ref();
+            let mode = cooling.get(&a.target);
+            let mode_label = match mode {
+                None | Some(FanMode::Auto) => ("auto", p.text_faint),
+                Some(FanMode::Fixed(d)) => return target_row(app, a, is_sel, format!("fixed {d:.0}%"), p.text_dim),
+                Some(FanMode::Curve(_)) => ("curve", p.accent),
+                Some(FanMode::HardwareCurve(_)) => ("hw curve", p.accent_2),
+            };
+            target_row(app, a, is_sel, mode_label.0.into(), mode_label.1)
+        })
+        .collect();
+    let targets = widgets::card(p, column![widgets::eyebrow(p, "Outputs"), Column::with_children(list).spacing(space::XS)].spacing(space::MD)).width(Length::Fixed(300.0));
+
+    // ---- editor -------------------------------------------------------------
+    let editor: Element<Message> = match selected {
+        None => widgets::card(p, widgets::dim(p, "No controllable fan outputs detected.")).into(),
+        Some(target) => {
+            static AUTO: FanMode = FanMode::Auto;
+            let mode: &FanMode = cooling.get(&target).unwrap_or(&AUTO);
+            let kind = match mode {
+                FanMode::Auto => "auto",
+                FanMode::Fixed(_) => "fixed",
+                FanMode::Curve(_) => "curve",
+                FanMode::HardwareCurve(_) => "hw",
+            };
+            let hw_ok = matches!(target, FanTarget::SuperIo(_));
+            let mut kinds = vec![("Auto", "auto"), ("Fixed", "fixed"), ("Curve", "curve")];
+            if hw_ok {
+                kinds.push(("Hardware curve", "hw"));
+            }
+            let kind_row = Row::with_children(kinds.into_iter().map(|(l, k)| widgets::btn(p, l, if k == kind { widgets::ButtonKind::Primary } else { widgets::ButtonKind::Ghost }, Some(Message::Cooling(CoolingMsg::Mode(target.clone(), k))))).collect::<Vec<_>>()).spacing(space::SM).wrap();
+            let live_duty = app.fan_engine_duty(&target);
+            let body: Element<Message> = match mode {
+                FanMode::Auto => widgets::dim(p, "Firmware / driver default behaviour. Pick Fixed or Curve to take control.").into(),
+                FanMode::Fixed(d) => column![
+                    row![widgets::eyebrow(p, "Duty"), widgets::hfill(), widgets::mono(p, format!("{d:.0}%"), size::SMALL)],
+                    slider(0.0..=100.0, *d, |v| Message::Cooling(CoolingMsg::Fixed(v))).step(1.0).style(slider_style(p)),
+                ]
+                .spacing(space::SM)
+                .into(),
+                FanMode::Curve(c) | FanMode::HardwareCurve(c) => {
+                    let temps = snap.map(|s| crate::fans::temps_from(s, &inv.hwmon));
+                    let now_t = temps.as_ref().and_then(|t| t.resolve(&c.source));
+                    let live = now_t.map(|t| (t, live_duty.unwrap_or_else(|| c.duty_at(t))));
+                    let mut sources = vec![TempSource::CpuTctl, TempSource::Gpu, TempSource::CpuGpuMax, TempSource::Coolant, TempSource::Vrm, TempSource::Motherboard];
+                    for d in &inv.hwmon {
+                        if matches!(d.name.as_str(), "asusec") || d.is_super_io() {
+                            for t in &d.temps {
+                                if t.read().is_some() && !t.label.starts_with("PCH") && !t.label.starts_with("AUXTIN") {
+                                    sources.push(TempSource::Hwmon { driver: d.name.clone(), label: t.label.clone() });
+                                }
+                            }
+                        }
+                    }
+                    let src_row = Row::with_children(sources.into_iter().map(|s| {
+                        let active = s == c.source;
+                        widgets::btn(p, s.label(), if active { widgets::ButtonKind::Primary } else { widgets::ButtonKind::Ghost }, Some(Message::Cooling(CoolingMsg::Source(s))))
+                    }).collect::<Vec<_>>()).spacing(space::XS).wrap();
+                    column![
+                        canvas(CurveEditor { palette: p, points: &c.points, color: p.accent, live, min_duty: c.min_duty, on_event: |e| Message::Cooling(CoolingMsg::Curve(e)), editable: true })
+                            .width(Length::Fill)
+                            .height(Length::Fixed(300.0)),
+                        widgets::dim(p, "Drag points · click to add · right-click to remove"),
+                        widgets::eyebrow(p, "Temperature source"),
+                        src_row,
+                        row![
+                            column![row![widgets::eyebrow(p, "Minimum duty"), widgets::hfill(), widgets::mono(p, format!("{:.0}%", c.min_duty), size::SMALL)], slider(0.0..=100.0, c.min_duty, |v| Message::Cooling(CoolingMsg::MinDuty(v))).step(1.0).style(slider_style(p))].spacing(space::XS).width(Length::Fill),
+                            column![row![widgets::eyebrow(p, "Ramp (s / full sweep)"), widgets::hfill(), widgets::mono(p, format!("{:.0}s", c.ramp_s), size::SMALL)], slider(0.0..=30.0, c.ramp_s, |v| Message::Cooling(CoolingMsg::Ramp(v))).step(1.0).style(slider_style(p))].spacing(space::XS).width(Length::Fill),
+                            column![row![widgets::eyebrow(p, "Hysteresis"), widgets::hfill(), widgets::mono(p, format!("{:.1}°", c.hysteresis_c), size::SMALL)], slider(0.0..=10.0, c.hysteresis_c, |v| Message::Cooling(CoolingMsg::Hysteresis(v))).step(0.5).style(slider_style(p))].spacing(space::XS).width(Length::Fill),
+                        ]
+                        .spacing(space::LG),
+                        row![
+                            widgets::eyebrow(p, "Presets"),
+                            widgets::btn(p, "Silent", widgets::ButtonKind::Ghost, Some(Message::Cooling(CoolingMsg::Preset("silent")))),
+                            widgets::btn(p, "Balanced", widgets::ButtonKind::Ghost, Some(Message::Cooling(CoolingMsg::Preset("balanced")))),
+                            widgets::btn(p, "Performance", widgets::ButtonKind::Ghost, Some(Message::Cooling(CoolingMsg::Preset("performance")))),
+                            widgets::btn(p, "Coolant", widgets::ButtonKind::Ghost, Some(Message::Cooling(CoolingMsg::Preset("coolant")))),
+                            widgets::btn(p, "Pump", widgets::ButtonKind::Ghost, Some(Message::Cooling(CoolingMsg::Preset("pump")))),
+                        ]
+                        .spacing(space::SM)
+                        .align_y(iced::Alignment::Center),
+                    ]
+                    .spacing(space::MD)
+                    .into()
+                }
+            };
+            let name = available.iter().find(|a| a.target == target).map(|a| a.label.clone()).unwrap_or_else(|| target.label());
+            widgets::card(
+                p,
+                column![
+                    row![widgets::title(p, name), widgets::hfill(), widgets::dim(p, format!("profile: {}", profile.map(|x| x.name.as_str()).unwrap_or("—"))), live_duty.map(|d| widgets::pill(p, format!("driving {d:.0}%"), p.ok)).unwrap_or_else(|| iced::widget::Space::new().into())].spacing(space::SM).align_y(iced::Alignment::Center),
+                    kind_row,
+                    body,
+                ]
+                .spacing(space::LG),
+            )
+            .width(Length::Fill)
+            .into()
+        }
+    };
+
+    scrollable(column![owner, row![targets, editor].spacing(space::LG), fan_readings(app)].spacing(space::LG).padding(iced::Padding::from([0.0, space::XS]))).into()
+}
+
+fn target_row<'a>(app: &'a App, a: &crate::fans::Available, selected: bool, mode: String, color: iced::Color) -> Element<'a, Message> {
+    let p = app.palette;
+    let content = row![
+        column![widgets::body(p, a.label.clone()), widgets::dim(p, a.detail.clone())].spacing(2.0).width(Length::Fill),
+        widgets::pill(p, mode, color),
+    ]
+    .spacing(space::SM)
+    .align_y(iced::Alignment::Center);
+    iced::widget::button(content).width(Length::Fill).padding([8, 10]).style(widgets::button_style(p, widgets::ButtonKind::Nav { active: selected })).on_press(Message::Cooling(CoolingMsg::Select(a.target.clone()))).into()
+}
+
+fn fan_readings(app: &App) -> Element<'_, Message> {
+    let p = app.palette;
+    let rows: Vec<Element<Message>> = app
+        .snapshot
+        .as_ref()
+        .map(|s| {
+            s.fans
+                .iter()
+                .filter(|f| f.rpm > 0 || f.label.starts_with("Pump"))
+                .map(|f| {
+                    row![
+                        column![widgets::body(p, &f.label), widgets::dim(p, &f.device)].spacing(2.0).width(Length::FillPortion(2)),
+                        widgets::bar(p, f.duty.map(|d| d as f32 / 100.0).unwrap_or((f.rpm as f32 / 2400.0).min(1.0)), p.fan),
+                        widgets::mono(p, format!("{:>5} rpm", f.rpm), size::SMALL),
+                        widgets::mono(p, f.duty.map(|d| format!("{d:>3.0}%")).unwrap_or_else(|| "  — ".into()), size::SMALL),
+                    ]
+                    .spacing(space::MD)
+                    .align_y(iced::Alignment::Center)
+                    .into()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    widgets::card(p, column![widgets::eyebrow(p, "Live readings"), Column::with_children(rows).spacing(space::SM)].spacing(space::MD)).width(Length::Fill).into()
+}
+
+pub fn preset(name: &str, source: TempSource) -> FanCurve {
+    let mut c = match name {
+        "silent" => FanCurve::silent(),
+        "performance" => FanCurve::performance(),
+        "coolant" => FanCurve::coolant(),
+        "pump" => FanCurve::pump(),
+        _ => FanCurve::balanced(),
+    };
+    if !matches!(name, "coolant" | "pump") {
+        c.source = source;
+    }
+    c
+}
+

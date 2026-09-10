@@ -1,0 +1,30 @@
+[Unit]
+Description=OmaAsus privileged hardware helper
+Documentation=https://github.com/Mhsbrian/OmaAsus
+
+[Service]
+Type=dbus
+BusName=com.omaasus.Helper1
+ExecStart=/usr/bin/oma-helper
+Restart=on-failure
+# Hardening: the helper only needs sysfs, NVML and hidraw.
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+NoNewPrivileges=yes
+PrivateTmp=yes
+ReadWritePaths=/sys /dev
+DeviceAllow=char-hidraw rw
+DeviceAllow=/dev/nvidiactl rw
+DeviceAllow=/dev/nvidia0 rw
+DeviceAllow=/dev/nvidia-uvm rw
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_RAWIO CAP_DAC_OVERRIDE
+
+[Install]
+WantedBy=multi-user.target

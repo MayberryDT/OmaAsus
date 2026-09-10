@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["crates/oma-hw", "crates/oma-cli", "crates/oma-helper", "crates/oma-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+authors = ["Brian Honeycutt"]
+repository = "https://github.com/Mhsbrian/OmaAsus"
+
+[workspace.dependencies]
+oma-hw = { path = "crates/oma-hw" }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "net", "process", "io-util", "signal"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+zvariant = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+nvml-wrapper = "0.11"
+hidapi = "2"
+directories = "6"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = true
+
+[profile.dev]
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 2

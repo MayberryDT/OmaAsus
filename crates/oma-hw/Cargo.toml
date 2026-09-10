@@ -1,0 +1,23 @@
+[package]
+name = "oma-hw"
+description = "Hardware abstraction layer for OmaAsus: sensors, CPU, GPU, fans, ASUS daemons"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+zbus.workspace = true
+zvariant.workspace = true
+tracing.workspace = true
+nvml-wrapper.workspace = true
+nvml-wrapper-sys = "0.9"
+hidapi.workspace = true
+reqwest.workspace = true
+openrgb2 = "0.4"
+chrono.workspace = true
+uuid.workspace = true

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=OmaAsus
+GenericName=Hardware control center
+Comment=Control ASUS gaming hardware: profiles, fans, CPU, GPU, lighting
+Exec=omaasus window
+TryExec=omaasus
+Icon=omaasus
+Terminal=false
+Categories=System;Settings;HardwareSettings;
+Keywords=ASUS;ROG;fan;GPU;overclock;RGB;Aura;
+StartupNotify=false

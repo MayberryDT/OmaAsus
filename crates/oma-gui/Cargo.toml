@@ -1,0 +1,35 @@
+[package]
+name = "oma-gui"
+description = "OmaAsus — a high-design control center and overlay for ASUS gaming hardware"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "omaasus"
+path = "src/main.rs"
+
+[dependencies]
+oma-hw.workspace = true
+iced = { version = "0.14", features = ["wgpu", "canvas", "tokio", "advanced", "image", "svg", "lazy"] }
+iced_exwlshell = "0.20"
+iced_aw = { version = "0.14", default-features = false, features = ["number_input", "slide_bar", "color_picker"] }
+lilt = "0.8"
+zbus.workspace = true
+zvariant.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+directories.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+palette = "0.7"
+
+# Workaround (2026-09-09): winit-core 0.31.0-beta.3 breaks iced_exdevtools 0.20.0
+# (non-exhaustive NativeKeyCode match). Keep pinned until upstream releases a fix.
+winit-core = "=0.31.0-beta.2"
+winit-common = "=0.31.0-beta.2"

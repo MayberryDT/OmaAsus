@@ -1,0 +1,13 @@
+[Unit]
+Description=OmaAsus overlay daemon (layer-shell panel + automation engine)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/omaasus --overlay
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

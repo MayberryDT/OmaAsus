@@ -1,0 +1,16 @@
+# OmaAsus: user access to ASUS / Lian Li lighting and cooling controllers.
+# LiveDash OLED / AniMe Matrix controller (ROG Extreme boards)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1a21", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0b05", ATTR{idProduct}=="1a21", TAG+="uaccess"
+# ASUS Aura USB LED controllers
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18f3", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="19af", TAG+="uaccess"
+# ROG Ryujin II / III AIO (hidraw side; the hwmon driver is preferred for fans)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1a60", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1988", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1bcb", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1ade", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1ada", TAG+="uaccess"
+# Lian Li UNI FAN hubs (ENE)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0cf2", ATTRS{idProduct}=="7750", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0cf2", ATTRS{idProduct}=="a10[0-4]", TAG+="uaccess"

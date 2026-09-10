@@ -1,0 +1,8 @@
+-- OmaAsus bindings for Hyprland ≥ 0.56 (Omarchy-style Lua config).
+-- Append to ~/.config/hypr/bindings.lua
+o.bind("SUPER + F12", "OmaAsus overlay", hl.dsp.exec({ cmd = "omaasus toggle" }))
+o.bind("SUPER + SHIFT + F12", "OmaAsus window", hl.dsp.exec({ cmd = "omaasus window" }))
+o.bind("SUPER + CTRL + G", "OmaAsus: Gaming profile", hl.dsp.exec({ cmd = "omaasus profile gaming" }))
+o.bind("SUPER + CTRL + B", "OmaAsus: Balanced profile", hl.dsp.exec({ cmd = "omaasus profile balanced" }))
+-- Autostart the overlay daemon (or enable the user unit: systemctl --user enable --now omaasus)
+-- o.autostart("omaasus --overlay")

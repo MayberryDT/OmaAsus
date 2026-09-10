@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>OmaAsus</vendor>
+  <vendor_url>https://github.com/Mhsbrian/OmaAsus</vendor_url>
+  <icon_name>oma-asus</icon_name>
+
+  <action id="com.omaasus.helper.control">
+    <description>Tune fans, CPU governor and power limits</description>
+    <message>Authentication is required to change hardware tuning</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="com.omaasus.helper.advanced">
+    <description>Overclock the GPU, toggle SMT, and program LCD / lighting controllers</description>
+    <message>Authentication is required for advanced hardware control</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>
