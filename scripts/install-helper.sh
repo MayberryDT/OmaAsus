@@ -15,6 +15,9 @@ udevadm control --reload-rules && udevadm trigger --subsystem-match=hidraw --act
 systemctl daemon-reload
 # dbus-broker picks up new policy files on reload.
 systemctl reload dbus.service 2>/dev/null || busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig 2>/dev/null || true
-systemctl enable --now oma-helper.service
+# Activation-only: the unit has no [Install] section. Drop any boot-time
+# enablement from earlier versions and (re)start so the new binary and device
+# rules take effect.
+systemctl disable oma-helper.service 2>/dev/null || true
 systemctl restart oma-helper.service
 echo "oma-helper installed and running"

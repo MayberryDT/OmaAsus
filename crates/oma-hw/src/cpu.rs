@@ -103,6 +103,30 @@ fn online_cpus() -> Vec<u32> {
     parse_cpu_list(&s)
 }
 
+/// Where boost goes. Per policy when the kernel offers it (amd-pstate on
+/// 6.11+): power-profiles-daemon restores boost per policy when it leaves
+/// power-saver, and those writes fail with EINVAL while the global knob is 0,
+/// which made every Quiet → Balanced switch error out. The global knob is only
+/// used where per-policy boost is missing, or to lift a global 0 left by an
+/// older version before the per-policy values can take.
+fn boost_plan(per_policy: &[u32], has_global: bool, global_off: bool, on: bool) -> Vec<(PathBuf, String)> {
+    let val = || if on { "1" } else { "0" }.to_string();
+    let mut w = Vec::new();
+    if per_policy.is_empty() {
+        if has_global {
+            w.push((boost_path(), val()));
+        }
+        return w;
+    }
+    if on && global_off {
+        w.push((boost_path(), "1".into()));
+    }
+    for &c in per_policy {
+        w.push((policy_attr(c, "boost"), val()));
+    }
+    w
+}
+
 /// Parse kernel CPU lists like `0-3,8,10-11`.
 pub fn parse_cpu_list(s: &str) -> Vec<u32> {
     let mut out = Vec::new();
@@ -330,7 +354,8 @@ impl CpuMonitor {
 /// Returned as (path, value) pairs so the privileged helper can apply them.
 pub fn plan_writes(info: &CpuInfo, target: &CpuControlState) -> Vec<(PathBuf, String)> {
     let mut w = Vec::new();
-    for c in online_cpus() {
+    let cpus = online_cpus();
+    for &c in &cpus {
         if !target.governor.is_empty() {
             w.push((governor_path(c), target.governor.clone()));
         }
@@ -344,11 +369,40 @@ pub fn plan_writes(info: &CpuInfo, target: &CpuControlState) -> Vec<(PathBuf, St
             w.push((max_freq_path(c), target.scaling_max_khz.to_string()));
         }
     }
-    if let (true, Some(b)) = (info.has_boost, target.boost) {
-        w.push((boost_path(), if b { "1" } else { "0" }.into()));
+    if let Some(b) = target.boost {
+        let per_policy: Vec<u32> = cpus.iter().copied().filter(|&c| sysfs::exists(policy_attr(c, "boost"))).collect();
+        let global_off = info.has_boost && sysfs::read_string(boost_path()).as_deref() == Some("0");
+        w.extend(boost_plan(&per_policy, info.has_boost, global_off, b));
     }
     if let (true, Some(s)) = (info.has_smt_control, target.smt) {
         w.push((smt_path(), if s { "on" } else { "off" }.into()));
     }
     w
+}
+
+#[cfg(test)]
+mod boost_tests {
+    use super::*;
+
+    #[test]
+    fn global_knob_only_without_per_policy_boost() {
+        let w = boost_plan(&[], true, false, false);
+        assert_eq!(w, vec![(boost_path(), "0".to_string())]);
+        assert!(boost_plan(&[], false, false, true).is_empty(), "no boost control at all");
+    }
+
+    #[test]
+    fn per_policy_boost_never_touches_the_global_knob_to_disable() {
+        let w = boost_plan(&[0, 1], true, false, false);
+        assert_eq!(w, vec![(policy_attr(0, "boost"), "0".to_string()), (policy_attr(1, "boost"), "0".to_string())]);
+    }
+
+    #[test]
+    fn a_global_zero_is_lifted_before_per_policy_enables() {
+        let w = boost_plan(&[0], true, true, true);
+        assert_eq!(w[0], (boost_path(), "1".to_string()));
+        assert_eq!(w[1], (policy_attr(0, "boost"), "1".to_string()));
+        let w = boost_plan(&[0], true, false, true);
+        assert_eq!(w, vec![(policy_attr(0, "boost"), "1".to_string())], "already lifted: leave the global knob alone");
+    }
 }

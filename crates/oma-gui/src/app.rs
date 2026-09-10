@@ -1631,6 +1631,7 @@ impl App {
                 }
                 // Firmware can reset fan curves when the power mode changes: send them again now it has.
                 self.fan_engine.invalidate();
+                tracing::info!(profile = %name, ?origin, applied = ?report.applied, skipped = ?report.skipped, failed = ?report.failed, "profile apply finished");
                 let summary = report.summary(&name);
                 // Re-applies stay quiet unless something failed.
                 if origin != crate::apply::Origin::Reapply || summary.is_err() {
