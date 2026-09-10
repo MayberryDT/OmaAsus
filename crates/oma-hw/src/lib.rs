@@ -16,6 +16,7 @@ pub mod gamemode;
 pub mod helper;
 pub mod hwmon;
 pub mod hypr;
+pub mod knowledge;
 pub mod lianli;
 pub mod livedash;
 pub mod nvidia;

@@ -48,11 +48,21 @@ fn ga403wr_shows_the_laptop_stack() {
     assert!(!asusd.aura[0].supported_basic_modes.is_empty());
     assert!(asusd.slash.is_some());
 
-    // The fan outputs have curve points and a mode, but no plain `pwmN` duty file.
+    assert_eq!(raw.system.dmi.board_name, "GA403WR");
+    assert_eq!(raw.system.dmi.product_family, "ROG Zephyrus G14");
+
+    // The fan outputs have curve points and a mode, but no plain `pwmN` duty file,
+    // and detection still finds them: 8 points each, temperatures in plain °C.
     let curve_hwmon = raw.system.hwmon.iter().find(|d| d.name == "asus_custom_fan_curve").expect("fan curve hwmon");
     let has = |attr: &str| raw.sysfs.contains_key(curve_hwmon.path.join(attr).to_str().expect("utf-8 path"));
     assert!(has("pwm1_enable") && has("pwm1_auto_point8_temp"));
     assert!(!has("pwm1"));
+    assert_eq!(curve_hwmon.pwms.iter().map(|p| p.index).collect::<Vec<_>>(), [1, 2]);
+    for p in &curve_hwmon.pwms {
+        assert!(!p.has_duty && p.has_enable);
+        let curve = p.auto_curve.as_ref().expect("curve points");
+        assert_eq!((curve.points, curve.temp_unit), (8, oma_hw::hwmon::TempUnit::Celsius));
+    }
 
     // dGPU powered off: only the integrated GPU is on the bus; supergfxd owns switching.
     assert!(raw.nvidia.is_empty());

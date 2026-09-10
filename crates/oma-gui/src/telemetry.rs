@@ -251,7 +251,7 @@ impl Sampler {
                         if d.name == "rog_ryujin" && rpm == 0 && f.label.starts_with("Controller fan") {
                             continue;
                         }
-                        let duty = d.pwms.iter().find(|p| p.index == f.index).map(|p| p.read().value as f64 / 2.55);
+                        let duty = d.pwms.iter().find(|p| p.index == f.index && p.has_duty).map(|p| p.read().value as f64 / 2.55);
                         pending_fans.push((key, FanReading { label: f.label.clone(), rpm, duty, device: d.friendly_name().to_string(), freshness: Freshness::Live }));
                     }
                 }

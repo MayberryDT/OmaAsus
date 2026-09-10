@@ -54,7 +54,7 @@ impl FanBackend {
                     ryujin = Some([a, b, c]);
                 }
             } else if d.is_super_io() {
-                for p in &d.pwms {
+                for p in d.pwms.iter().filter(|p| p.has_duty) {
                     superio.insert(p.index, p.clone());
                 }
             }
@@ -73,7 +73,7 @@ impl FanBackend {
             v.push(Available { target: FanTarget::RyujinInternalFan, label: "Pump-block fan".into(), detail: "ROG Ryujin VRM blower".into() });
         }
         for d in inv.hwmon.iter().filter(|d| d.is_super_io()) {
-            for p in &d.pwms {
+            for p in d.pwms.iter().filter(|p| p.has_duty) {
                 let rpm = snap.and_then(|s| s.superio_rpm.get(&p.index).copied()).unwrap_or(0);
                 v.push(Available { target: FanTarget::SuperIo(p.index), label: format!("Header {}", header_name(p.index)), detail: if rpm > 0 { format!("{rpm} rpm") } else { "no tach signal".into() } });
             }

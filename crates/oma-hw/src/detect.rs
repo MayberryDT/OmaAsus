@@ -19,6 +19,9 @@ pub enum Platform {
 pub struct DmiInfo {
     pub sys_vendor: String,
     pub product_name: String,
+    /// Model family, e.g. "ROG Zephyrus G14" (empty on boards that don't set it).
+    #[serde(default)]
+    pub product_family: String,
     pub board_vendor: String,
     pub board_name: String,
     pub bios_version: String,
@@ -94,6 +97,7 @@ pub fn dmi_info() -> DmiInfo {
     DmiInfo {
         sys_vendor: dmi("sys_vendor"),
         product_name: dmi("product_name"),
+        product_family: dmi("product_family"),
         board_vendor: dmi("board_vendor"),
         board_name: dmi("board_name"),
         bios_version: dmi("bios_version"),
@@ -213,7 +217,7 @@ pub fn inventory() -> SystemInventory {
         cpu_epp: cpu.has_epp,
         cpu_boost: cpu.has_boost,
         cpu_smt: cpu.has_smt_control,
-        super_io_fans: hwmon.iter().any(|d| d.is_super_io() && !d.pwms.is_empty()),
+        super_io_fans: hwmon.iter().any(|d| d.is_super_io() && d.pwms.iter().any(|p| p.has_duty)),
         ryujin_aio: hwmon.iter().any(|d| d.name == "rog_ryujin") || has_hid(pid::RYUJIN_II_360) || has_hid(pid::RYUJIN_III),
         livedash_oled: has_hid(pid::LIVEDASH_OLED),
         aura_usb: has_hid(pid::AURA_LED_CONTROLLER) || has_hid(pid::AURA_LED_CONTROLLER_ALT),

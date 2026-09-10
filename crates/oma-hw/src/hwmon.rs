@@ -104,11 +104,27 @@ pub struct CurvePoint {
     pub pwm: u8,
 }
 
+/// Serde default for fields older captures don't have.
+fn yes() -> bool {
+    true
+}
+
+/// Unit of `pwmN_auto_pointM_temp`. The hwmon ABI says millidegrees; some
+/// drivers use plain °C (see [`crate::knowledge::curve_temp_unit`]).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum TempUnit {
+    #[default]
+    Milli,
+    Celsius,
+}
+
 /// Auto-curve capability of a PWM output as advertised by the driver.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AutoCurve {
-    /// Number of `pwmN_auto_pointM_*` pairs (5 for nct6775).
+    /// Number of `pwmN_auto_pointM_*` pairs (5 for nct6775, 8 for asus_custom_fan_curve).
     pub points: u32,
+    #[serde(default)]
+    pub temp_unit: TempUnit,
     /// Whether `pwmN_temp_sel` exists (choose the driving temperature).
     pub has_temp_sel: bool,
     /// Whether `pwmN_step_up_time` / `pwmN_step_down_time` exist.
@@ -123,6 +139,10 @@ pub struct PwmChannel {
     pub index: u32,
     /// Path to `pwmN`.
     pub path: PathBuf,
+    /// Whether `pwmN`, the duty value, exists. Firmware-curve outputs such as
+    /// `asus_custom_fan_curve` have only a mode and curve points.
+    #[serde(default = "yes")]
+    pub has_duty: bool,
     pub has_enable: bool,
     pub has_mode: bool,
     pub auto_curve: Option<AutoCurve>,
@@ -161,7 +181,11 @@ impl PwmChannel {
             .map(|ac| {
                 (1..=ac.points)
                     .filter_map(|p| {
-                        let t = sysfs::read_milli(self.attr(&format!("_auto_point{p}_temp")))?;
+                        let temp = self.attr(&format!("_auto_point{p}_temp"));
+                        let t = match ac.temp_unit {
+                            TempUnit::Milli => sysfs::read_milli(temp)?,
+                            TempUnit::Celsius => sysfs::read_u64(temp)? as f64,
+                        };
                         let pwm = sysfs::read_u64(self.attr(&format!("_auto_point{p}_pwm")))? as u8;
                         Some(CurvePoint { temp_c: t, pwm })
                     })
@@ -290,32 +314,37 @@ impl HwmonDevice {
             })
             .collect();
 
+        // Any `pwmN…` attribute names a channel; `pwmN` itself (the duty) may be
+        // absent on firmware-curve outputs, which still have a mode and points.
         let pwms = names
             .iter()
             .filter_map(|n| {
-                let idx: u32 = n.strip_prefix("pwm")?.parse().ok()?;
-                Some(idx)
+                let rest = n.strip_prefix("pwm")?;
+                let digits = &rest[..rest.bytes().position(|b| !b.is_ascii_digit()).unwrap_or(rest.len())];
+                digits.parse::<u32>().ok()
             })
             .collect::<std::collections::BTreeSet<u32>>()
             .into_iter()
-            .map(|i| {
+            .filter_map(|i| {
                 let base = format!("pwm{i}");
-                let points = (1..=7u32)
-                    .take_while(|p| names.contains(&format!("{base}_auto_point{p}_pwm")))
-                    .count() as u32;
+                let points = (1..=32u32).take_while(|p| names.contains(&format!("{base}_auto_point{p}_pwm"))).count() as u32;
                 let auto_curve = (points > 0).then(|| AutoCurve {
                     points,
+                    temp_unit: crate::knowledge::curve_temp_unit(&name),
                     has_temp_sel: names.contains(&format!("{base}_temp_sel")),
                     has_step_times: names.contains(&format!("{base}_step_up_time")),
                     has_floor_start: names.contains(&format!("{base}_floor")),
                 });
-                PwmChannel {
+                let has_duty = names.contains(&base);
+                let has_enable = names.contains(&format!("{base}_enable"));
+                (has_duty || has_enable || auto_curve.is_some()).then(|| PwmChannel {
                     index: i,
                     path: dir.join(&base),
-                    has_enable: names.contains(&format!("{base}_enable")),
+                    has_duty,
+                    has_enable,
                     has_mode: names.contains(&format!("{base}_mode")),
                     auto_curve,
-                }
+                })
             })
             .collect();
 

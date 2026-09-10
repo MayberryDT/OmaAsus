@@ -195,11 +195,13 @@ fn print_sensors() {
         }
         for p in &d.pwms {
             let s = p.read();
+            // Enable values are driver specific, so show the raw number; outputs
+            // driven only by a firmware curve have no duty.
             println!(
-                "   pwm{:<23} {:6} ({}) {}{}",
+                "   pwm{:<23} {:>6} (enable {}) {}{}",
                 p.index,
-                s.value,
-                s.enable.map(|e| e.label()).unwrap_or("-"),
+                if p.has_duty { s.value.to_string() } else { "-".into() },
+                oma_hw::sysfs::read_string(p.enable_path()).unwrap_or_else(|| "-".into()),
                 s.temp_sel.map(|t| format!("src={} ", hwmon::temp_sel_label(&d, t))).unwrap_or_default(),
                 if s.curve.is_empty() { String::new() } else { format!("curve={:?}", s.curve.iter().map(|c| (c.temp_c, c.pwm)).collect::<Vec<_>>()) }
             );
