@@ -16,6 +16,7 @@ pub enum Command {
     Window,
     Profile(String),
     Page(String),
+    Quit,
 }
 
 struct Service {
@@ -42,6 +43,9 @@ impl Service {
     async fn navigate(&self, page: String) {
         let _ = self.tx.send(Command::Page(page)).await;
     }
+    async fn quit(&self) {
+        let _ = self.tx.send(Command::Quit).await;
+    }
     #[zbus(property)]
     fn version(&self) -> String {
         env!("CARGO_PKG_VERSION").into()
@@ -56,6 +60,7 @@ trait App {
     fn window(&self) -> zbus::Result<()>;
     fn apply_profile(&self, name: &str) -> zbus::Result<()>;
     fn navigate(&self, page: &str) -> zbus::Result<()>;
+    fn quit(&self) -> zbus::Result<()>;
 }
 
 /// Subscription stream: owns the bus name for the lifetime of the app.
@@ -87,6 +92,15 @@ pub fn stream() -> impl Stream<Item = Command> {
 }
 
 /// Client side: forward a CLI verb to the running instance.
+/// Is an instance already serving `com.omaasus.App`?
+pub async fn running() -> bool {
+    let Ok(conn) = zbus::Connection::session().await else { return false };
+    match zbus::fdo::DBusProxy::new(&conn).await {
+        Ok(p) => p.name_has_owner(NAME.try_into().expect("valid bus name")).await.unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 pub async fn send(args: &[String]) -> anyhow::Result<()> {
     let conn = zbus::Connection::session().await?;
     let p = AppProxy::new(&conn).await?;
@@ -97,6 +111,7 @@ pub async fn send(args: &[String]) -> anyhow::Result<()> {
         Some("window") => p.window().await,
         Some("profile") => p.apply_profile(args.get(1).map(String::as_str).unwrap_or("")).await,
         Some("page") => p.navigate(args.get(1).map(String::as_str).unwrap_or("")).await,
+        Some("quit") => p.quit().await,
         _ => return Ok(()),
     };
     r.map_err(|e| anyhow::anyhow!("OmaAsus is not running ({e}). Start it with `omaasus --overlay`."))

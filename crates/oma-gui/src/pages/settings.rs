@@ -21,6 +21,7 @@ pub enum SettingsMsg {
     OverlayOpacity(f64),
     OverlayMargin(f64),
     HudToggle(bool),
+    TrayToggle(bool),
     OledText,
     OledHwMonitor,
     TelemetryHz(f64),
@@ -84,6 +85,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
             ]
             .spacing(space::LG),
             toggle(p, "Compact HUD strip when a game is fullscreen", o.hud_enabled, true, |b| Message::Settings(SettingsMsg::HudToggle(b))),
+            toggle(p, "Tray icon in the bar (closing the window keeps OmaAsus running)", app.config.tray_enabled, true, |b| Message::Settings(SettingsMsg::TrayToggle(b))),
+            widgets::dim(p, match (&app.tray, app.config.tray_enabled) { (Some(_), _) => "Tray: registered with the bar. Click it for the panel, middle-click for the window, right-click for profiles.", (None, true) => "Tray: waiting for a StatusNotifier host (Omarchy's bar provides one).", (None, false) => "Tray: off. Closing the window exits OmaAsus unless the overlay is open." }),
             row![widgets::eyebrow(p, "Telemetry rate"), widgets::hfill(), widgets::mono(p, format!("{} Hz", app.config.telemetry_hz), size::SMALL)],
             slider(1.0..=5.0, app.config.telemetry_hz as f64, |v| Message::Settings(SettingsMsg::TelemetryHz(v))).step(1.0).style(slider_style(p)),
         ]

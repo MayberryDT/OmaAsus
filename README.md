@@ -116,6 +116,18 @@ Older Hyprland: see `packaging/hyprland.conf`. Start the overlay daemon at login
 systemctl --user enable --now omaasus
 ```
 
+### Tray
+
+OmaAsus registers a StatusNotifierItem, so Omarchy's bar shows the `oma` mark in its tray. Closing the main window then leaves the daemon running: automation rules, the fan engine and the overlay keep working, and the icon is the way back.
+
+| Click | Action |
+| --- | --- |
+| Left | Drop the panel down under the bar (click again to fold it up) |
+| Middle | Open the main window |
+| Right | Menu: window, panel, profile switch, quit |
+
+The panel slides and settles with its own animation; Hyprland's `layersIn`/`layersOut` fades layer on top. The icon is symbolic, so the bar recolours it to the current theme. A package installs it under `/usr/share/icons/hicolor`; a `cargo` build drops a user copy into `~/.local/share/icons/hicolor` on first start. Turn the tray off under Settings if your bar has no StatusNotifier host, and closing the window exits as before.
+
 ### Optional integrations
 
 - **CoolerControl**: if its daemon is running, OmaAsus delegates fan curves to it by default and activates a CoolerControl *Mode* per profile. Enter the CCAdmin password under Settings.
@@ -146,9 +158,10 @@ The GUI never touches hardware from its UI thread. A sampler thread produces tel
 omaasus                       open the window (also starts the overlay daemon)
 omaasus --overlay             start headless; the overlay waits for a toggle
 omaasus toggle | show | hide  control the overlay from a keybind
-omaasus window                open the window from a running instance
+omaasus window                open the window (starts the app if nothing runs)
 omaasus profile <name>        apply a profile by name
 omaasus page <name>           jump to a page
+omaasus quit                  stop the daemon and drop the tray item
 
 oma inventory [--json]        what was detected
 oma sensors                   every hwmon reading
@@ -163,6 +176,7 @@ oma nvidia | cpu | daemons | rgb
 - On desktops without an internal panel, `supergfxd`'s Integrated mode is never offered; it would unbind your display GPU.
 - Releasing a fan output restores the saved `pwm_enable` mode on board headers, returns GPU fans to automatic, and re-enables PWM sync on Lian Li channels. The Ryujin falls back to a safe fixed duty.
 - Stalled devices are quarantined for a minute rather than allowed to block the app.
+- Closing the window only keeps the daemon alive while a bar actually hosts the tray item; without one, closing still exits so nothing runs invisibly.
 
 ## Status
 

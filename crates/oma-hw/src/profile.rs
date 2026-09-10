@@ -342,6 +342,14 @@ pub struct Config {
     pub coolercontrol: CoolerControlAuth,
     pub overlay: OverlaySettings,
     pub telemetry_hz: u32,
+    /// Keep a StatusNotifierItem in the bar so closing the window leaves the
+    /// daemon (automation, fan engine, overlay) running.
+    #[serde(default = "default_true")]
+    pub tray_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -434,6 +442,7 @@ impl Config {
             coolercontrol: CoolerControlAuth { enabled: false, url: "http://localhost:11987".into(), password: None },
             overlay: OverlaySettings::default(),
             telemetry_hz: 2,
+            tray_enabled: true,
         }
     }
 

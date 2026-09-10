@@ -10,6 +10,7 @@ pub mod curve;
 pub mod gauge;
 pub mod icons;
 pub mod pixel;
+pub mod reveal;
 pub mod ridge;
 pub mod shaders;
 pub mod sparkline;

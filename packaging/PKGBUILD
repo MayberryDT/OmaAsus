@@ -35,6 +35,8 @@ package() {
   install -Dm644 crates/oma-helper/data/70-omaasus.rules "$pkgdir/usr/lib/udev/rules.d/70-omaasus.rules"
   install -Dm644 packaging/omaasus.service "$pkgdir/usr/lib/systemd/user/omaasus.service"
   install -Dm644 packaging/omaasus.desktop "$pkgdir/usr/share/applications/omaasus.desktop"
+  install -Dm644 crates/oma-gui/assets/icons/omaasus.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/omaasus.svg"
+  install -Dm644 crates/oma-gui/assets/icons/omaasus-symbolic.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/omaasus-symbolic.svg"
   install -Dm755 scripts/install-helper.sh "$pkgdir/usr/share/omaasus/install-helper.sh"
   mkdir -p "$pkgdir/usr/share/omaasus/helper"
   cp crates/oma-helper/data/* "$pkgdir/usr/share/omaasus/helper/"

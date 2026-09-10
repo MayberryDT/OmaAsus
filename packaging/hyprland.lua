@@ -8,3 +8,7 @@ o.bind("SUPER + CTRL + B", "OmaAsus: Balanced profile", hl.dsp.exec({ cmd = "oma
 -- o.autostart("omaasus --overlay")
 -- Keep OmaAsus fully opaque (Omarchy applies 0.985/0.96 opacity to every window by default)
 o.window({ title = "^OmaAsus$" }, { opacity = "1 1" })
+-- The overlay panel ("omaasus-overlay" layer) animates itself; Omarchy's default
+-- layersIn/layersOut fade layers on top of that. To keep only the panel's own
+-- motion, disable the compositor animation for it:
+-- hl.layer_rule({ match = { namespace = "omaasus-overlay" }, no_anim = true, animation = "none" })

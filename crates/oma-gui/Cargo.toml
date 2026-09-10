@@ -34,3 +34,4 @@ bytemuck = { version = "1", features = ["derive"] }
 # (non-exhaustive NativeKeyCode match). Keep pinned until upstream releases a fix.
 winit-core = "=0.31.0-beta.2"
 winit-common = "=0.31.0-beta.2"
+ksni = "0.3.6"

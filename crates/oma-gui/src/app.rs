@@ -13,7 +13,8 @@ use crate::automation::{AutoEvent, AutoState};
 use crate::pages::Page;
 use crate::theme::{self, Palette, size, space};
 use crate::widgets;
-use crate::{ipc, telemetry};
+use crate::{ipc, telemetry, tray};
+use crate::widgets::reveal;
 use crate::widgets::icons::{self, Icon};
 use iced::widget::{column, container, row, shader, stack};
 use iced::window::Id;
@@ -90,7 +91,26 @@ pub struct App {
     pub t0: std::time::Instant,
     pub now: std::time::Instant,
     pub smooth: Smooth,
+    /// Live tray item, once the bar's StatusNotifierWatcher accepted it.
+    pub tray: Option<tray::TrayHandle>,
+    /// A StatusNotifier host is actually showing the item right now.
+    pub tray_hosted: bool,
+    tray_synced: tray::TrayState,
+    /// Drop-down animation of the overlay panel.
+    overlay_phase: Option<OverlayPhase>,
 }
+
+/// The overlay panel slides down from the bar when it opens and folds back up
+/// before its surface is destroyed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayPhase {
+    Opening(std::time::Instant),
+    Open,
+    Closing(std::time::Instant),
+}
+
+const OVERLAY_OPEN: std::time::Duration = std::time::Duration::from_millis(280);
+const OVERLAY_CLOSE: std::time::Duration = std::time::Duration::from_millis(170);
 
 /// Eased display values so gauges glide instead of stepping.
 #[derive(Debug, Default, Clone, Copy)]
@@ -139,6 +159,11 @@ pub enum Message {
     Applied(Result<String, String>),
     ToggleOverlay,
     OpenWindow,
+    Tray(tray::Event),
+    /// The runtime destroyed a surface (compositor close, `RemoveWindow`).
+    SurfaceClosed(Id),
+    /// Leave for good: close every surface, drop the tray item, exit.
+    Quit,
     DismissToastNoop,
     Close(Id),
     DismissToast,
@@ -210,6 +235,10 @@ impl App {
             t0: std::time::Instant::now(),
             now: std::time::Instant::now(),
             smooth: Smooth::default(),
+            tray: None,
+            tray_hosted: false,
+            tray_synced: tray::TrayState::default(),
+            overlay_phase: None,
         };
         let inv = Task::perform(async { Arc::new(tokio::task::spawn_blocking(oma_hw::detect::inventory).await.expect("inventory")) }, Message::Inventory);
         let ctl = Task::perform(async { oma_hw::helper::Controller::connect().await.has_helper() }, Message::Controller);
@@ -261,10 +290,13 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         let anim = if self.surfaces.is_empty() { Subscription::none() } else { iced::time::every(std::time::Duration::from_millis(33)).map(Message::Tick) };
+        let tray = if self.config.tray_enabled { Subscription::run(tray::stream).map(Message::Tray) } else { Subscription::none() };
         Subscription::batch([
             Subscription::run(telemetry::stream).map(Message::Telemetry),
             Subscription::run(ipc::stream).map(Message::Ipc),
             Subscription::run(crate::automation::stream).map(Message::Auto),
+            tray,
+            iced::window::close_events().map(Message::SurfaceClosed),
             anim,
         ])
     }
@@ -498,6 +530,15 @@ impl App {
             SettingsMsg::OverlayMargin(v) => self.config.overlay.margin = v as u32,
             SettingsMsg::OverlayOpacity(v) => self.config.overlay.opacity = v as f32,
             SettingsMsg::HudToggle(b) => self.config.overlay.hud_enabled = b,
+            SettingsMsg::TrayToggle(b) => {
+                self.config.tray_enabled = b;
+                if !b {
+                    if let Some(h) = self.tray.take() {
+                        crate::config_store::save(&self.config);
+                        return Task::future(async move { h.shutdown().await }).discard();
+                    }
+                }
+            }
             SettingsMsg::TelemetryHz(v) => self.config.telemetry_hz = v as u32,
             SettingsMsg::OledText => {
                 let snap = self.snapshot.clone();
@@ -845,10 +886,73 @@ impl App {
             ..Default::default()
         });
         self.surfaces.insert(id, Surface::Overlay);
+        self.overlay_phase = Some(OverlayPhase::Opening(std::time::Instant::now()));
         task
     }
 
+    /// Fold the panel up; the surface closes when the animation has finished.
+    fn close_overlay(&mut self) -> Task<Message> {
+        if self.overlay_id().is_none() || matches!(self.overlay_phase, Some(OverlayPhase::Closing(_))) {
+            return Task::none();
+        }
+        self.overlay_phase = Some(OverlayPhase::Closing(std::time::Instant::now()));
+        Task::none()
+    }
+
+    /// 0 = folded into the bar, 1 = fully revealed.
+    fn overlay_progress(&self) -> f32 {
+        match self.overlay_phase {
+            None | Some(OverlayPhase::Open) => 1.0,
+            Some(OverlayPhase::Opening(at)) => reveal::ease_out_cubic(self.now.saturating_duration_since(at).as_secs_f32() / OVERLAY_OPEN.as_secs_f32()),
+            Some(OverlayPhase::Closing(at)) => 1.0 - reveal::ease_in_cubic(self.now.saturating_duration_since(at).as_secs_f32() / OVERLAY_CLOSE.as_secs_f32()),
+        }
+    }
+
+    /// Forget a surface once it is gone. Without a tray to come back from,
+    /// losing the main window (with no overlay up) ends the app.
+    fn surface_gone(&mut self, id: Id) -> Task<Message> {
+        let Some(kind) = self.surfaces.remove(&id) else { return Task::none() };
+        if kind == Surface::Overlay {
+            self.overlay_phase = None;
+        }
+        if kind == Surface::Window && !self.overlay_only && self.overlay_id().is_none() && !self.lives_in_tray() {
+            return iced::exit();
+        }
+        Task::none()
+    }
+
+    /// Whether closing the main window should leave the daemon running: only
+    /// when a bar actually shows our tray item, so the user always has a way back.
+    fn lives_in_tray(&self) -> bool {
+        self.config.tray_enabled && self.tray.is_some() && self.tray_hosted
+    }
+
+    fn tray_state(&self) -> tray::TrayState {
+        tray::TrayState {
+            profiles: self.config.profiles.iter().map(|p| (p.id, p.name.clone())).collect(),
+            active: Some(self.config.active_profile),
+            overlay_open: self.overlay_id().is_some() && !matches!(self.overlay_phase, Some(OverlayPhase::Closing(_))),
+            window_open: self.window_id().is_some(),
+            helper: self.controller_ready,
+        }
+    }
+
     fn update(&mut self, msg: Message) -> Task<Message> {
+        let task = self.update_inner(msg);
+        // Mirror anything the tray menu shows (profiles, open surfaces) after
+        // every change, but only push over the bus when it actually differs.
+        if let Some(h) = &self.tray {
+            let state = self.tray_state();
+            if state != self.tray_synced {
+                self.tray_synced = state.clone();
+                let h = h.clone();
+                return Task::batch([task, Task::future(async move { h.sync(state).await }).discard()]);
+            }
+        }
+        task
+    }
+
+    fn update_inner(&mut self, msg: Message) -> Task<Message> {
         match msg {
             Message::Telemetry(telemetry::Event::Frame(snap)) => {
                 push(&mut self.hist.cpu_load, snap.cpu.util_total as f32);
@@ -909,6 +1013,16 @@ impl App {
             }
             Message::Tick(now) => {
                 self.now = now;
+                match self.overlay_phase {
+                    Some(OverlayPhase::Opening(at)) if now.saturating_duration_since(at) >= OVERLAY_OPEN => self.overlay_phase = Some(OverlayPhase::Open),
+                    Some(OverlayPhase::Closing(at)) if now.saturating_duration_since(at) >= OVERLAY_CLOSE => {
+                        self.overlay_phase = None;
+                        if let Some(id) = self.overlay_id() {
+                            return Task::done(Message::Close(id));
+                        }
+                    }
+                    _ => {}
+                }
                 // Success toasts fade after a few seconds; errors stay until dismissed.
                 if self.toast.is_some() && self.toast_at.is_none() {
                     self.toast_at = Some(now);
@@ -1029,10 +1143,8 @@ impl App {
                 ipc::Command::Show => {
                     if self.overlay_id().is_none() { self.open_overlay() } else { Task::none() }
                 }
-                ipc::Command::Hide => match self.overlay_id() {
-                    Some(id) => Task::done(Message::Close(id)),
-                    None => Task::none(),
-                },
+                ipc::Command::Hide => self.close_overlay(),
+                ipc::Command::Quit => Task::done(Message::Quit),
                 ipc::Command::Window => Task::done(Message::OpenWindow),
                 ipc::Command::Profile(name) => match self.config.profiles.iter().find(|p| p.name.eq_ignore_ascii_case(&name)) {
                     Some(p) => Task::done(Message::ApplyProfile(p.id)),
@@ -1043,10 +1155,44 @@ impl App {
                     None => Task::none(),
                 },
             },
-            Message::ToggleOverlay => match self.overlay_id() {
-                Some(id) => Task::done(Message::Close(id)),
-                None => self.open_overlay(),
+            Message::ToggleOverlay => match self.overlay_phase {
+                // A click while it is folding up brings it straight back.
+                Some(OverlayPhase::Closing(_)) => {
+                    self.overlay_phase = Some(OverlayPhase::Opening(std::time::Instant::now()));
+                    Task::none()
+                }
+                _ if self.overlay_id().is_some() => self.close_overlay(),
+                _ => self.open_overlay(),
             },
+            Message::Tray(tray::Event::Ready(h)) => {
+                self.tray = Some(h);
+                self.tray_synced = tray::TrayState::default();
+                Task::none()
+            }
+            Message::Tray(tray::Event::Unavailable) => {
+                self.tray = None;
+                self.tray_hosted = false;
+                Task::none()
+            }
+            Message::Tray(tray::Event::Hosted(on)) => {
+                self.tray_hosted = on;
+                Task::none()
+            }
+            Message::Tray(tray::Event::Command(c)) => match c {
+                tray::TrayCommand::ToggleOverlay => Task::done(Message::ToggleOverlay),
+                tray::TrayCommand::OpenWindow => Task::done(Message::OpenWindow),
+                tray::TrayCommand::Profile(id) => Task::done(Message::ApplyProfile(id)),
+                tray::TrayCommand::Quit => Task::done(Message::Quit),
+            },
+            Message::Quit => {
+                let ids: Vec<Id> = self.surfaces.drain().map(|(id, _)| id).collect();
+                let closes = Task::batch(ids.into_iter().map(|id| Task::done(Message::RemoveWindow(id))));
+                let bye = match self.tray.take() {
+                    Some(h) => Task::future(async move { h.shutdown().await }).discard(),
+                    None => Task::none(),
+                };
+                Task::batch([closes, bye]).chain(iced::exit())
+            }
             Message::OpenWindow => {
                 if self.window_id().is_some() {
                     return Task::none();
@@ -1056,14 +1202,11 @@ impl App {
                 task
             }
             Message::Close(id) => {
-                let kind = self.surfaces.remove(&id);
                 let task = Task::done(Message::RemoveWindow(id));
-                if kind == Some(Surface::Window) && !self.overlay_only && self.overlay_id().is_none() {
-                    // Closing the main window in window mode exits the app.
-                    return Task::batch([task, iced::exit()]);
-                }
-                task
+                Task::batch([task, self.surface_gone(id)])
             }
+            // The compositor (or a Close above) took the surface down.
+            Message::SurfaceClosed(id) => self.surface_gone(id),
             _ => Task::none(),
         }
     }
@@ -1256,7 +1399,7 @@ impl App {
             .spacing(2.0)
             .wrap();
             container(column![
-                row![brand, widgets::hfill(), icon_btn(Icon::Window, Message::OpenWindow), icon_btn(Icon::Close, Message::Close(id))].spacing(space::SM).align_y(iced::Alignment::Center),
+                row![brand, widgets::hfill(), icon_btn(Icon::Window, Message::OpenWindow), icon_btn(Icon::Close, Message::ToggleOverlay)].spacing(space::SM).align_y(iced::Alignment::Center),
                 tabs,
                 toast,
                 content
@@ -1277,13 +1420,15 @@ impl App {
         };
 
         let (heat, load) = widgets::thermal();
-        let ambient = shader(widgets::ambient::Ambient { p, time: self.now.duration_since(self.t0).as_secs_f32(), heat, load, cell: 10.0, alpha: if is_overlay { self.config.overlay.opacity.clamp(0.5, 1.0) } else { 1.0 }, intensity: if is_overlay { 0.7 } else { 1.0 } })
+        let progress = if is_overlay { self.overlay_progress() } else { 1.0 };
+        let ambient = shader(widgets::ambient::Ambient { p, time: self.now.duration_since(self.t0).as_secs_f32(), heat, load, cell: 10.0, alpha: if is_overlay { self.config.overlay.opacity.clamp(0.5, 1.0) * progress } else { 1.0 }, intensity: if is_overlay { 0.7 } else { 1.0 } })
             .width(Length::Fill)
             .height(Length::Fill);
         let content_layer = container(shell).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
             border: iced::Border { color: if is_overlay { p.border_strong } else { iced::Color::TRANSPARENT }, width: if is_overlay { 1.0 } else { 0.0 }, radius: 0.0.into() },
             ..Default::default()
         });
+        let content_layer: Element<Message> = if is_overlay { reveal::reveal(content_layer, progress).into() } else { content_layer.into() };
         stack![ambient, content_layer].width(Length::Fill).height(Length::Fill).into()
     }
 }
