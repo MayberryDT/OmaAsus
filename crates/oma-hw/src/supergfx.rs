@@ -175,3 +175,42 @@ pub fn is_safe_to_switch() -> bool {
         n.contains("-eDP-") || n.contains("-LVDS-") || n.contains("-DSI-")
     })
 }
+
+/// Connected displays driven by an NVIDIA GPU (`card1-HDMI-A-1`...).
+/// Powering the dGPU down would black them out.
+pub fn dgpu_displays() -> Vec<String> {
+    crate::sysfs::list_dir("/sys/class/drm")
+        .into_iter()
+        .filter_map(|p| {
+            let name = p.file_name()?.to_str()?.to_string();
+            let (card, _) = name.split_once('-')?;
+            let vendor = crate::sysfs::read_string(std::path::Path::new("/sys/class/drm").join(card).join("device/vendor"))?;
+            (vendor == "0x10de" && crate::sysfs::read_string(p.join("status")).as_deref() == Some("connected")).then_some(name)
+        })
+        .collect()
+}
+
+/// Why switching to `to` shouldn't happen right now, if anything: modes that
+/// power the dGPU down would cut off displays on it or work running on it.
+pub fn switch_blocker(to: GfxMode, dgpu_busy: bool, dgpu_displays: &[String]) -> Option<String> {
+    if !matches!(to, GfxMode::Integrated | GfxMode::Vfio) {
+        return None;
+    }
+    if !dgpu_displays.is_empty() {
+        return Some(format!("a display is connected to the dGPU ({}); disconnect it first", dgpu_displays.join(", ")));
+    }
+    dgpu_busy.then(|| "the dGPU is in use; close what's running on it first".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn powering_the_dgpu_down_waits_for_its_users() {
+        assert_eq!(switch_blocker(GfxMode::Hybrid, true, &["card0-HDMI-A-1".into()]), None, "Hybrid keeps the dGPU");
+        assert!(switch_blocker(GfxMode::Integrated, true, &[]).is_some());
+        assert!(switch_blocker(GfxMode::Vfio, false, &["card0-DP-1".into()]).unwrap().contains("card0-DP-1"));
+        assert_eq!(switch_blocker(GfxMode::Integrated, false, &[]), None);
+    }
+}

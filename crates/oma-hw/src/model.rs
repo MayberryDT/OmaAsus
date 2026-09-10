@@ -260,6 +260,50 @@ pub struct FirmwareAttr {
     pub owned_by: Option<Owner>,
 }
 
+/// Where the kernel's ASUS firmware attributes live.
+pub const ARMOURY: &str = "/sys/class/firmware-attributes/asus-armoury/attributes";
+
+impl FirmwareAttr {
+    /// Build from an attribute's files; `file(name)` gives a file's value
+    /// (if readable) and permission bits.
+    fn from_files(name: &str, owned_by: Option<Owner>, file: impl Fn(&str) -> Option<(Option<String>, u32)>) -> Option<Self> {
+        let (_, mode) = file("current_value")?;
+        let num = |f: &str| file(f).and_then(|(v, _)| v).and_then(|v| v.trim().parse::<i64>().ok());
+        let choices = file("possible_values").and_then(|(v, _)| v).map(|v| v.split(';').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default();
+        Some(Self { name: name.to_string(), current: num("current_value"), min: num("min_value"), max: num("max_value"), choices, writable: mode & 0o200 != 0, owned_by })
+    }
+
+    /// Read an attribute as it is now. Ranges change with AC state, so
+    /// applies use this rather than what detection saw.
+    pub fn read_live(name: &str) -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::path::Path::new(ARMOURY).join(name);
+        Self::from_files(name, None, |f| {
+            let path = dir.join(f);
+            let meta = std::fs::metadata(&path).ok()?;
+            Some((crate::sysfs::read_string(&path), meta.permissions().mode() & 0o777))
+        })
+    }
+
+    /// The value to write for `wanted` (clamped to the range), or why it
+    /// can't be written.
+    pub fn accept(&self, wanted: i64) -> Result<i64, String> {
+        if let Some(owner) = self.owned_by {
+            return Err(format!("{} (managed by {owner:?})", self.name));
+        }
+        if !self.writable {
+            return Err(format!("{} (read-only)", self.name));
+        }
+        if !self.choices.is_empty() {
+            return if self.choices.contains(&wanted) { Ok(wanted) } else { Err(format!("{} (takes {:?}, not {wanted})", self.name, self.choices)) };
+        }
+        Ok(match (self.min, self.max) {
+            (Some(lo), Some(hi)) if lo <= hi => wanted.clamp(lo, hi),
+            _ => wanted,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct PlatformControls {
     pub power_modes: Vec<String>,
@@ -341,6 +385,10 @@ impl HardwareModel {
     /// The first sensor with this role.
     pub fn sensor_for(&self, role: SensorRole) -> Option<&Sensor> {
         self.sensors.iter().find(|s| s.role == role)
+    }
+
+    pub fn attribute(&self, name: &str) -> Option<&FirmwareAttr> {
+        self.controls.attributes.iter().find(|a| a.name == name)
     }
 }
 
@@ -576,21 +624,10 @@ fn controls(raw: &RawInventory) -> PlatformControls {
     }
 
     let gpu_owner = raw.supergfx.as_ref().map(|_| Owner::Supergfxd);
-    let base = "/sys/class/firmware-attributes/asus-armoury/attributes";
     for name in &raw.system.asus_armoury_attrs {
-        let attr = |f: &str| raw.sysfs.get(&format!("{base}/{name}/{f}"));
-        let Some(current) = attr("current_value") else { continue };
-        let num = |f: &str| attr(f).and_then(|a| a.value.as_deref()).and_then(|v| v.trim().parse::<i64>().ok());
-        let choices = attr("possible_values").and_then(|a| a.value.as_deref()).map(|v| v.split(';').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default();
-        c.attributes.push(FirmwareAttr {
-            name: name.clone(),
-            current: num("current_value"),
-            min: num("min_value"),
-            max: num("max_value"),
-            choices,
-            writable: current.mode & 0o200 != 0,
-            owned_by: if knowledge::is_gpu_switch(name) { gpu_owner } else { None },
-        });
+        let owned_by = if knowledge::is_gpu_switch(name) { gpu_owner } else { None };
+        let file = |f: &str| raw.sysfs.get(&format!("{ARMOURY}/{name}/{f}")).map(|a| (a.value.clone(), a.mode));
+        c.attributes.extend(FirmwareAttr::from_files(name, owned_by, file));
     }
 
     if let Some(g) = &raw.supergfx {
@@ -612,6 +649,20 @@ mod tests {
 
     fn read(toml_text: &str) -> String {
         toml::from_str::<Assignment>(toml_text).expect(toml_text).target.0
+    }
+
+    #[test]
+    fn firmware_attributes_accept_only_what_they_can_take() {
+        let ppt = FirmwareAttr { name: "ppt_pl1_spl".into(), current: Some(35), min: Some(15), max: Some(35), choices: vec![], writable: true, owned_by: None };
+        assert_eq!(ppt.accept(80), Ok(35), "clamped to the range in force (battery here)");
+        assert_eq!(ppt.accept(20), Ok(20));
+        let od = FirmwareAttr { name: "panel_overdrive".into(), current: Some(1), min: None, max: None, choices: vec![0, 1], writable: true, owned_by: None };
+        assert_eq!(od.accept(0), Ok(0));
+        assert!(od.accept(2).is_err());
+        let ro = FirmwareAttr { writable: false, ..od.clone() };
+        assert!(ro.accept(0).is_err());
+        let mux = FirmwareAttr { name: "gpu_mux_mode".into(), owned_by: Some(Owner::Supergfxd), ..od };
+        assert!(mux.accept(0).unwrap_err().contains("Supergfxd"));
     }
 
     #[test]

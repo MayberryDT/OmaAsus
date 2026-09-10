@@ -111,6 +111,9 @@ pub struct App {
     /// Current panel surface height and anchor, for resizing it to its content.
     overlay_h: u32,
     overlay_anchor: Anchor,
+    /// Number of the latest profile apply; older ones stop when they see it change.
+    apply_generation: Arc<std::sync::atomic::AtomicU64>,
+    last_reapply: Option<std::time::Instant>,
 }
 
 /// The overlay panel slides down from the bar when it opens and folds back up
@@ -213,6 +216,12 @@ pub enum Message {
     RgbDevices(Result<Vec<oma_hw::rgb::RgbDevice>, String>),
     ApplyProfile(uuid::Uuid),
     Applied(Result<String, String>),
+    /// Automation picked a profile.
+    AutoApply(uuid::Uuid),
+    /// Apply the active profile again (resume, charger, graphics switch).
+    Reapply(&'static str),
+    ProfileApplied(String, crate::apply::Origin, crate::apply::Report),
+    System(crate::events::Event),
     ToggleOverlay,
     OpenWindow,
     Tray(tray::Event),
@@ -302,6 +311,8 @@ impl App {
             screen_h: None,
             overlay_h: 0,
             overlay_anchor: Anchor::Right | Anchor::Top,
+            apply_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_reapply: None,
         };
         let inv = Task::perform(async { Arc::new(oma_hw::capture::gather().await) }, Message::Hardware);
         let ctl = Task::perform(async { oma_hw::helper::Controller::connect().await.has_helper() }, Message::Controller);
@@ -359,6 +370,7 @@ impl App {
             Subscription::run(telemetry::stream).map(Message::Telemetry),
             Subscription::run(ipc::stream).map(Message::Ipc),
             Subscription::run(crate::automation::stream).map(Message::Auto),
+            Subscription::run(crate::events::stream).map(Message::System),
             tray,
             iced::window::close_events().map(Message::SurfaceClosed),
             anim,
@@ -393,6 +405,34 @@ impl App {
             f(&mut pr.cooling);
         }
         crate::config_store::save(&self.config);
+    }
+
+    /// Apply a profile through the pipeline; a newer apply supersedes this one.
+    fn start_apply(&mut self, id: uuid::Uuid, origin: crate::apply::Origin) -> Task<Message> {
+        let Some(pr) = self.config.profile(id).cloned() else { return Task::none() };
+        self.config.active_profile = id;
+        crate::config_store::save(&self.config);
+        // Re-send the new profile's outputs; ones it drops are released by the engine.
+        self.fan_engine.invalidate();
+        if let Some(be) = &self.fan_backend {
+            be.set_power_mode(pr.cpu.power_mode.clone());
+        }
+        let this = self.apply_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let cx = crate::apply::Context { inv: self.inventory.clone(), model: self.model.clone(), generation: self.apply_generation.clone(), this };
+        let cc = (self.effective_fan_owner() == FanOwner::CoolerControl).then(|| (self.cc_client(), pr.cc_mode.clone()));
+        let name = pr.name.clone();
+        Task::perform(
+            async move {
+                let mut report = crate::apply::apply_profile(pr, cx).await;
+                if let Some((cc, Some(mode))) = cc {
+                    if let Err(e) = cc.activate_mode(&mode).await {
+                        report.failed.push(format!("CoolerControl: {e}"));
+                    }
+                }
+                report
+            },
+            move |report| Message::ProfileApplied(name.clone(), origin, report),
+        )
     }
 
     /// Point count of a curve the firmware runs on its own sensor (asusd: 8).
@@ -617,11 +657,23 @@ impl App {
                 oma_hw::asusd::AsusArmouryProxy::builder(&c).path(path).map_err(|e| e.to_string())?.build().await.map_err(|e| e.to_string())?.restore_default().await.map_err(|e| e.to_string())?;
                 Ok(format!("{} restored", oma_hw::asusd::attr_label(&name)))
             })),
-            AsusMsg::GfxMode(mode) => run(Box::pin(async move {
-                let c = zbus::Connection::system().await.map_err(|e| e.to_string())?;
-                let action = oma_hw::supergfx::set_mode(&c, mode).await.map_err(|e| e.to_string())?;
-                Ok(format!("Graphics → {}: {}", mode.label(), action.label()))
-            })),
+            AsusMsg::GfxMode(mode) => {
+                // Only real changes, and never out from under a display or work on the dGPU.
+                if self.asus.gfx.as_ref().map(|g| g.mode) == Some(mode) {
+                    return Task::none();
+                }
+                let busy = self.snapshot.as_ref().and_then(|s| s.nvidia.as_ref()).is_some_and(|n| n.util_gpu.unwrap_or(0) > 10 || n.process_count.unwrap_or(0) > 0);
+                if let Some(why) = oma_hw::supergfx::switch_blocker(mode, busy, &oma_hw::supergfx::dgpu_displays()) {
+                    self.toast = Some((format!("Graphics → {}: {why}", mode.label()), false));
+                    self.toast_at = Some(std::time::Instant::now());
+                    return Task::none();
+                }
+                run(Box::pin(async move {
+                    let c = zbus::Connection::system().await.map_err(|e| e.to_string())?;
+                    let action = oma_hw::supergfx::set_mode(&c, mode).await.map_err(|e| e.to_string())?;
+                    Ok(format!("Graphics → {}: {}", mode.label(), action.label()))
+                }))
+            }
         }
     }
 
@@ -846,7 +898,7 @@ impl App {
         match decision {
             Some(target) if target != self.config.active_profile => {
                 tracing::info!(?target, "automation switching profile");
-                Task::done(Message::ApplyProfile(target))
+                Task::done(Message::AutoApply(target))
             }
             _ => Task::none(),
         }
@@ -1341,32 +1393,44 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ApplyProfile(id) => {
-                if let Some(pr) = self.config.profile(id).cloned() {
-                    self.config.active_profile = id;
-                    crate::config_store::save(&self.config);
-                    // Re-send the new profile's outputs; ones it drops are released by the engine.
-                    self.fan_engine.invalidate();
-                    if let Some(be) = &self.fan_backend {
-                        be.set_power_mode(pr.cpu.power_mode.clone());
-                    }
-                    let inv = self.inventory.clone();
-                    let model = self.model.clone();
-                    let cc = (self.effective_fan_owner() == FanOwner::CoolerControl).then(|| (self.cc_client(), pr.cc_mode.clone()));
-                    return Task::perform(
-                        async move {
-                            let r = crate::apply::apply_profile(pr, inv, model).await;
-                            if let Some((cc, Some(mode))) = cc {
-                                if let Err(e) = cc.activate_mode(&mode).await {
-                                    return Err(format!("{}; CoolerControl: {e}", r.unwrap_or_else(|e| e)));
-                                }
-                            }
-                            r
-                        },
-                        Message::Applied,
-                    );
+            Message::ApplyProfile(id) => self.start_apply(id, crate::apply::Origin::Manual),
+            Message::AutoApply(id) => self.start_apply(id, crate::apply::Origin::Automation),
+            Message::Reapply(reason) => {
+                // Resume and a charger change often arrive together: once is enough.
+                let now = std::time::Instant::now();
+                if self.last_reapply.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_secs(3)) {
+                    return Task::none();
+                }
+                self.last_reapply = Some(now);
+                tracing::info!(reason, "re-applying the active profile");
+                self.start_apply(self.config.active_profile, crate::apply::Origin::Reapply)
+            }
+            Message::ProfileApplied(name, origin, report) => {
+                if report.superseded {
+                    return Task::none();
+                }
+                // Firmware can reset fan curves when the power mode changes: send them again now it has.
+                self.fan_engine.invalidate();
+                let summary = report.summary(&name);
+                // Re-applies stay quiet unless something failed.
+                if origin != crate::apply::Origin::Reapply || summary.is_err() {
+                    self.toast = Some(match summary {
+                        Ok(s) => (s, true),
+                        Err(e) => (e, false),
+                    });
+                    self.toast_at = Some(std::time::Instant::now());
                 }
                 Task::none()
+            }
+            Message::System(ev) => {
+                let reason = match ev {
+                    crate::events::Event::Resumed => "resume",
+                    crate::events::Event::Power(true) => "charger connected",
+                    crate::events::Event::Power(false) => "charger disconnected",
+                    crate::events::Event::Graphics => "graphics switch",
+                };
+                // Limits and graphics state moved with it: refresh the ASUS view too.
+                Task::batch([Task::perform(crate::pages::asus::load(), Message::AsusLoaded), Task::done(Message::Reapply(reason))])
             }
             Message::Applied(r) => {
                 self.toast = Some(match r {

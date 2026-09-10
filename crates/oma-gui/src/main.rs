@@ -12,6 +12,7 @@ mod app;
 mod apply;
 mod automation;
 mod config_store;
+mod events;
 mod fans;
 mod install;
 mod ipc;

@@ -1,32 +1,126 @@
-//! Profile application engine: turns a `Profile` into concrete writes via the
-//! helper (or direct writes when root) and the daemons.
+//! Profile application: an ordered pipeline over what the machine has.
+//!
+//! Power mode first, because firmware applies the mode's own limits and fan
+//! curves when it changes; then firmware limits once the new mode has settled;
+//! then CPU and GPU. Fans follow through the fan engine. A newer apply
+//! supersedes one still running, and every step reports whether it applied,
+//! was skipped (and why) or failed.
 
-use oma_hw::asusd::{PlatformProfile, PlatformProxy};
+use oma_hw::asusd::{self, PlatformProfile, PlatformProxy};
 use oma_hw::helper::Controller;
-use oma_hw::model::{HardwareModel, Owner};
+use oma_hw::model::{FirmwareAttr, GpuVendor, HardwareModel, Owner, ARMOURY};
 use oma_hw::profile::{match_power_mode, Profile};
 use oma_hw::SystemInventory;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
-pub async fn apply_profile(p: Profile, inv: Option<Arc<SystemInventory>>, model: Option<Arc<HardwareModel>>) -> Result<String, String> {
+/// Why a profile is being applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Manual,
+    Automation,
+    /// Again after resume, a charger change or a graphics switch.
+    Reapply,
+}
+
+pub struct Context {
+    pub inv: Option<Arc<SystemInventory>>,
+    pub model: Option<Arc<HardwareModel>>,
+    /// The latest apply's number; this one stops when it's no longer the latest.
+    pub generation: Arc<AtomicU64>,
+    pub this: u64,
+}
+
+impl Context {
+    fn superseded(&self) -> bool {
+        self.generation.load(Ordering::SeqCst) != self.this
+    }
+}
+
+/// What an apply did.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Report {
+    pub applied: Vec<String>,
+    pub skipped: Vec<String>,
+    pub failed: Vec<String>,
+    pub superseded: bool,
+}
+
+impl Report {
+    /// One line for a toast: `Ok` unless something failed.
+    pub fn summary(&self, profile: &str) -> Result<String, String> {
+        let skipped = if self.skipped.is_empty() { String::new() } else { format!(" · skipped {}", self.skipped.join(", ")) };
+        match (self.applied.is_empty(), self.failed.is_empty()) {
+            (true, true) => Ok(format!("{profile}: already in place{skipped}")),
+            (false, true) => Ok(format!("{profile} applied: {}{skipped}", self.applied.join(", "))),
+            (true, false) => Err(format!("{profile} failed: {}{skipped}", self.failed.join("; "))),
+            (false, false) => Err(format!("{profile} partly applied ({}); failed: {}{skipped}", self.applied.join(", "), self.failed.join("; "))),
+        }
+    }
+}
+
+pub async fn apply_profile(p: Profile, cx: Context) -> Report {
     let ctl = Controller::connect().await;
-    let mut done: Vec<String> = Vec::new();
-    let mut failed: Vec<String> = Vec::new();
+    let mut r = Report::default();
+    macro_rules! checkpoint {
+        () => {
+            if cx.superseded() {
+                r.superseded = true;
+                return r;
+            }
+        };
+    }
+    checkpoint!();
 
-    // Power mode, through whichever component owns it on this machine.
-    if let (Some(wanted), Some(m)) = (&p.cpu.power_mode, &model) {
-        match match_power_mode(wanted, &m.controls.power_modes) {
-            Some(mode) => match set_power_mode(m.controls.power_owner, mode, &ctl).await {
-                Ok(()) => done.push(format!("power mode {mode}")),
-                Err(e) => failed.push(format!("power mode: {e}")),
+    // 1. Power mode, through whichever component owns it here.
+    let mut mode_changed = false;
+    if let Some(wanted) = &p.cpu.power_mode {
+        match &cx.model {
+            None => r.skipped.push("power mode (hardware not detected yet)".into()),
+            Some(m) => match match_power_mode(wanted, &m.controls.power_modes) {
+                None => r.skipped.push(format!("power mode {wanted} (not on this machine)")),
+                Some(mode) => match set_power_mode(m.controls.power_owner, mode, &ctl).await {
+                    Ok(true) => {
+                        mode_changed = true;
+                        r.applied.push(format!("power mode {mode}"));
+                    }
+                    Ok(false) => {}
+                    Err(e) => r.failed.push(format!("power mode: {e}")),
+                },
             },
-            None => failed.push(format!("power mode {wanted}: this machine has no such mode")),
         }
     }
 
-    // CPU governor / EPP / boost.
+    // 2. Firmware limits, once the firmware has put the new mode's own in place.
+    let limits: Vec<(&String, i64)> = p.asusd.iter().filter_map(|(name, v)| v.trim().parse().ok().map(|n| (name, n))).collect();
+    if !limits.is_empty() {
+        if mode_changed {
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            checkpoint!();
+        }
+        let via_asusd = cx.model.as_ref().is_some_and(|m| m.controls.power_owner == Some(Owner::Asusd));
+        for (name, wanted) in limits {
+            let Some(mut attr) = FirmwareAttr::read_live(name) else {
+                r.skipped.push(format!("{name} (not on this machine)"));
+                continue;
+            };
+            attr.owned_by = cx.model.as_ref().and_then(|m| m.attribute(name)).and_then(|a| a.owned_by);
+            match attr.accept(wanted) {
+                Err(why) => r.skipped.push(why),
+                Ok(v) if attr.current == Some(v) => {}
+                Ok(v) => match write_attr(name, v, via_asusd, &ctl).await {
+                    Ok(()) => r.applied.push(format!("{} {v}", asusd::attr_label(name))),
+                    Err(e) => r.failed.push(format!("{name}: {e}")),
+                },
+            }
+        }
+    }
+    checkpoint!();
+
+    // 3. CPU governor / EPP / boost / limits.
     if let Some(cs) = &p.cpu.control {
-        let info = inv.as_ref().map(|i| i.cpu.clone()).unwrap_or_else(oma_hw::cpu::cpu_info);
+        let info = cx.model.as_ref().map(|m| m.cpu.clone()).or_else(|| cx.inv.as_ref().map(|i| i.cpu.clone())).unwrap_or_else(oma_hw::cpu::cpu_info);
         let mut target = cs.clone();
         if !info.available_governors.contains(&target.governor) {
             target.governor = info.available_governors.first().cloned().unwrap_or_default();
@@ -38,59 +132,102 @@ pub async fn apply_profile(p: Profile, inv: Option<Arc<SystemInventory>>, model:
         }
         let plan = oma_hw::cpu::plan_writes(&info, &target);
         match ctl.write_batch(&plan).await {
-            Ok(errs) if errs.is_empty() => done.push(format!("CPU {}{}", target.governor, target.epp.as_ref().map(|e| format!("/{e}")).unwrap_or_default())),
-            Ok(errs) => failed.push(format!("CPU: {}", errs.first().map(|(_, e)| e.clone()).unwrap_or_default())),
-            Err(e) => failed.push(format!("CPU: {e}")),
+            Ok(errs) if errs.is_empty() => r.applied.push(format!("CPU {}{}", target.governor, target.epp.as_ref().map(|e| format!("/{e}")).unwrap_or_default())),
+            Ok(errs) => r.failed.push(format!("CPU: {}", errs.first().map(|(_, e)| e.clone()).unwrap_or_default())),
+            Err(e) => r.failed.push(format!("CPU: {e}")),
         }
     }
+    checkpoint!();
 
-    // NVIDIA.
+    // 4. GPUs.
     if let Some(nv) = &p.gpu.nvidia {
         if !oma_hw::nvidia::awake() {
-            // Waking the dGPU just to set limits would cost battery; they apply when a profile is next applied with it awake.
-            done.push("NVIDIA skipped (asleep or off)".into());
-        } else if oma_hw::nvidia::available() {
+            // Waking the dGPU just to set limits would cost battery; they go in on the next apply with it awake.
+            r.skipped.push("NVIDIA (asleep or off)".into());
+        } else {
             match ctl.nvidia_apply(0, nv).await {
-                Ok(errs) if errs.is_empty() => done.push("GPU".into()),
-                Ok(errs) => failed.push(format!("GPU: {}", errs.iter().map(|(s, e)| format!("{s} ({e})")).collect::<Vec<_>>().join(", "))),
-                Err(e) => failed.push(format!("GPU: {e}")),
+                Ok(errs) if errs.is_empty() => r.applied.push("NVIDIA".into()),
+                Ok(errs) => r.failed.push(format!("NVIDIA: {}", errs.iter().map(|(s, e)| format!("{s} ({e})")).collect::<Vec<_>>().join(", "))),
+                Err(e) => r.failed.push(format!("NVIDIA: {e}")),
             }
         }
     }
-
-    // amdgpu perf level.
     if let Some(level) = &p.gpu.amd_perf_level {
-        for g in oma_hw::amdgpu::AmdGpu::enumerate() {
-            if let Err(e) = ctl.write(g.perf_level_path(), level).await {
-                failed.push(format!("AMD GPU: {e}"));
+        let slots: Vec<String> = cx.model.as_ref().map(|m| m.gpus.iter().filter(|g| g.vendor == GpuVendor::Amd).filter_map(|g| g.pci_slot.clone()).collect()).unwrap_or_default();
+        if slots.is_empty() {
+            r.skipped.push("AMD GPU (none here)".into());
+        }
+        for slot in slots {
+            match ctl.write(format!("/sys/bus/pci/devices/{slot}/power_dpm_force_performance_level"), level).await {
+                Ok(()) => r.applied.push(format!("AMD GPU {level}")),
+                Err(e) => r.failed.push(format!("AMD GPU: {e}")),
             }
         }
     }
 
-    // Cooling is handled by the fan engine; record intent here.
-    if !p.cooling.fans.is_empty() {
-        done.push(format!("{} fan targets", p.cooling.fans.len()));
+    // 5. Graphics mode: switching can log you out or need a reboot, so a
+    //    profile never does it on its own.
+    if let Some(mode) = &p.gfx_mode {
+        r.skipped.push(format!("graphics mode {mode} (switch it on the ASUS page)"));
     }
-
-    if failed.is_empty() {
-        Ok(format!("{} applied: {}", p.name, done.join(", ")))
-    } else if done.is_empty() {
-        Err(format!("{} failed: {}", p.name, failed.join("; ")))
-    } else {
-        Err(format!("{} partly applied ({}); failed: {}", p.name, done.join(", "), failed.join("; ")))
-    }
+    r
 }
 
-async fn set_power_mode(owner: Option<Owner>, mode: &str, ctl: &Controller) -> Result<(), String> {
+/// Select `mode` through its owner. `Ok(false)` when it was already selected.
+async fn set_power_mode(owner: Option<Owner>, mode: &str, ctl: &Controller) -> Result<bool, String> {
     let system = || async { zbus::Connection::system().await.map_err(|e| e.to_string()) };
     match owner {
         Some(Owner::Asusd) => {
-            let profile = (0..=4).map(PlatformProfile::from_u32).find(|p| p.label().eq_ignore_ascii_case(mode)).ok_or_else(|| format!("asusd has no {mode} mode"))?;
+            let profile = PlatformProfile::from_label(mode).ok_or_else(|| format!("asusd has no {mode} mode"))?;
             let c = system().await?;
-            PlatformProxy::new(&c).await.map_err(|e| e.to_string())?.set_platform_profile(profile as u32).await.map_err(|e| e.to_string())
+            let p = PlatformProxy::new(&c).await.map_err(|e| e.to_string())?;
+            if p.platform_profile().await.ok() == Some(profile as u32) {
+                return Ok(false);
+            }
+            p.set_platform_profile(profile as u32).await.map(|()| true).map_err(|e| e.to_string())
         }
-        Some(Owner::PowerProfilesDaemon) => oma_hw::ppd::set_active(&system().await?, mode).await.map_err(|e| e.to_string()),
-        Some(Owner::Sysfs) => ctl.write("/sys/firmware/acpi/platform_profile", mode).await.map_err(|e| e.to_string()),
+        Some(Owner::PowerProfilesDaemon) => {
+            let c = system().await?;
+            if oma_hw::ppd::state(&c).await.is_ok_and(|s| s.active == mode) {
+                return Ok(false);
+            }
+            oma_hw::ppd::set_active(&c, mode).await.map(|()| true).map_err(|e| e.to_string())
+        }
+        Some(Owner::Sysfs) => {
+            let path = "/sys/firmware/acpi/platform_profile";
+            if oma_hw::sysfs::read_string(path).as_deref() == Some(mode) {
+                return Ok(false);
+            }
+            ctl.write(path, mode).await.map(|()| true).map_err(|e| e.to_string())
+        }
         _ => Err("nothing controls power modes here".into()),
+    }
+}
+
+/// Write a firmware attribute: through asusd when it runs, so its stored copy
+/// stays in step; else straight to sysfs through the helper.
+async fn write_attr(name: &str, value: i64, via_asusd: bool, ctl: &Controller) -> Result<(), String> {
+    if via_asusd {
+        let c = zbus::Connection::system().await.map_err(|e| e.to_string())?;
+        let v = i32::try_from(value).map_err(|e| e.to_string())?;
+        asusd::set_armoury_attr(&c, name, v).await.map_err(|e| e.to_string())
+    } else {
+        ctl.write(format!("{ARMOURY}/{name}/current_value"), value.to_string()).await.map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summaries_say_what_happened() {
+        let mut r = Report::default();
+        assert_eq!(r.summary("Quiet"), Ok("Quiet: already in place".into()));
+        r.applied.push("power mode Quiet".into());
+        r.skipped.push("NVIDIA (asleep or off)".into());
+        assert_eq!(r.summary("Quiet"), Ok("Quiet applied: power mode Quiet · skipped NVIDIA (asleep or off)".into()));
+        r.failed.push("CPU: denied".into());
+        assert_eq!(r.summary("Quiet"), Err("Quiet partly applied (power mode Quiet); failed: CPU: denied · skipped NVIDIA (asleep or off)".into()));
     }
 }
