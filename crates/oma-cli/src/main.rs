@@ -4,7 +4,7 @@ use oma_hw::{amdgpu, cpu, detect, hwmon, nvidia};
 use std::time::Duration;
 
 fn usage() -> ! {
-    eprintln!("usage: oma <inventory [--json]|model [--json] [--from raw-inventory.json]|sensors|watch [secs]|nvidia|cpu|daemons|rgb [--set index]|capture [dir]>");
+    eprintln!("usage: oma <inventory [--json]|model [--json] [--from raw-inventory.json]|curves [set <mode> <fan> <temp:duty,...> | off <mode> <fan>]|sensors|watch [secs]|nvidia|cpu|daemons|rgb [--set index]|capture [dir]>");
     std::process::exit(2)
 }
 
@@ -37,6 +37,50 @@ fn main() -> anyhow::Result<()> {
             } else {
                 print_model(&model);
             }
+        }
+        Some("curves") => {
+            use oma_hw::asusd::{CurveData, FanCurvesProxy, PlatformProfile, PlatformProxy};
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async {
+                let conn = zbus::Connection::system().await?;
+                let mode = |i: usize| -> anyhow::Result<PlatformProfile> {
+                    let name = args.get(i).ok_or_else(|| anyhow::anyhow!("which power mode? e.g. Quiet"))?;
+                    PlatformProfile::from_label(name).ok_or_else(|| anyhow::anyhow!("unknown power mode {name}"))
+                };
+                let fan = |i: usize| args.get(i).map(|f| f.to_ascii_uppercase()).ok_or_else(|| anyhow::anyhow!("which fan? CPU, GPU or MID"));
+                match args.get(1).map(String::as_str) {
+                    Some("set") => {
+                        let spec = args.get(4).ok_or_else(|| anyhow::anyhow!("points as temp:duty%, e.g. 40:0,60:30,80:70"))?;
+                        let points = spec
+                            .split(',')
+                            .map(|p| {
+                                let (t, d) = p.split_once(':')?;
+                                Some((t.trim().trim_end_matches(['c', 'C']).parse().ok()?, d.trim().trim_end_matches('%').parse().ok()?))
+                            })
+                            .collect::<Option<Vec<(f64, f64)>>>()
+                            .ok_or_else(|| anyhow::anyhow!("cannot read points {spec}"))?;
+                        let points = if points.len() == 8 { points } else { oma_hw::profile::FanCurve { points, min_duty: 0.0, ..oma_hw::profile::FanCurve::balanced() }.resample(8) };
+                        let data = CurveData::from_points(&fan(3)?, &points, true);
+                        println!("{} {}: {:?} °C, pwm {:?}", mode(2)?.label(), data.fan, data.temp, data.pwm);
+                        oma_hw::asusd::set_fan_curve(&conn, mode(2)?, data).await?;
+                        println!("stored and enabled");
+                    }
+                    Some("off") => {
+                        oma_hw::asusd::disable_fan_curve(&conn, mode(2)?, &fan(3)?).await?;
+                        println!("{} {}: back to the firmware's own curve", mode(2)?.label(), fan(3)?);
+                    }
+                    _ => {
+                        let curves = FanCurvesProxy::new(&conn).await?;
+                        for profile in PlatformProxy::new(&conn).await?.platform_profile_choices().await? {
+                            for c in curves.fan_curve_data(profile).await? {
+                                let points: Vec<String> = c.points().iter().map(|(t, d)| format!("{t:.0}:{d:.1}")).collect();
+                                println!("{:<12} {:<4} {:<4} {}", PlatformProfile::from_u32(profile).label(), c.fan, if c.enabled { "on" } else { "off" }, points.join(","));
+                            }
+                        }
+                    }
+                }
+                anyhow::Ok(())
+            })?;
         }
         Some("sensors") => print_sensors(),
         Some("watch") => {

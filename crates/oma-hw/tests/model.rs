@@ -30,6 +30,10 @@ fn ga403wr_fans_are_asusd_firmware_curves() {
         assert!(matches!(f.backend, FanBackend::AsusdCurve { .. }));
     }
     assert_eq!(m.fan_owner, Owner::Asusd);
+    let cpu = m.fan("asusd:fan:CPU").expect("CPU fan");
+    assert_eq!(cpu.firmware_curves.keys().map(String::as_str).collect::<Vec<_>>(), ["Balanced", "Performance", "Quiet"]);
+    assert!(cpu.firmware_curves.values().all(|c| c.points.len() == 8));
+    assert_eq!(cpu.firmware_curves["Quiet"].points.last().map(|p| p.0), Some(120.0), "the firmware's 255 'never' marker reads as 120");
     assert!(m.notes.iter().any(|n| n.what.contains("asusd:fan:CPU") && matches!(n.source, Source::Reference(_))));
 }
 

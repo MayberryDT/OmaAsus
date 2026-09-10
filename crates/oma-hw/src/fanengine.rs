@@ -70,11 +70,13 @@ struct ChannelState {
     /// Send the current target again on the next tick (profile re-applied,
     /// or the last write failed).
     resend: bool,
+    /// The hardware curve last programmed, so edits are sent again.
+    curve: Option<FanCurve>,
 }
 
 impl ChannelState {
     fn new(duty: f64, temp: f64) -> Self {
-        Self { last_duty: duty, last_temp: temp, resend: false }
+        Self { last_duty: duty, last_temp: temp, resend: false, curve: None }
     }
 }
 
@@ -134,8 +136,9 @@ impl FanEngine {
                     }
                 }
                 FanMode::HardwareCurve(curve) => {
-                    if self.state.get(&fa.target).is_none_or(|s| s.resend) {
-                        self.state.insert(fa.target.clone(), ChannelState::new(-1.0, 0.0));
+                    // Programmed once, and again when re-applied or edited.
+                    if self.state.get(&fa.target).is_none_or(|s| s.resend || s.curve.as_ref() != Some(curve)) {
+                        self.state.insert(fa.target.clone(), ChannelState { curve: Some(curve.clone()), ..ChannelState::new(-1.0, 0.0) });
                         out.push(Command { target: fa.target.clone(), duty: None, hw_curve: Some(curve.clone()) });
                     }
                 }
@@ -324,6 +327,21 @@ mod tests {
         let cmds = e.evaluate(&cooling, &Temps::default(), now);
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].duty, Some(50.0));
+    }
+
+    #[test]
+    fn edited_hardware_curves_are_resent() {
+        let mut e = FanEngine::new(Duration::from_secs(1));
+        let target = FanTarget::new("asusd:fan:CPU");
+        let mut cooling = CoolingSettings::default();
+        cooling.set(target.clone(), FanMode::HardwareCurve(FanCurve::balanced()));
+        let now = Instant::now();
+        assert_eq!(e.evaluate(&cooling, &Temps::default(), now).len(), 1);
+        assert!(e.evaluate(&cooling, &Temps::default(), now).is_empty(), "unchanged curves are not resent");
+        cooling.set(target, FanMode::HardwareCurve(FanCurve::performance()));
+        let cmds = e.evaluate(&cooling, &Temps::default(), now);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].hw_curve, Some(FanCurve::performance()));
     }
 
     #[test]

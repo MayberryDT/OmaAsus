@@ -7,6 +7,7 @@ use crate::theme::{size, space};
 use crate::widgets::{self, curve::{CurveEditor, CurveEvent}};
 use iced::widget::{canvas, column, row, scrollable, slider, Column, Row};
 use iced::{Element, Length};
+use oma_hw::model::CurveTemp;
 use oma_hw::profile::{FanCurve, FanMode, FanOwner, FanTarget, TempSource};
 
 #[derive(Debug, Clone)]
@@ -113,15 +114,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
             if takes_duty {
                 kinds.extend([("Fixed", "fixed"), ("Curve", "curve")]);
             }
-            if takes_duty && caps.as_ref().is_some_and(|c| c.firmware_curve.is_some()) {
-                kinds.push(("Hardware curve", "hw"));
+            if caps.as_ref().is_some_and(|c| c.firmware_curve.is_some()) {
+                kinds.push((if takes_duty { "Hardware curve" } else { "Firmware curve" }, "hw"));
             }
             let kind_row = Row::with_children(kinds.into_iter().map(|(l, k)| widgets::btn(p, l, if k == kind { widgets::ButtonKind::Primary } else { widgets::ButtonKind::Ghost }, Some(Message::Cooling(CoolingMsg::Mode(target.clone(), k))))).collect::<Vec<_>>()).spacing(space::SM).wrap();
             let live_duty = app.fan_engine_duty(&target);
             let floor = app.fan_engine.floor(&target);
             let body: Element<Message> = match mode {
                 FanMode::Auto if takes_duty => widgets::dim(p, "Firmware / driver default behaviour. Pick Fixed or Curve to take control.").into(),
-                FanMode::Auto => widgets::dim(p, "Runs the firmware's curve for the current power mode. Editing firmware curves from OmaAsus is coming next.").into(),
+                FanMode::Auto => widgets::dim(p, "Runs the firmware's own curve for the current power mode. Pick Firmware curve to set this profile's own.").into(),
                 FanMode::Fixed(d) => column![
                     row![widgets::eyebrow(p, "Duty"), widgets::hfill(), widgets::mono(p, format!("{d:.0}%"), size::SMALL)],
                     slider(floor..=100.0, d.max(floor), |v| Message::Cooling(CoolingMsg::Fixed(v))).step(1.0).style(slider_style(p)),
@@ -147,33 +148,29 @@ pub fn view(app: &App) -> Element<'_, Message> {
                         let active = s == c.source;
                         widgets::btn(p, s.label(), if active { widgets::ButtonKind::Primary } else { widgets::ButtonKind::Ghost }, Some(Message::Cooling(CoolingMsg::Source(s))))
                     }).collect::<Vec<_>>()).spacing(space::XS).wrap();
-                    column![
-                        canvas(CurveEditor { palette: p, points: &c.points, color: p.accent, live, min_duty: c.min_duty, on_event: |e| Message::Cooling(CoolingMsg::Curve(e)), editable: true })
-                            .width(Length::Fill)
-                            .height(Length::Fill),
-                        widgets::dim(p, "Drag points · click to add · right-click to remove"),
-                        widgets::eyebrow(p, "Temperature source"),
-                        src_row,
-                        row![
-                            column![row![widgets::eyebrow(p, "Minimum duty"), widgets::hfill(), widgets::mono(p, format!("{:.0}%", c.min_duty.max(floor)), size::SMALL)], slider(floor..=100.0, c.min_duty.max(floor), |v| Message::Cooling(CoolingMsg::MinDuty(v))).step(1.0).style(slider_style(p))].spacing(space::XS).width(Length::Fill),
-                            column![row![widgets::eyebrow(p, "Ramp (s / full sweep)"), widgets::hfill(), widgets::mono(p, format!("{:.0}s", c.ramp_s), size::SMALL)], slider(0.0..=30.0, c.ramp_s, |v| Message::Cooling(CoolingMsg::Ramp(v))).step(1.0).style(slider_style(p))].spacing(space::XS).width(Length::Fill),
-                            column![row![widgets::eyebrow(p, "Hysteresis"), widgets::hfill(), widgets::mono(p, format!("{:.1}°", c.hysteresis_c), size::SMALL)], slider(0.0..=10.0, c.hysteresis_c, |v| Message::Cooling(CoolingMsg::Hysteresis(v))).step(0.5).style(slider_style(p))].spacing(space::XS).width(Length::Fill),
-                        ]
-                        .spacing(space::LG),
-                        row![
-                            widgets::eyebrow(p, "Presets"),
-                            widgets::btn(p, "Silent", widgets::ButtonKind::Ghost, Some(Message::Cooling(CoolingMsg::Preset("silent")))),
-                            widgets::btn(p, "Balanced", widgets::ButtonKind::Ghost, Some(Message::Cooling(CoolingMsg::Preset("balanced")))),
-                            widgets::btn(p, "Performance", widgets::ButtonKind::Ghost, Some(Message::Cooling(CoolingMsg::Preset("performance")))),
-                            widgets::btn(p, "Coolant", widgets::ButtonKind::Ghost, Some(Message::Cooling(CoolingMsg::Preset("coolant")))),
-                            widgets::btn(p, "Pump", widgets::ButtonKind::Ghost, Some(Message::Cooling(CoolingMsg::Preset("pump")))),
-                        ]
-                        .spacing(space::SM)
-                        .align_y(iced::Alignment::Center),
-                    ]
-                    .spacing(space::MD)
-                    .height(Length::Fill)
-                    .into()
+                    // Firmware curves run on the fan's own sensor inside the firmware:
+                    // no source to pick, no software ramp or hysteresis, fixed points.
+                    let firmware_temp = matches!(mode, FanMode::HardwareCurve(_)) && caps.as_ref().and_then(|c| c.firmware_curve.as_ref()).is_some_and(|s| s.temp == CurveTemp::Firmware);
+                    let min_duty = || column![row![widgets::eyebrow(p, "Minimum duty"), widgets::hfill(), widgets::mono(p, format!("{:.0}%", c.min_duty.max(floor)), size::SMALL)], slider(floor..=100.0, c.min_duty.max(floor), |v| Message::Cooling(CoolingMsg::MinDuty(v))).step(1.0).style(slider_style(p))].spacing(space::XS).width(Length::Fill);
+                    let preset = |label: &str, name: &'static str| widgets::btn(p, label, widgets::ButtonKind::Ghost, Some(Message::Cooling(CoolingMsg::Preset(name))));
+                    let mut presets = vec![widgets::eyebrow(p, "Presets"), preset("Silent", "silent"), preset("Balanced", "balanced"), preset("Performance", "performance")];
+                    let mut body = Column::new()
+                        .push(canvas(CurveEditor { palette: p, points: &c.points, color: p.accent, live, min_duty: c.min_duty, on_event: |e| Message::Cooling(CoolingMsg::Curve(e)), editable: true }).width(Length::Fill).height(Length::Fill))
+                        .push(widgets::dim(p, if firmware_temp { "Drag the points · the firmware runs this curve on the fan's own temperature, for this profile's power mode" } else { "Drag points · click to add · right-click to remove" }));
+                    if firmware_temp {
+                        body = body.push(row![min_duty()].spacing(space::LG));
+                    } else {
+                        body = body.push(widgets::eyebrow(p, "Temperature source")).push(src_row).push(
+                            row![
+                                min_duty(),
+                                column![row![widgets::eyebrow(p, "Ramp (s / full sweep)"), widgets::hfill(), widgets::mono(p, format!("{:.0}s", c.ramp_s), size::SMALL)], slider(0.0..=30.0, c.ramp_s, |v| Message::Cooling(CoolingMsg::Ramp(v))).step(1.0).style(slider_style(p))].spacing(space::XS).width(Length::Fill),
+                                column![row![widgets::eyebrow(p, "Hysteresis"), widgets::hfill(), widgets::mono(p, format!("{:.1}°", c.hysteresis_c), size::SMALL)], slider(0.0..=10.0, c.hysteresis_c, |v| Message::Cooling(CoolingMsg::Hysteresis(v))).step(0.5).style(slider_style(p))].spacing(space::XS).width(Length::Fill),
+                            ]
+                            .spacing(space::LG),
+                        );
+                        presets.extend([preset("Coolant", "coolant"), preset("Pump", "pump")]);
+                    }
+                    body.push(Row::with_children(presets).spacing(space::SM).align_y(iced::Alignment::Center)).spacing(space::MD).height(Length::Fill).into()
                 }
             };
             let name = available.iter().find(|a| a.target == target).map(|a| a.label.clone()).unwrap_or_else(|| target.to_string());

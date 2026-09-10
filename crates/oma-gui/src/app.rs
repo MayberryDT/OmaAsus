@@ -142,6 +142,18 @@ fn ease(cur: &mut f32, target: f32, k: f32) {
     *cur += (target - *cur) * k;
 }
 
+/// The curve temperature source matching what an output cools.
+fn temp_source_for(input: Option<oma_hw::model::CurveInput>) -> oma_hw::profile::TempSource {
+    use oma_hw::model::CurveInput;
+    use oma_hw::profile::TempSource;
+    match input {
+        Some(CurveInput::Coolant) => TempSource::Coolant,
+        Some(CurveInput::Gpu) => TempSource::Gpu,
+        Some(CurveInput::CpuOrGpu) => TempSource::CpuGpuMax,
+        _ => TempSource::CpuTctl,
+    }
+}
+
 fn load_ppd() -> Task<Message> {
     Task::perform(
         async {
@@ -381,6 +393,21 @@ impl App {
         crate::config_store::save(&self.config);
     }
 
+    /// Point count of a curve the firmware runs on its own sensor (asusd: 8).
+    fn fixed_curve_points(&self, t: &FanTarget) -> Option<usize> {
+        let spec = self.model.as_ref()?.fan(t.as_str())?.caps.firmware_curve.clone()?;
+        (spec.temp == oma_hw::model::CurveTemp::Firmware).then_some(spec.points as usize)
+    }
+
+    /// What the firmware stores for an output under the active profile's power mode.
+    fn stored_firmware_curve(&self, t: &FanTarget) -> Option<oma_hw::profile::FanCurve> {
+        let m = self.model.as_ref()?;
+        let out = m.fan(t.as_str())?;
+        let wanted = self.active_profile().and_then(|p| p.cpu.power_mode.clone()).or_else(|| m.controls.power_mode.clone())?;
+        let stored = out.firmware_curves.get(oma_hw::profile::match_power_mode(&wanted, &m.controls.power_modes)?)?;
+        Some(oma_hw::profile::FanCurve { points: stored.points.clone(), source: temp_source_for(Some(out.caps.curve_input)), hysteresis_c: 0.0, min_duty: 0.0, ramp_s: 0.0 })
+    }
+
     fn selected_target(&self) -> Option<FanTarget> {
         self.cooling_sel.clone().or_else(|| {
             let model = self.model.as_deref()?;
@@ -391,12 +418,7 @@ impl App {
     fn update_cooling(&mut self, m: CoolingMsg) -> Task<Message> {
         let Some(target) = self.selected_target() else { return Task::none() };
         // A new curve follows what the model says this output cools.
-        let default_source = match self.model.as_ref().and_then(|m| m.fan(target.as_str())).map(|f| f.caps.curve_input) {
-            Some(oma_hw::model::CurveInput::Coolant) => oma_hw::profile::TempSource::Coolant,
-            Some(oma_hw::model::CurveInput::Gpu) => oma_hw::profile::TempSource::Gpu,
-            Some(oma_hw::model::CurveInput::CpuOrGpu) => oma_hw::profile::TempSource::CpuGpuMax,
-            _ => oma_hw::profile::TempSource::CpuTctl,
-        };
+        let default_source = temp_source_for(self.model.as_ref().and_then(|m| m.fan(target.as_str())).map(|f| f.caps.curve_input));
         match m {
             CoolingMsg::Select(t) => self.cooling_sel = Some(t),
             CoolingMsg::Owner(o) => {
@@ -408,6 +430,9 @@ impl App {
             }
             CoolingMsg::Mode(t, kind) => {
                 let src = default_source.clone();
+                // A firmware curve starts from what the firmware stores for this power mode.
+                let stored = self.stored_firmware_curve(&t);
+                let points = self.fixed_curve_points(&t);
                 self.edit_cooling(|c| {
                     let existing_curve = match c.get(&t) {
                         Some(FanMode::Curve(cv)) | Some(FanMode::HardwareCurve(cv)) => Some(cv.clone()),
@@ -416,7 +441,13 @@ impl App {
                     let mode = match kind {
                         "fixed" => FanMode::Fixed(50.0),
                         "curve" => FanMode::Curve(existing_curve.clone().unwrap_or_else(|| crate::pages::cooling::preset("balanced", src.clone()))),
-                        "hw" => FanMode::HardwareCurve(existing_curve.unwrap_or_else(|| crate::pages::cooling::preset("balanced", src))),
+                        "hw" => {
+                            let mut cv = existing_curve.or(stored).unwrap_or_else(|| crate::pages::cooling::preset("balanced", src));
+                            if let Some(n) = points.filter(|n| cv.points.len() != *n) {
+                                cv.points = cv.resample(n);
+                            }
+                            FanMode::HardwareCurve(cv)
+                        }
                         _ => FanMode::Auto,
                     };
                     c.set(t, mode);
@@ -425,6 +456,8 @@ impl App {
             CoolingMsg::Fixed(v) => self.edit_cooling(|c| c.set(target, FanMode::Fixed(v))),
             CoolingMsg::Curve(ev) => {
                 use crate::widgets::curve::CurveEvent;
+                // Firmware curves keep their point count: points move, none are added or removed.
+                let fixed = self.fixed_curve_points(&target);
                 self.edit_cooling(|c| {
                     if let Some(FanMode::Curve(cv)) | Some(FanMode::HardwareCurve(cv)) = c.fans.iter_mut().find(|f| f.target == target).map(|f| &mut f.mode) {
                         match ev {
@@ -434,13 +467,13 @@ impl App {
                                 }
                             }
                             CurveEvent::Add(t, d) => {
-                                if cv.points.len() < 12 {
+                                if fixed.is_none() && cv.points.len() < 12 {
                                     cv.points.push((t, d));
                                     cv.points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
                                 }
                             }
                             CurveEvent::Remove(i) => {
-                                if cv.points.len() > 2 && i < cv.points.len() {
+                                if fixed.is_none() && cv.points.len() > 2 && i < cv.points.len() {
                                     cv.points.remove(i);
                                 }
                             }
@@ -471,6 +504,7 @@ impl App {
             }),
             CoolingMsg::Preset(name) => {
                 let src = default_source;
+                let points = self.fixed_curve_points(&target);
                 self.edit_cooling(|c| {
                     let hw = matches!(c.get(&target), Some(FanMode::HardwareCurve(_)));
                     let mut cv = crate::pages::cooling::preset(name, src);
@@ -478,6 +512,9 @@ impl App {
                         if !matches!(name, "coolant" | "pump") {
                             cv.source = old.source.clone();
                         }
+                    }
+                    if let Some(n) = points {
+                        cv.points = cv.resample(n);
                     }
                     c.set(target, if hw { FanMode::HardwareCurve(cv) } else { FanMode::Curve(cv) });
                 });
@@ -959,7 +996,11 @@ impl App {
     /// config, then exit.
     fn shutdown(&mut self, reason: &str) -> Task<Message> {
         tracing::info!(reason, "shutting down: releasing fans and saving the config");
-        let cmds = self.fan_engine.release_all(std::time::Instant::now());
+        let mut cmds = self.fan_engine.release_all(std::time::Instant::now());
+        // Firmware curves are safe without OmaAsus: leave them in place.
+        if let Some(m) = &self.model {
+            cmds.retain(|c| m.fan(c.target.as_str()).is_some_and(|f| f.caps.duty));
+        }
         crate::config_store::flush();
         let Some(be) = self.fan_backend.clone().filter(|_| !cmds.is_empty()) else { return iced::exit() };
         Task::perform(
@@ -1274,6 +1315,7 @@ impl App {
             }
             Message::FanBackend(b) => {
                 self.fan_engine.set_floors(b.floors());
+                b.set_power_mode(self.active_profile().and_then(|p| p.cpu.power_mode.clone()));
                 self.fan_backend = Some(b);
                 Task::none()
             }
@@ -1293,6 +1335,9 @@ impl App {
                     crate::config_store::save(&self.config);
                     // Re-send the new profile's outputs; ones it drops are released by the engine.
                     self.fan_engine.invalidate();
+                    if let Some(be) = &self.fan_backend {
+                        be.set_power_mode(pr.cpu.power_mode.clone());
+                    }
                     let inv = self.inventory.clone();
                     let model = self.model.clone();
                     let cc = (self.effective_fan_owner() == FanOwner::CoolerControl).then(|| (self.cc_client(), pr.cc_mode.clone()));

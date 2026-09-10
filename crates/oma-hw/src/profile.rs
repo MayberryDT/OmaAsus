@@ -44,6 +44,19 @@ impl FanCurve {
         sorted.last().map(|p| p.1).unwrap_or(100.0).max(self.min_duty).clamp(0.0, 100.0)
     }
 
+    /// The curve as `n` points, duties from [`duty_at`](Self::duty_at) so the
+    /// minimum duty holds: its own temperatures when it already has `n`
+    /// points, else `n` evenly spaced across its range.
+    pub fn resample(&self, n: usize) -> Vec<(f64, f64)> {
+        let mut temps: Vec<f64> = self.points.iter().map(|p| p.0).collect();
+        temps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        if temps.len() != n {
+            let (lo, hi) = (temps.first().copied().unwrap_or(30.0), temps.last().copied().unwrap_or(90.0));
+            temps = (0..n).map(|i| if n < 2 { lo } else { lo + (hi - lo) * i as f64 / (n - 1) as f64 }).collect();
+        }
+        temps.into_iter().map(|t| (t, self.duty_at(t))).collect()
+    }
+
     pub fn silent() -> Self {
         Self { points: vec![(30.0, 20.0), (50.0, 30.0), (65.0, 45.0), (75.0, 70.0), (85.0, 100.0)], source: TempSource::CpuTctl, hysteresis_c: 2.0, min_duty: 20.0, ramp_s: 4.0 }
     }

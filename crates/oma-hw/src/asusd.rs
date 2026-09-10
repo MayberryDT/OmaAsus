@@ -30,6 +30,10 @@ impl PlatformProfile {
             _ => Self::Balanced,
         }
     }
+    /// The platform profile with this label ("Quiet", "Balanced", ...).
+    pub fn from_label(label: &str) -> Option<Self> {
+        (0..=4).map(Self::from_u32).find(|p| p.label().eq_ignore_ascii_case(label))
+    }
     pub fn label(self) -> &'static str {
         match self {
             Self::Balanced => "Balanced",
@@ -158,6 +162,31 @@ pub struct CurveData {
     pub enabled: bool,
 }
 
+impl CurveData {
+    /// Firmware points from (°C, duty %) pairs: sorted, 8 of them, each
+    /// temperature above the one before (capped at 120 °C) and duty never
+    /// falling. Missing points repeat the last one.
+    pub fn from_points(fan: &str, points: &[(f64, f64)], enabled: bool) -> Self {
+        let mut pts = points.to_vec();
+        pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let (mut temp, mut pwm) = ([0u8; 8], [0u8; 8]);
+        for i in 0..8 {
+            let (t, d) = pts.get(i).or(pts.last()).copied().unwrap_or((30.0 + 10.0 * i as f64, 100.0));
+            let t = t.round().clamp(0.0, 120.0) as u8;
+            let p = (d.clamp(0.0, 100.0) / 100.0 * 255.0).round() as u8;
+            temp[i] = if i == 0 { t } else { t.max(temp[i - 1] + 1) };
+            pwm[i] = if i == 0 { p } else { p.max(pwm[i - 1]) };
+        }
+        Self { fan: fan.to_string(), pwm, temp, enabled }
+    }
+
+    /// The curve as (°C, duty %) pairs. Temperatures above 120 °C are the
+    /// firmware's "never" marker and read as 120.
+    pub fn points(&self) -> Vec<(f64, f64)> {
+        self.temp.iter().zip(self.pwm).map(|(t, p)| ((*t).min(120) as f64, p as f64 * 100.0 / 255.0)).collect()
+    }
+}
+
 /// `xyz.ljones.FanCurves` at `/xyz/ljones`.
 #[zbus::proxy(interface = "xyz.ljones.FanCurves", default_service = "xyz.ljones.Asusd", default_path = "/xyz/ljones")]
 pub trait FanCurves {
@@ -166,6 +195,20 @@ pub trait FanCurves {
     fn set_fan_curves_enabled(&self, profile: u32, enabled: bool) -> zbus::Result<()>;
     fn set_profile_fan_curve_enabled(&self, profile: u32, fan: &str, enabled: bool) -> zbus::Result<()>;
     fn set_curves_to_defaults(&self, profile: u32) -> zbus::Result<()>;
+}
+
+/// Store a fan's curve for a platform profile and switch it on or off. asusd
+/// writes it to the hardware when that profile is the active one.
+pub async fn set_fan_curve(conn: &zbus::Connection, profile: PlatformProfile, curve: CurveData) -> zbus::Result<()> {
+    let p = FanCurvesProxy::new(conn).await?;
+    let (fan, enabled) = (curve.fan.clone(), curve.enabled);
+    p.set_fan_curve(profile as u32, curve).await?;
+    p.set_profile_fan_curve_enabled(profile as u32, &fan, enabled).await
+}
+
+/// Hand a fan back to the firmware's own curve for a platform profile.
+pub async fn disable_fan_curve(conn: &zbus::Connection, profile: PlatformProfile, fan: &str) -> zbus::Result<()> {
+    FanCurvesProxy::new(conn).await?.set_profile_fan_curve_enabled(profile as u32, fan, false).await
 }
 
 /// `(uu(yyy)(yyy)ss)`.

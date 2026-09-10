@@ -9,7 +9,7 @@ use crate::hwmon::HwmonDevice;
 use crate::knowledge::{self, Identity, Overrides, Source};
 use crate::lianli::HubKind;
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -164,7 +164,7 @@ pub enum FanBackend {
     /// A firmware curve stored and applied by asusd, per platform profile.
     AsusdCurve { fan: String },
     /// A firmware curve written straight to `asus_custom_fan_curve` (no asusd).
-    AsusCurve { dir: PathBuf, index: u32 },
+    AsusCurve { dir: PathBuf, index: u32, driver: String },
     Nvidia { gpu: u32, fans: u32 },
     LianLi { path: String, channel: u8 },
 }
@@ -177,6 +177,16 @@ pub struct FanOutput {
     pub tach: Option<DeviceId>,
     pub caps: FanCaps,
     pub backend: FanBackend,
+    /// Curves the firmware stores for it, by power mode (asusd), as detected.
+    pub firmware_curves: BTreeMap<String, StoredCurve>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StoredCurve {
+    /// The custom curve is in use rather than the firmware's own.
+    pub enabled: bool,
+    /// (°C, duty %).
+    pub points: Vec<(f64, f64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -383,7 +393,7 @@ fn fans(raw: &RawInventory, id: &Identity, o: &Overrides, sensors: &[Sensor], no
                 let (fan_id, backend) = if asusd_fans.contains(&fan) {
                     (format!("asusd:fan:{fan}"), FanBackend::AsusdCurve { fan: fan.to_string() })
                 } else {
-                    (format!("asuscurve:pwm{}", p.index), FanBackend::AsusCurve { dir: d.path.clone(), index: p.index })
+                    (format!("asuscurve:pwm{}", p.index), FanBackend::AsusCurve { dir: d.path.clone(), index: p.index, driver: d.name.clone() })
                 };
                 let max_rpm = knowledge::fan_max_rpm(id, fan, o);
                 if let Some((rpm, source)) = max_rpm {
@@ -393,6 +403,13 @@ fn fans(raw: &RawInventory, id: &Identity, o: &Overrides, sensors: &[Sensor], no
                     "MID" => "Mid fan".to_string(),
                     f => format!("{f} fan"),
                 };
+                // What asusd stores for this fan per power mode, to start editing from.
+                let firmware_curves: BTreeMap<String, StoredCurve> = raw
+                    .asusd
+                    .iter()
+                    .flat_map(|a| a.fan_curves.iter())
+                    .filter_map(|(mode, curves)| curves.iter().find(|c| c.fan == fan).map(|c| (PlatformProfile::from_u32(*mode).label().to_string(), StoredCurve { enabled: c.enabled, points: c.points() })))
+                    .collect();
                 out.push(FanOutput {
                     id: DeviceId(fan_id),
                     label,
@@ -406,6 +423,7 @@ fn fans(raw: &RawInventory, id: &Identity, o: &Overrides, sensors: &[Sensor], no
                         curve_input: if fan == "GPU" { CurveInput::Gpu } else { CurveInput::Cpu },
                     },
                     backend,
+                    firmware_curves,
                 });
             }
         }
@@ -418,6 +436,7 @@ fn fans(raw: &RawInventory, id: &Identity, o: &Overrides, sensors: &[Sensor], no
             tach: None,
             caps: FanCaps { duty: true, firmware_curve: None, min_duty: 0.0, release: Release::Auto, max_rpm: None, curve_input: CurveInput::Gpu },
             backend: FanBackend::Nvidia { gpu: g.index, fans: g.num_fans },
+            firmware_curves: BTreeMap::new(),
         });
     }
 
@@ -432,6 +451,7 @@ fn fans(raw: &RawInventory, id: &Identity, o: &Overrides, sensors: &[Sensor], no
                 tach: None,
                 caps: FanCaps { duty: true, firmware_curve: None, min_duty: 0.0, release: Release::Auto, max_rpm: None, curve_input: CurveInput::CpuOrGpu },
                 backend: FanBackend::LianLi { path: hub.path.clone(), channel: c },
+                firmware_curves: BTreeMap::new(),
             });
         }
     }
@@ -469,6 +489,7 @@ fn pwm_output(d: &HwmonDevice, p: &crate::hwmon::PwmChannel, id: &Identity, sens
         tach: d.fans.iter().find(|f| f.index == p.index).and_then(|f| tach(sensors, &d.name, &f.label)),
         caps: FanCaps { duty: true, firmware_curve, min_duty: quirk.map(|q| q.min_duty).unwrap_or(0.0), release, max_rpm: None, curve_input: quirk.map(|q| q.curve_input).unwrap_or(CurveInput::CpuOrGpu) },
         backend: FanBackend::Hwmon { dir: d.path.clone(), index: p.index },
+        firmware_curves: BTreeMap::new(),
     }
 }
 

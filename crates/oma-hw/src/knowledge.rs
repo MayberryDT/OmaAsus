@@ -178,6 +178,15 @@ pub fn curve_tach_driver(driver: &str) -> Option<&'static str> {
     }
 }
 
+/// `pwmN_enable` values that switch a firmware curve on and off.
+pub fn curve_enable_values(driver: &str) -> Option<(&'static str, &'static str)> {
+    match driver {
+        // 1 = the custom curve, 2 = the firmware's own (research/asusctl.md).
+        "asus_custom_fan_curve" => Some(("1", "2")),
+        _ => None,
+    }
+}
+
 /// Naming and safety limits for a specific PWM output.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OutputQuirk {

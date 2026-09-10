@@ -4,10 +4,11 @@
 use oma_hw::coolercontrol::CoolerControl;
 use oma_hw::fanengine::Command;
 use oma_hw::helper::Controller;
-use oma_hw::hwmon::{PwmChannel, PwmEnable};
+use oma_hw::asusd::{self, CurveData, PlatformProfile};
+use oma_hw::hwmon::{PwmChannel, PwmEnable, TempUnit};
 use oma_hw::lianli::LianLiHub;
 use oma_hw::model::{FanBackend as Via, FanCaps, FanOutput, HardwareModel, Release};
-use oma_hw::profile::{FanCurve, FanTarget};
+use oma_hw::profile::{match_power_mode, FanCurve, FanTarget};
 use oma_hw::SystemInventory;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -25,6 +26,8 @@ pub struct FanBackend {
     saved_enable: Arc<Mutex<HashMap<FanTarget, PwmEnable>>>,
     lianli: Vec<LianLiHub>,
     pub cc: Option<CoolerControl>,
+    /// The active profile's power mode: firmware curves are stored per mode.
+    power_mode: Arc<Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for FanBackend {
@@ -54,7 +57,24 @@ impl FanBackend {
             }
         }
         let lianli = if model.fans.iter().any(|f| matches!(f.backend, Via::LianLi { .. })) { tokio::task::spawn_blocking(LianLiHub::enumerate).await.unwrap_or_default() } else { Vec::new() };
-        Self { ctl, model, quarantine: Arc::new(Mutex::new(HashMap::new())), channels, saved_enable: Arc::new(Mutex::new(HashMap::new())), lianli, cc }
+        Self { ctl, model, quarantine: Arc::new(Mutex::new(HashMap::new())), channels, saved_enable: Arc::new(Mutex::new(HashMap::new())), lianli, cc, power_mode: Arc::new(Mutex::new(None)) }
+    }
+
+    /// Tell the backend which power mode the active profile selects.
+    pub fn set_power_mode(&self, mode: Option<String>) {
+        *self.power_mode.lock().unwrap() = mode;
+    }
+
+    /// The platform profile a firmware curve belongs to: the active profile's
+    /// power mode, else whatever asusd is in now.
+    async fn curve_profile(&self) -> Result<PlatformProfile, String> {
+        let wanted = self.power_mode.lock().unwrap().clone();
+        if let Some(p) = wanted.as_deref().and_then(|w| match_power_mode(w, &self.model.controls.power_modes)).and_then(PlatformProfile::from_label) {
+            return Ok(p);
+        }
+        let conn = zbus::Connection::system().await.map_err(|e| e.to_string())?;
+        let current = asusd::PlatformProxy::new(&conn).await.map_err(|e| e.to_string())?.platform_profile().await.map_err(|e| e.to_string())?;
+        Ok(PlatformProfile::from_u32(current))
     }
 
     /// Every fan output the machine has, with live speed when a tach reads it.
@@ -125,13 +145,41 @@ impl FanBackend {
                 let errs = self.ctl.nvidia_apply(*gpu, &ctl).await.map_err(|e| e.to_string())?;
                 errs.first().map(|(s, e)| Err(format!("{s}: {e}"))).unwrap_or(Ok(()))
             }
-            // Firmware curves are edited rather than driven; writing them comes
-            // with the laptop fan backend.
-            Via::AsusdCurve { .. } | Via::AsusCurve { .. } => {
-                if cmd.is_release() {
-                    Ok(())
-                } else {
-                    Err(format!("{}: firmware curve editing is not available yet", out.label))
+            // The firmware runs these fans: OmaAsus programs their curve.
+            Via::AsusdCurve { fan } => {
+                let profile = self.curve_profile().await?;
+                let conn = zbus::Connection::system().await.map_err(|e| e.to_string())?;
+                match &cmd.hw_curve {
+                    Some(curve) => {
+                        let data = CurveData::from_points(fan, &curve.resample(firmware_points(out)), true);
+                        asusd::set_fan_curve(&conn, profile, data).await.map_err(|e| e.to_string())
+                    }
+                    None if cmd.is_release() => asusd::disable_fan_curve(&conn, profile, fan).await.map_err(|e| e.to_string()),
+                    None => Err(format!("{}: the firmware runs this fan; give it a firmware curve instead", out.label)),
+                }
+            }
+            Via::AsusCurve { dir, index, driver } => {
+                let (on, off) = oma_hw::knowledge::curve_enable_values(driver).ok_or("this curve driver's modes are unknown")?;
+                let enable = dir.join(format!("pwm{index}_enable"));
+                match &cmd.hw_curve {
+                    Some(curve) => {
+                        let n = firmware_points(out);
+                        let data = CurveData::from_points("", &curve.resample(n), true);
+                        let scale = match oma_hw::knowledge::curve_temp_unit(driver) {
+                            TempUnit::Celsius => 1,
+                            TempUnit::Milli => 1000,
+                        };
+                        let mut writes: Vec<(PathBuf, String)> = Vec::new();
+                        for (i, (t, p)) in data.temp.iter().zip(data.pwm).enumerate().take(n) {
+                            writes.push((dir.join(format!("pwm{index}_auto_point{}_temp", i + 1)), (u32::from(*t) * scale).to_string()));
+                            writes.push((dir.join(format!("pwm{index}_auto_point{}_pwm", i + 1)), p.to_string()));
+                        }
+                        writes.push((enable, on.to_string()));
+                        let errs = self.ctl.write_batch(&writes).await.map_err(|e| e.to_string())?;
+                        errs.first().map(|(p, e)| Err(format!("{p}: {e}"))).unwrap_or(Ok(()))
+                    }
+                    None if cmd.is_release() => self.ctl.write(&enable, off).await.map_err(|e| e.to_string()),
+                    None => Err(format!("{}: the firmware runs this fan; give it a firmware curve instead", out.label)),
                 }
             }
         }
@@ -206,6 +254,11 @@ impl FanBackend {
         let errs = self.ctl.write_batch(&writes).await.map_err(|e| e.to_string())?;
         errs.first().map(|(p, e)| Err(format!("{p}: {e}"))).unwrap_or(Ok(()))
     }
+}
+
+/// Points in an output's firmware curve (8 on ASUS laptops).
+fn firmware_points(out: &FanOutput) -> usize {
+    out.caps.firmware_curve.as_ref().map(|c| c.points as usize).unwrap_or(8)
 }
 
 /// Build the engine's temperature view purely from the sampled snapshot
