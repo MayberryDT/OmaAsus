@@ -124,8 +124,12 @@ pub async fn gather() -> RawInventory {
     RawInventory { format: FORMAT, captured_at: chrono::Local::now().to_rfc3339(), system, asusd, supergfx, ppd, nvidia, pci_display, drm_connectors, sysfs }
 }
 
-/// NVML info per GPU, with the UUID redacted: fixtures are shared.
+/// NVML info per GPU, with the UUID redacted: fixtures are shared. Skipped
+/// while the GPU sleeps, since NVML would wake it.
 fn nvidia_infos() -> Vec<nvidia::NvidiaInfo> {
+    if !nvidia::awake() {
+        return Vec::new();
+    }
     (0..nvidia::NvidiaGpu::count())
         .filter_map(|i| nvidia::NvidiaGpu::open(i).and_then(|g| g.info()).ok())
         .map(|mut info| {

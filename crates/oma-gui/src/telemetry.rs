@@ -4,7 +4,7 @@ use iced::futures::SinkExt;
 use iced::futures::Stream;
 use oma_hw::cpu::{CpuMonitor, CpuTelemetry};
 use oma_hw::hwmon::{self, HwmonDevice};
-use oma_hw::nvidia::{NvidiaGpu, NvidiaTelemetry};
+use oma_hw::nvidia::{DgpuState, NvidiaGpu, NvidiaTelemetry};
 use oma_hw::amdgpu::{AmdGpu, AmdGpuTelemetry};
 use oma_hw::lianli::LianLiHub;
 use std::time::Duration;
@@ -103,9 +103,72 @@ impl Snapshot {
     }
 }
 
+/// What to do with NVML this sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NvmlAction {
+    Poll,
+    /// Keep no handle: the GPU is gone or asleep (NVML would wake it), or it
+    /// was idle and gets a chance to suspend.
+    Release,
+}
+
+fn nvml_action(state: DgpuState, resting: bool) -> NvmlAction {
+    match state {
+        DgpuState::Active if !resting => NvmlAction::Poll,
+        _ => NvmlAction::Release,
+    }
+}
+
+/// Idle this long with a handle open, and the handle is let go.
+const NVML_IDLE: Duration = Duration::from_secs(5);
+/// After letting go, stay away this long so runtime PM can suspend the GPU.
+const NVML_REST: Duration = Duration::from_secs(20);
+/// How often to look for an NVIDIA GPU that isn't on the bus.
+const NVML_RESCAN: Duration = Duration::from_secs(10);
+
+/// NVML for the NVIDIA GPU, opened only while the GPU is awake and let go when
+/// it idles: an open handle keeps the GPU out of runtime suspend and the
+/// driver in use, which would also block supergfxd mode switches.
+#[derive(Default)]
+struct NvidiaSource {
+    gpu: Option<NvidiaGpu>,
+    device: Option<std::path::PathBuf>,
+    idle_since: Option<std::time::Instant>,
+    rest_until: Option<std::time::Instant>,
+    next_scan: Option<std::time::Instant>,
+}
+
+impl NvidiaSource {
+    fn sample(&mut self, now: std::time::Instant) -> Option<NvidiaTelemetry> {
+        if self.device.as_ref().is_none_or(|d| !d.exists()) && self.next_scan.is_none_or(|t| now >= t) {
+            self.device = oma_hw::nvidia::pci_device();
+            self.next_scan = Some(now + NVML_RESCAN);
+        }
+        let resting = self.rest_until.is_some_and(|t| now < t);
+        if nvml_action(oma_hw::nvidia::power_state(self.device.as_deref()), resting) == NvmlAction::Release {
+            self.gpu = None;
+            self.idle_since = None;
+            return None;
+        }
+        if self.gpu.is_none() {
+            self.gpu = NvidiaGpu::open(0).ok();
+        }
+        let t = self.gpu.as_ref()?.telemetry().ok()?;
+        let busy = t.util_gpu.unwrap_or(0) > 0 || t.process_count.unwrap_or(0) > 0;
+        if busy {
+            self.idle_since = None;
+        } else if now.duration_since(*self.idle_since.get_or_insert(now)) >= NVML_IDLE {
+            self.gpu = None;
+            self.idle_since = None;
+            self.rest_until = Some(now + NVML_REST);
+        }
+        Some(t)
+    }
+}
+
 struct Sampler {
     cpu: CpuMonitor,
-    nvidia: Option<NvidiaGpu>,
+    nvidia: NvidiaSource,
     amd: Vec<AmdGpu>,
     hwmon: Vec<HwmonDevice>,
     lianli: Vec<LianLiHub>,
@@ -158,7 +221,7 @@ impl Sampler {
                 }
             }
         }
-        Self { cpu: CpuMonitor::new(), nvidia: NvidiaGpu::open(0).ok(), amd: AmdGpu::enumerate(), hwmon, lianli: LianLiHub::enumerate(), quarantine, fans, temps, seq: 0 }
+        Self { cpu: CpuMonitor::new(), nvidia: NvidiaSource::default(), amd: AmdGpu::enumerate(), hwmon, lianli: LianLiHub::enumerate(), quarantine, fans, temps, seq: 0 }
     }
 
     fn track_fan(&mut self, key: String, mut r: FanReading, now: std::time::Instant) {
@@ -180,7 +243,7 @@ impl Sampler {
     fn sample(&mut self) -> Snapshot {
         self.seq += 1;
         let mut s = Snapshot { seq: self.seq, cpu: self.cpu.sample(), ..Default::default() };
-        s.nvidia = self.nvidia.as_ref().and_then(|g| g.telemetry().ok());
+        s.nvidia = self.nvidia.sample(std::time::Instant::now());
         let amd = self.amd.iter().find(|g| !g.is_integrated).or(self.amd.first());
         s.amd = amd.map(|g| g.telemetry());
         s.amd_integrated = amd.is_some_and(|g| g.is_integrated);
@@ -304,13 +367,25 @@ pub enum Event {
     Frame(std::sync::Arc<Snapshot>),
 }
 
+/// Samples per second, from the Settings page (1..=5).
+static RATE_HZ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(2);
+
+pub fn set_rate(hz: u32) {
+    RATE_HZ.store(hz.clamp(1, 5), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn period() -> Duration {
+    Duration::from_millis(1000 / u64::from(RATE_HZ.load(std::sync::atomic::Ordering::Relaxed).max(1)))
+}
+
 pub fn stream() -> impl Stream<Item = Event> {
     iced::stream::channel(8, async move |mut out| {
         let mut sampler = tokio::task::spawn_blocking(Sampler::new).await.expect("sampler");
-        let mut tick = tokio::time::interval(Duration::from_millis(500));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut next = tokio::time::Instant::now();
         loop {
-            tick.tick().await;
+            // The rate can change while running; a late sample doesn't cause a burst.
+            next = (next + period()).max(tokio::time::Instant::now());
+            tokio::time::sleep_until(next).await;
             let (snap, s) = tokio::task::spawn_blocking(move || {
                 let snap = sampler.sample();
                 (snap, sampler)
@@ -323,4 +398,27 @@ pub fn stream() -> impl Stream<Item = Event> {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nvml_is_only_used_while_the_gpu_is_awake() {
+        assert_eq!(nvml_action(DgpuState::Active, false), NvmlAction::Poll);
+        assert_eq!(nvml_action(DgpuState::Active, true), NvmlAction::Release, "resting after idling");
+        assert_eq!(nvml_action(DgpuState::Suspended, false), NvmlAction::Release, "NVML would wake it");
+        assert_eq!(nvml_action(DgpuState::Absent, false), NvmlAction::Release);
+    }
+
+    #[test]
+    fn telemetry_rate_is_clamped() {
+        set_rate(0);
+        assert_eq!(period(), Duration::from_millis(1000));
+        set_rate(50);
+        assert_eq!(period(), Duration::from_millis(200));
+        set_rate(2);
+        assert_eq!(period(), Duration::from_millis(500));
+    }
 }

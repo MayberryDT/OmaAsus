@@ -207,7 +207,8 @@ pub fn inventory() -> SystemInventory {
     let cpu = cpu::cpu_info();
     let hwmon = hwmon::enumerate();
     let amd_gpus = amdgpu::AmdGpu::enumerate();
-    let nvidia_count = crate::nvidia::NvidiaGpu::count();
+    // NVML wakes a runtime-suspended GPU, so only count when it's already awake.
+    let nvidia_count = if crate::nvidia::awake() { crate::nvidia::NvidiaGpu::count() } else { 0 };
     let hid = hid_devices();
     let daemons = daemons();
     let asus_armoury_attrs = armoury_attributes();

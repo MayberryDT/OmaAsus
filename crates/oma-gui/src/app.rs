@@ -251,6 +251,7 @@ pub fn run(overlay_only: bool) -> Result<(), iced_exwlshell::Error> {
 impl App {
     fn boot(overlay_only: bool) -> (Self, Task<Message>) {
         let (config, config_notice) = crate::config_store::load();
+        crate::telemetry::set_rate(config.telemetry_hz);
         let (palette, theme_name) = theme::load();
         tracing::info!(theme = %theme_name, "using Omarchy theme");
         let app = Self {
@@ -304,7 +305,8 @@ impl App {
         };
         let inv = Task::perform(async { Arc::new(oma_hw::capture::gather().await) }, Message::Hardware);
         let ctl = Task::perform(async { oma_hw::helper::Controller::connect().await.has_helper() }, Message::Controller);
-        let nvi = Task::perform(async { tokio::task::spawn_blocking(|| oma_hw::nvidia::NvidiaGpu::open(0).and_then(|g| g.info()).ok().map(Arc::new)).await.unwrap_or(None) }, Message::NvidiaInfo);
+        // Only when the dGPU is awake: NVML would wake a sleeping one.
+        let nvi = Task::perform(async { tokio::task::spawn_blocking(|| oma_hw::nvidia::awake().then(|| oma_hw::nvidia::NvidiaGpu::open(0).and_then(|g| g.info()).ok().map(Arc::new)).flatten()).await.unwrap_or(None) }, Message::NvidiaInfo);
         let open = if overlay_only { Task::none() } else { Task::done(Message::OpenWindow) };
         let cc_cfg = app.config.coolercontrol.clone();
         let cc = Task::perform(
@@ -671,7 +673,10 @@ impl App {
                     }
                 }
             }
-            SettingsMsg::TelemetryHz(v) => self.config.telemetry_hz = v as u32,
+            SettingsMsg::TelemetryHz(v) => {
+                self.config.telemetry_hz = v as u32;
+                crate::telemetry::set_rate(self.config.telemetry_hz);
+            }
             SettingsMsg::OledText => {
                 let snap = self.snapshot.clone();
                 return Task::perform(
@@ -1173,7 +1178,14 @@ impl App {
                     }
                 }
                 let rgb_probe = if !self.rgb_server && snap.seq % 20 == 5 && oma_hw::rgb::server_running() { Self::rgb_refresh() } else { Task::none() };
-                let task = Task::batch([self.fan_tick(&snap), self.rgb_thermal_tick(&snap), rgb_probe]);
+                // The dGPU woke after startup: fetch its details for the GPU page
+                // (the sampler only reports it while awake, so this doesn't wake it).
+                let nvidia_info = if snap.nvidia.is_some() && self.nvidia_info.is_none() && snap.seq % 20 == 1 {
+                    Task::perform(async { tokio::task::spawn_blocking(|| oma_hw::nvidia::NvidiaGpu::open(0).and_then(|g| g.info()).ok().map(Arc::new)).await.unwrap_or(None) }, Message::NvidiaInfo)
+                } else {
+                    Task::none()
+                };
+                let task = Task::batch([self.fan_tick(&snap), self.rgb_thermal_tick(&snap), rgb_probe, nvidia_info]);
                 self.snapshot = Some(snap);
                 let auto = if self.snapshot.as_ref().map(|s| s.seq % 2 == 0).unwrap_or(false) { self.auto_evaluate() } else { Task::none() };
                 Task::batch([task, auto])

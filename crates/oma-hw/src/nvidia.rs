@@ -382,3 +382,54 @@ pub fn available() -> bool {
     Nvml::init().is_ok()
 }
 
+/// Runtime power state of the NVIDIA GPU, read from sysfs, which never wakes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DgpuState {
+    /// Not on the bus (supergfxd Integrated mode, dGPU disabled, desktop without one).
+    Absent,
+    /// Runtime-suspended: NVML would wake it.
+    Suspended,
+    Active,
+}
+
+/// The NVIDIA display device's PCI directory, if one is on the bus.
+pub fn pci_device() -> Option<std::path::PathBuf> {
+    crate::sysfs::list_dir("/sys/bus/pci/devices")
+        .into_iter()
+        .find(|d| crate::sysfs::read_string(d.join("vendor")).as_deref() == Some("0x10de") && crate::sysfs::read_string(d.join("class")).is_some_and(|c| c.starts_with("0x03")))
+}
+
+pub fn power_state(device: Option<&std::path::Path>) -> DgpuState {
+    match device {
+        Some(d) if d.exists() => match crate::sysfs::read_string(d.join("power/runtime_status")).as_deref() {
+            Some("suspended" | "suspending") => DgpuState::Suspended,
+            _ => DgpuState::Active,
+        },
+        _ => DgpuState::Absent,
+    }
+}
+
+/// Whether NVML can be used without waking a sleeping GPU: an NVIDIA GPU is on
+/// the bus and awake. Every NVML entry point that runs unattended checks this.
+pub fn awake() -> bool {
+    power_state(pci_device().as_deref()) == DgpuState::Active
+}
+
+#[cfg(test)]
+mod power_tests {
+    use super::*;
+
+    #[test]
+    fn power_state_reads_runtime_pm() {
+        let dir = std::env::temp_dir().join(format!("omaasus-dgpu-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("power")).unwrap();
+        std::fs::write(dir.join("power/runtime_status"), "suspended\n").unwrap();
+        assert_eq!(power_state(Some(&dir)), DgpuState::Suspended);
+        std::fs::write(dir.join("power/runtime_status"), "active\n").unwrap();
+        assert_eq!(power_state(Some(&dir)), DgpuState::Active);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(power_state(Some(&dir)), DgpuState::Absent, "gone from the bus");
+        assert_eq!(power_state(None), DgpuState::Absent);
+    }
+}
+

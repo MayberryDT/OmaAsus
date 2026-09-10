@@ -91,7 +91,11 @@ pub struct FanEngine {
     backoff: BTreeMap<FanTarget, Instant>,
     /// Lowest duty an output may ever be given (pumps).
     floors: BTreeMap<FanTarget, f64>,
+    /// Assumed time between evaluations until two have happened.
     tick: Duration,
+    /// When the last evaluation ran: ramps use the real elapsed time, so they
+    /// hold at any telemetry rate.
+    last_eval: Option<Instant>,
 }
 
 impl FanEngine {
@@ -113,6 +117,8 @@ impl FanEngine {
     pub fn evaluate(&mut self, cooling: &CoolingSettings, temps: &Temps, now: Instant) -> Vec<Command> {
         let mut out = Vec::new();
         let mut seen = Vec::new();
+        let dt = self.last_eval.map(|t| now.saturating_duration_since(t)).unwrap_or(self.tick);
+        self.last_eval = Some(now);
         self.backoff.retain(|_, until| *until > now);
         for fa in &cooling.fans {
             seen.push(fa.target.clone());
@@ -157,7 +163,7 @@ impl FanEngine {
                         continue;
                     }
                     // Ramp limiting: max change per tick given ramp_s for a full sweep.
-                    let max_step = if curve.ramp_s > 0.0 { 100.0 * self.tick.as_secs_f64() / curve.ramp_s } else { 100.0 };
+                    let max_step = if curve.ramp_s > 0.0 { 100.0 * dt.as_secs_f64() / curve.ramp_s } else { 100.0 };
                     let delta = (want - st.last_duty).clamp(-max_step, max_step);
                     let next = (st.last_duty + delta).clamp(floor, 100.0);
                     if (next - st.last_duty).abs() >= 0.5 {

@@ -46,7 +46,10 @@ pub async fn apply_profile(p: Profile, inv: Option<Arc<SystemInventory>>, model:
 
     // NVIDIA.
     if let Some(nv) = &p.gpu.nvidia {
-        if oma_hw::nvidia::available() {
+        if !oma_hw::nvidia::awake() {
+            // Waking the dGPU just to set limits would cost battery; they apply when a profile is next applied with it awake.
+            done.push("NVIDIA skipped (asleep or off)".into());
+        } else if oma_hw::nvidia::available() {
             match ctl.nvidia_apply(0, nv).await {
                 Ok(errs) if errs.is_empty() => done.push("GPU".into()),
                 Ok(errs) => failed.push(format!("GPU: {}", errs.iter().map(|(s, e)| format!("{s} ({e})")).collect::<Vec<_>>().join(", "))),
