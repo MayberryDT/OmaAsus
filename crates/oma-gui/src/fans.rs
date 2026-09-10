@@ -129,7 +129,7 @@ impl FanBackend {
         match &out.backend {
             Via::Hwmon { .. } => self.apply_pwm(out, &cmd).await,
             Via::LianLi { path, channel } => {
-                let hub = self.lianli.iter().find(|h| &h.path == path).ok_or("Lian Li hub not present")?;
+                let hub = self.lianli.iter().find(|h| &h.path == path).ok_or("fan hub not connected")?;
                 if cmd.duty.is_some() {
                     // Manual mode first, then the speed.
                     let _ = self.hid(hub, &hub.report_pwm_sync(*channel, false)).await;

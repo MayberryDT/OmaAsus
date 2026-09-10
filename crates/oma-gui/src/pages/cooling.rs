@@ -28,7 +28,7 @@ pub enum CoolingMsg {
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let p = app.palette;
-    let (Some(inv), Some(model)) = (app.inventory.as_ref(), app.model.as_deref()) else { return widgets::dim(p, "Detecting cooling hardware…") };
+    let Some(model) = app.model.as_deref() else { return widgets::dim(p, "Detecting cooling hardware…") };
     let snap = app.snapshot.as_ref();
     let snap_ref: Option<&crate::telemetry::Snapshot> = snap.map(|s| &**s);
     let available = crate::fans::FanBackend::available(model, snap_ref);
@@ -37,17 +37,31 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     // ---- owner card --------------------------------------------------------
     let owner_chip = |label: &str, o: FanOwner| widgets::btn(p, label, if app.config.fan_owner == o { widgets::ButtonKind::Primary } else { widgets::ButtonKind::Ghost }, Some(Message::Cooling(CoolingMsg::Owner(o))));
+    let cc_detected = app.cc_connected || app.inventory.as_ref().is_some_and(|i| i.daemons.coolercontrold);
+    // Fans only their firmware drives: OmaAsus stores curves, it doesn't run them.
+    let firmware_only = !available.is_empty() && available.iter().all(|a| !a.caps.duty);
     let status = match owner_effective {
+        FanOwner::OmaAsus if firmware_only => widgets::pill(p, "Curves stored in firmware", p.ok),
         FanOwner::OmaAsus => widgets::pill(p, "OmaAsus fan engine active", p.ok),
         FanOwner::CoolerControl => widgets::pill(p, if app.cc_connected { "CoolerControl connected" } else { "CoolerControl detected — sign in under Settings" }, if app.cc_connected { p.ok } else { p.warn }),
         _ => widgets::pill(p, "Fans left to firmware", p.text_dim),
     };
+    let about = match (firmware_only, cc_detected) {
+        (true, _) => "These fans run their curves in firmware. OmaAsus stores each profile's curves there when the profile is applied; Off leaves the firmware's own.",
+        (false, true) => "Choose who drives the fans. CoolerControl keeps its own curves, and OmaAsus then switches its Mode per profile. The OmaAsus engine runs the curves below itself, through the privileged helper.",
+        (false, false) => "The OmaAsus engine runs the curves below itself, through the privileged helper. Off leaves the fans to firmware.",
+    };
+    let mut chips = vec![owner_chip("Automatic", FanOwner::Auto), owner_chip("OmaAsus", FanOwner::OmaAsus)];
+    if cc_detected || app.config.fan_owner == FanOwner::CoolerControl {
+        chips.push(owner_chip("CoolerControl", FanOwner::CoolerControl));
+    }
+    chips.push(owner_chip("Off", FanOwner::None));
     let owner = widgets::card(
         p,
         column![
-            row![widgets::title(p, "Fan engine"), widgets::hfill(), status].align_y(iced::Alignment::Center),
-            widgets::dim(p, "Choose who drives the fans. CoolerControl (when installed) keeps its own curves; OmaAsus then activates a CoolerControl Mode per profile. The OmaAsus engine evaluates the curves below itself, through the privileged helper."),
-            Row::with_children(vec![owner_chip("Automatic", FanOwner::Auto), owner_chip("OmaAsus", FanOwner::OmaAsus), owner_chip("CoolerControl", FanOwner::CoolerControl), owner_chip("Off", FanOwner::None)]).spacing(space::SM).wrap(),
+            row![widgets::title(p, "Fan control"), widgets::hfill(), status].align_y(iced::Alignment::Center),
+            widgets::dim(p, about),
+            Row::with_children(chips).spacing(space::SM).wrap(),
         ]
         .spacing(space::MD),
     )
@@ -133,17 +147,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     let temps = snap.map(|s| crate::fans::temps_from(s));
                     let now_t = temps.as_ref().and_then(|t| t.resolve(&c.source));
                     let live = now_t.map(|t| (t, live_duty.unwrap_or_else(|| c.duty_at(t))));
-                    let mut sources = vec![TempSource::CpuTctl, TempSource::Gpu, TempSource::CpuGpuMax, TempSource::Coolant, TempSource::Vrm, TempSource::Motherboard];
-                    for d in &inv.hwmon {
-                        if matches!(d.name.as_str(), "asusec") || d.is_super_io() {
-                            for t in &d.temps {
-                                let live = snap_ref.map(|s| s.hwmon_temps.contains_key(&(d.name.clone(), t.label.clone()))).unwrap_or(false);
-                                if live && !t.label.starts_with("PCH") && !t.label.starts_with("AUXTIN") {
-                                    sources.push(TempSource::Hwmon { driver: d.name.clone(), label: t.label.clone() });
-                                }
-                            }
-                        }
-                    }
+                    let sources = curve_sources(model, snap_ref, &c.source);
                     let src_row = Row::with_children(sources.into_iter().map(|s| {
                         let active = s == c.source;
                         widgets::btn(p, s.label(), if active { widgets::ButtonKind::Primary } else { widgets::ButtonKind::Ghost }, Some(Message::Cooling(CoolingMsg::Source(s))))
@@ -168,7 +172,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
                             ]
                             .spacing(space::LG),
                         );
-                        presets.extend([preset("Coolant", "coolant"), preset("Pump", "pump")]);
+                        // Coolant curves need a coolant sensor; the pump curve suits outputs that cool by coolant.
+                        if model.sensor_for(oma_hw::model::SensorRole::Coolant).is_some() {
+                            presets.push(preset("Coolant", "coolant"));
+                            if caps.as_ref().is_some_and(|c| c.curve_input == oma_hw::model::CurveInput::Coolant) {
+                                presets.push(preset("Pump", "pump"));
+                            }
+                        }
                     }
                     body.push(Row::with_children(presets).spacing(space::SM).align_y(iced::Alignment::Center)).spacing(space::MD).height(Length::Fill).into()
                 }
@@ -233,5 +243,39 @@ pub fn preset(name: &str, source: TempSource) -> FanCurve {
         c.source = source;
     }
     c
+}
+
+/// Temperatures a software curve can follow on this machine: the summary
+/// sources it has sensors for, then single readings that aren't already a
+/// component's own (board and cooler sensors). The curve's current source
+/// stays listed even where it doesn't read, so it can be seen and changed.
+fn curve_sources(model: &oma_hw::model::HardwareModel, snap: Option<&crate::telemetry::Snapshot>, current: &TempSource) -> Vec<TempSource> {
+    use oma_hw::model::{SensorKind, SensorRole};
+    let has = |r: SensorRole| model.sensor_for(r).is_some();
+    let (cpu, gpu) = (has(SensorRole::CpuTemp), !model.gpus.is_empty());
+    let mut out = Vec::new();
+    if cpu {
+        out.push(TempSource::CpuTctl);
+    }
+    if gpu {
+        out.push(TempSource::Gpu);
+    }
+    if cpu && gpu {
+        out.push(TempSource::CpuGpuMax);
+    }
+    for (role, source) in [(SensorRole::Coolant, TempSource::Coolant), (SensorRole::Vrm, TempSource::Vrm), (SensorRole::Board, TempSource::Motherboard)] {
+        if has(role) {
+            out.push(source);
+        }
+    }
+    for s in model.sensors.iter().filter(|s| s.kind == SensorKind::Temperature && matches!(s.role, SensorRole::Other | SensorRole::Coolant)) {
+        if snap.is_some_and(|x| x.hwmon_temps.contains_key(&(s.driver.clone(), s.label.clone()))) {
+            out.push(TempSource::Hwmon { driver: s.driver.clone(), label: s.label.clone() });
+        }
+    }
+    if !out.contains(current) {
+        out.push(current.clone());
+    }
+    out
 }
 
