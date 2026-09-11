@@ -7,8 +7,10 @@ use crate::nvidia::NvidiaControl;
 use std::path::Path;
 use std::time::Duration;
 
-/// What the helper answers while it stops (idle, or asked to): nothing was
-/// written or claimed, and D-Bus starts a fresh helper for the next call.
+/// What the helper answers while it stops, before it gives up its name:
+/// nothing was written or claimed. After an idle exit the next call starts a
+/// fresh helper at once; a stop that hands fans back keeps refusing until the
+/// hand-back is done, usually well under a second.
 pub const RESTARTING: &str = "oma-helper is restarting; try again";
 
 /// What the helper's `Changed` signal says as it stops having handed the fans

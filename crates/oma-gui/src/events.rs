@@ -91,6 +91,9 @@ pub fn stream() -> impl Stream<Item = Event> {
             // send a signal on the system bus, even straight to us, so it's taken
             // only from the owner of the helper's name, which only root can be: a
             // proxy's signal stream follows that owner and drops everyone else's.
+            // That's zbus 5's SignalStream: it learns the owner with GetNameOwner
+            // (never starting the helper) and follows NameOwnerChanged. Check it
+            // still does when bumping zbus.
             if let Ok(changes) = async { oma_hw::helper::HelperProxy::builder(&conn).cache_properties(zbus::proxy::CacheProperties::No).build().await?.receive_changed().await }.await {
                 sources.push(changes.filter_map(|s| async move { s.args().ok().filter(|a| a.what().as_str() == oma_hw::helper::HANDED_BACK).map(|_| Event::FansHandedBack) }).boxed());
                 watching.push("helper hand-backs");
