@@ -52,10 +52,11 @@ if [[ ${1:-} == --uninstall ]]; then
         echo "no OmaAsus installed from a release archive ($manifest is missing)" >&2
         exit 1
     fi
-    # The helper hands back the fans it guards as it stops.
-    [[ -n $dest ]] || systemctl stop oma-helper.service 2>/dev/null || true
     remove < "$manifest"
     rm -f -- "$manifest"
+    # The helper hands back the fans it guards as it stops. Once the files are
+    # gone, so a running GUI can't start it again.
+    [[ -n $dest ]] || systemctl stop oma-helper.service 2>/dev/null || true
     rmdir -- "$dest/usr/share/omaasus/helper" "$dest/usr/share/omaasus" "$dest/usr/share/licenses/omaasus" 2>/dev/null || true
     reload
     echo "OmaAsus removed"

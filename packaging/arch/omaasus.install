@@ -17,6 +17,7 @@ post_upgrade() {
     systemctl try-restart oma-helper.service 2>/dev/null || :
 }
 
-pre_remove() {
+post_remove() {
+    # Once the files are gone, so a running GUI can't start it again.
     systemctl stop oma-helper.service 2>/dev/null || :
 }

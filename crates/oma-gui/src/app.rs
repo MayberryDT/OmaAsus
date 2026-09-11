@@ -1745,7 +1745,7 @@ impl App {
                     // that starts a fresh helper, which records the state they were
                     // handed back in.
                     Event::HelperGone => {
-                        self.fan_engine.invalidate();
+                        self.fan_engine.resend_all();
                         Task::none()
                     }
                     // supergfxd kills whatever holds the dGPU while it switches: let go
