@@ -24,7 +24,7 @@
 
 The Release workflow checks the tag against both versions, runs clippy and the tests, builds the pacman package in an Arch container and the portable archive on Ubuntu 24.04, and publishes both with checksums and install notes. The notes end with the pull requests merged since the previous tag.
 
-To build the package locally: `packaging/arch/build.sh /tmp/omaasus-pkg`. It builds `HEAD`, so commit first.
+To build the package locally: `packaging/arch/build.sh ~/omaasus-pkg`. It builds `HEAD`, so commit first. It works under `$TMPDIR`, and a release build plus the tests take several GB, so point `TMPDIR` at a disk if `/tmp` is a small tmpfs.
 
 ## AUR
 

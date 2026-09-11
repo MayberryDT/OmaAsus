@@ -3,10 +3,14 @@
 # release, and writes to <outdir>: the package, the source archive it was
 # built from, and a PKGBUILD whose checksum matches that archive.
 #   build.sh <outdir> [makepkg options]
-# Runs makepkg as a throwaway user when started as root (CI containers).
+# makepkg refuses root; in CI (root in a container) it runs as a throwaway user.
 set -euo pipefail
 out="${1:?output directory}"
 shift
+if [[ $EUID -eq 0 && ${GITHUB_ACTIONS:-} != true ]]; then
+    echo "run this as a normal user; makepkg won't build as root" >&2
+    exit 1
+fi
 src="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 version="$("$src/packaging/version.sh")"
 archive="omaasus-$version-source.tar.gz"
@@ -18,6 +22,8 @@ sum="$(sha256sum "$work/$archive" | cut -d' ' -f1)"
 sed "s/^sha256sums=.*/sha256sums=('$sum')/" "$src/packaging/arch/PKGBUILD" > "$work/PKGBUILD"
 cp "$src/packaging/arch/omaasus.install" "$work/"
 
+# Keep the source and the package in $work whatever makepkg.conf says.
+export PKGDEST="$work" SRCDEST="$work" PKGEXT=.pkg.tar.zst
 if [[ $EUID -eq 0 ]]; then
     id builder &>/dev/null || useradd --create-home builder
     chown -R builder "$work"

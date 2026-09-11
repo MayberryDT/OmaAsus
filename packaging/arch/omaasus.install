@@ -1,7 +1,10 @@
 # pacman's own hooks reload systemd, udev (re-triggering devices) and the
-# system bus when the package's files change.
+# system bus when the package's files change. The helper hands back the fans
+# it guards as it stops, so restarting or stopping it here is safe.
 
 post_install() {
+    # Left by the portable archive's install.sh; pacman owns these files now.
+    rm -f /usr/share/omaasus/MANIFEST
     cat <<'EOF'
 ==> The OmaAsus helper starts on demand over D-Bus; there is nothing to enable.
 ==> To start the overlay and automation at login:
@@ -10,7 +13,7 @@ EOF
 }
 
 post_upgrade() {
-    # A running helper keeps the old binary until it idles out.
+    # The next call starts the new binary.
     systemctl try-restart oma-helper.service 2>/dev/null || :
 }
 
