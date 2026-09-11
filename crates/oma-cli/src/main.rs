@@ -160,18 +160,18 @@ fn main() -> anyhow::Result<()> {
                 if let Some(pw) = t.package_w {
                     print!(" {pw:5.1} W");
                 }
-                if let Some(nv) = &nv {
-                    if let Ok(g) = nv.telemetry() {
-                        print!(
-                            " | GPU {:3}% {:4} MHz {:3}°C {:5.1} W fans {:?} {}",
-                            g.util_gpu.unwrap_or(0),
-                            g.graphics_mhz.unwrap_or(0),
-                            g.temp_c.unwrap_or(0),
-                            g.power_w.unwrap_or(0.0),
-                            g.fan_percent,
-                            g.throttle_reasons.join(",")
-                        );
-                    }
+                if let Some(nv) = &nv
+                    && let Ok(g) = nv.telemetry()
+                {
+                    print!(
+                        " | GPU {:3}% {:4} MHz {:3}°C {:5.1} W fans {:?} {}",
+                        g.util_gpu.unwrap_or(0),
+                        g.graphics_mhz.unwrap_or(0),
+                        g.temp_c.unwrap_or(0),
+                        g.power_w.unwrap_or(0.0),
+                        g.fan_percent,
+                        g.throttle_reasons.join(",")
+                    );
                 }
                 use std::io::Write;
                 std::io::stdout().flush().ok();

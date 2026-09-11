@@ -268,6 +268,14 @@ impl FanEngine {
         self.backoff.clear();
     }
 
+    /// Send every driven output again, keeping any retry pause: the helper
+    /// went away (a failed write may have taken it down).
+    pub fn resend_all(&mut self) {
+        for s in self.state.values_mut() {
+            s.resend = true;
+        }
+    }
+
     /// Nothing driven and nothing waiting to be handed back.
     pub fn is_idle(&self) -> bool {
         self.state.is_empty() && self.pending_release.is_empty()
@@ -429,6 +437,22 @@ mod tests {
         let cmds = e.evaluate(&cooling, &Temps::default(), now);
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].duty, Some(50.0));
+    }
+
+    #[test]
+    fn resend_all_resends_but_keeps_a_retry_pause() {
+        let mut e = FanEngine::new(Duration::from_secs(1));
+        let cooling = fixed(FanTarget::new("superio:pwm1"), 50.0);
+        let now = Instant::now();
+        let cmds = e.evaluate(&cooling, &Temps::default(), now);
+        e.report(&cmds[0], true, now);
+        e.resend_all();
+        let cmds = e.evaluate(&cooling, &Temps::default(), now);
+        assert_eq!(cmds.len(), 1, "sent again");
+        e.report(&cmds[0], false, now);
+        e.resend_all();
+        assert!(e.evaluate(&cooling, &Temps::default(), now + Duration::from_secs(1)).is_empty(), "a failed write still pauses");
+        assert_eq!(e.evaluate(&cooling, &Temps::default(), now + RETRY)[0].duty, Some(50.0));
     }
 
     #[test]

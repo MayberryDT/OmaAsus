@@ -50,10 +50,10 @@ impl FanBackend {
         let ctl = Controller::connect().await;
         let mut channels = HashMap::new();
         for f in &model.fans {
-            if let Via::Hwmon { dir, index } = &f.backend {
-                if let Some(ch) = inv.hwmon.iter().find(|d| &d.path == dir).and_then(|d| d.pwms.iter().find(|p| p.index == *index)) {
-                    channels.insert(f.id.clone(), ch.clone());
-                }
+            if let Via::Hwmon { dir, index } = &f.backend
+                && let Some(ch) = inv.hwmon.iter().find(|d| &d.path == dir).and_then(|d| d.pwms.iter().find(|p| p.index == *index))
+            {
+                channels.insert(f.id.clone(), ch.clone());
             }
         }
         let lianli = if model.fans.iter().any(|f| matches!(f.backend, Via::LianLi { .. })) { tokio::task::spawn_blocking(LianLiHub::enumerate).await.unwrap_or_default() } else { Vec::new() };

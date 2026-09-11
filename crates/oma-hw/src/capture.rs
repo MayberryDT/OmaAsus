@@ -154,32 +154,32 @@ fn nvidia_infos() -> Vec<nvidia::NvidiaInfo> {
 async fn asusd_snapshot(conn: &zbus::Connection) -> Option<AsusdSnapshot> {
     let objects = asusd::discover(conn).await.ok()?;
     let mut snap = AsusdSnapshot::default();
-    if objects.has_platform {
-        if let Ok(p) = asusd::PlatformProxy::builder(conn).cache_properties(zbus::proxy::CacheProperties::No).build().await {
-            snap.platform = Some(PlatformSnapshot {
-                version: p.version().await.unwrap_or_default(),
-                profile: p.platform_profile().await.ok(),
-                choices: p.platform_profile_choices().await.unwrap_or_default(),
-                profile_on_ac: p.platform_profile_on_ac().await.ok(),
-                profile_on_battery: p.platform_profile_on_battery().await.ok(),
-                change_on_ac: p.change_platform_profile_on_ac().await.ok(),
-                change_on_battery: p.change_platform_profile_on_battery().await.ok(),
-                linked_epp: p.platform_profile_linked_epp().await.ok(),
-                charge_limit: p.charge_control_end_threshold().await.ok(),
-                ppt_group: p.enable_ppt_group().await.ok(),
-                disable_nvidia_powerd_on_battery: p.disable_nvidia_powerd_on_battery().await.ok(),
-            });
-        }
+    if objects.has_platform
+        && let Ok(p) = asusd::PlatformProxy::builder(conn).cache_properties(zbus::proxy::CacheProperties::No).build().await
+    {
+        snap.platform = Some(PlatformSnapshot {
+            version: p.version().await.unwrap_or_default(),
+            profile: p.platform_profile().await.ok(),
+            choices: p.platform_profile_choices().await.unwrap_or_default(),
+            profile_on_ac: p.platform_profile_on_ac().await.ok(),
+            profile_on_battery: p.platform_profile_on_battery().await.ok(),
+            change_on_ac: p.change_platform_profile_on_ac().await.ok(),
+            change_on_battery: p.change_platform_profile_on_battery().await.ok(),
+            linked_epp: p.platform_profile_linked_epp().await.ok(),
+            charge_limit: p.charge_control_end_threshold().await.ok(),
+            ppt_group: p.enable_ppt_group().await.ok(),
+            disable_nvidia_powerd_on_battery: p.disable_nvidia_powerd_on_battery().await.ok(),
+        });
     }
-    if objects.has_fan_curves {
-        if let Ok(f) = asusd::FanCurvesProxy::new(conn).await {
-            for profile in snap.platform.as_ref().map(|p| p.choices.clone()).unwrap_or_default() {
-                match f.fan_curve_data(profile).await {
-                    Ok(curves) => {
-                        snap.fan_curves.insert(profile, curves);
-                    }
-                    Err(e) => tracing::warn!(profile, error = %e, "cannot read asusd fan curves"),
+    if objects.has_fan_curves
+        && let Ok(f) = asusd::FanCurvesProxy::new(conn).await
+    {
+        for profile in snap.platform.as_ref().map(|p| p.choices.clone()).unwrap_or_default() {
+            match f.fan_curve_data(profile).await {
+                Ok(curves) => {
+                    snap.fan_curves.insert(profile, curves);
                 }
+                Err(e) => tracing::warn!(profile, error = %e, "cannot read asusd fan curves"),
             }
         }
     }

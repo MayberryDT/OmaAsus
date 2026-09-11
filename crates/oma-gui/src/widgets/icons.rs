@@ -47,23 +47,23 @@ impl<M> canvas::Program<M> for IconView {
         let pt = |x: f32, y: f32| Point::new(c.x + x * r, c.y + y * r);
         match self.icon {
             Icon::Dashboard => {
-                f.stroke(&Path::new(|b| b.arc(canvas::path::Arc { center: c, radius: r, start_angle: (0.8 * PI).into(), end_angle: (2.2 * PI).into() })), st.clone());
-                f.stroke(&Path::line(c, pt(0.55, -0.55)), st.clone());
+                f.stroke(&Path::new(|b| b.arc(canvas::path::Arc { center: c, radius: r, start_angle: (0.8 * PI).into(), end_angle: (2.2 * PI).into() })), st);
+                f.stroke(&Path::line(c, pt(0.55, -0.55)), st);
                 f.fill(&Path::circle(c, w * 0.9), self.color);
             }
             Icon::Cpu => {
-                f.stroke(&Path::rectangle(pt(-0.6, -0.6), iced::Size::new(1.2 * r, 1.2 * r)), st.clone());
-                f.stroke(&Path::rectangle(pt(-0.25, -0.25), iced::Size::new(0.5 * r, 0.5 * r)), st.clone());
+                f.stroke(&Path::rectangle(pt(-0.6, -0.6), iced::Size::new(1.2 * r, 1.2 * r)), st);
+                f.stroke(&Path::rectangle(pt(-0.25, -0.25), iced::Size::new(0.5 * r, 0.5 * r)), st);
                 for k in [-0.35f32, 0.0, 0.35] {
-                    f.stroke(&Path::line(pt(k, -0.6), pt(k, -0.95)), st.clone());
-                    f.stroke(&Path::line(pt(k, 0.6), pt(k, 0.95)), st.clone());
-                    f.stroke(&Path::line(pt(-0.6, k), pt(-0.95, k)), st.clone());
-                    f.stroke(&Path::line(pt(0.6, k), pt(0.95, k)), st.clone());
+                    f.stroke(&Path::line(pt(k, -0.6), pt(k, -0.95)), st);
+                    f.stroke(&Path::line(pt(k, 0.6), pt(k, 0.95)), st);
+                    f.stroke(&Path::line(pt(-0.6, k), pt(-0.95, k)), st);
+                    f.stroke(&Path::line(pt(0.6, k), pt(0.95, k)), st);
                 }
             }
             Icon::Gpu => {
-                f.stroke(&Path::new(|b| { b.move_to(pt(-1.0, -0.55)); b.line_to(pt(0.9, -0.55)); b.line_to(pt(0.9, 0.45)); b.line_to(pt(-0.7, 0.45)); b.line_to(pt(-0.7, 0.8)); b.line_to(pt(-1.0, 0.8)); b.close(); }), st.clone());
-                f.stroke(&Path::circle(pt(0.2, -0.05), 0.32 * r), st.clone());
+                f.stroke(&Path::new(|b| { b.move_to(pt(-1.0, -0.55)); b.line_to(pt(0.9, -0.55)); b.line_to(pt(0.9, 0.45)); b.line_to(pt(-0.7, 0.45)); b.line_to(pt(-0.7, 0.8)); b.line_to(pt(-1.0, 0.8)); b.close(); }), st);
+                f.stroke(&Path::circle(pt(0.2, -0.05), 0.32 * r), st);
                 f.fill(&Path::circle(pt(0.2, -0.05), w * 0.8), self.color);
             }
             Icon::Fan => {
@@ -75,30 +75,30 @@ impl<M> canvas::Program<M> for IconView {
                         b.bezier_curve_to(Point::new(c.x + r * 0.9 * (a + 0.9).cos(), c.y + r * 0.9 * (a + 0.9).sin()), Point::new(c.x + r * 1.05 * (a - 0.15).cos(), c.y + r * 1.05 * (a - 0.15).sin()), Point::new(c.x + r * 0.55 * (a - 0.55).cos(), c.y + r * 0.55 * (a - 0.55).sin()));
                         b.close();
                     });
-                    f.stroke(&blade, st.clone());
+                    f.stroke(&blade, st);
                 }
             }
             Icon::Light => {
-                f.stroke(&Path::new(|b| b.arc(canvas::path::Arc { center: pt(0.0, -0.15), radius: r * 0.7, start_angle: (0.75 * PI).into(), end_angle: (2.25 * PI).into() })), st.clone());
-                f.stroke(&Path::line(pt(-0.5, 0.35), pt(-0.3, 0.75)), st.clone());
-                f.stroke(&Path::line(pt(0.5, 0.35), pt(0.3, 0.75)), st.clone());
-                f.stroke(&Path::line(pt(-0.3, 0.75), pt(0.3, 0.75)), st.clone());
-                f.stroke(&Path::line(pt(-0.22, 1.0), pt(0.22, 1.0)), st.clone());
+                f.stroke(&Path::new(|b| b.arc(canvas::path::Arc { center: pt(0.0, -0.15), radius: r * 0.7, start_angle: (0.75 * PI).into(), end_angle: (2.25 * PI).into() })), st);
+                f.stroke(&Path::line(pt(-0.5, 0.35), pt(-0.3, 0.75)), st);
+                f.stroke(&Path::line(pt(0.5, 0.35), pt(0.3, 0.75)), st);
+                f.stroke(&Path::line(pt(-0.3, 0.75), pt(0.3, 0.75)), st);
+                f.stroke(&Path::line(pt(-0.22, 1.0), pt(0.22, 1.0)), st);
             }
             Icon::Layers => {
                 for (i, y) in [-0.45f32, 0.0, 0.45].iter().enumerate() {
                     let p = Path::new(|b| { b.move_to(pt(-0.95, *y)); b.line_to(pt(0.0, y - 0.5)); b.line_to(pt(0.95, *y)); b.line_to(pt(0.0, y + 0.5)); b.close(); });
                     if i == 0 { f.fill(&p, Color { a: 0.35, ..self.color }); }
-                    f.stroke(&p, st.clone());
+                    f.stroke(&p, st);
                 }
             }
             Icon::Loop => {
-                f.stroke(&Path::new(|b| b.arc(canvas::path::Arc { center: c, radius: r * 0.85, start_angle: (-0.35 * PI).into(), end_angle: (1.25 * PI).into() })), st.clone());
-                f.stroke(&Path::new(|b| { b.move_to(pt(0.95, -0.85)); b.line_to(pt(0.95, -0.35)); b.line_to(pt(0.45, -0.35)); }), st.clone());
+                f.stroke(&Path::new(|b| b.arc(canvas::path::Arc { center: c, radius: r * 0.85, start_angle: (-0.35 * PI).into(), end_angle: (1.25 * PI).into() })), st);
+                f.stroke(&Path::new(|b| { b.move_to(pt(0.95, -0.85)); b.line_to(pt(0.95, -0.35)); b.line_to(pt(0.45, -0.35)); }), st);
             }
             Icon::Rog => {
                 // stylised eye
-                f.stroke(&Path::new(|b| { b.move_to(pt(-1.0, 0.0)); b.quadratic_curve_to(pt(0.0, -1.0), pt(1.0, 0.0)); b.quadratic_curve_to(pt(0.0, 0.85), pt(-1.0, 0.0)); }), st.clone());
+                f.stroke(&Path::new(|b| { b.move_to(pt(-1.0, 0.0)); b.quadratic_curve_to(pt(0.0, -1.0), pt(1.0, 0.0)); b.quadratic_curve_to(pt(0.0, 0.85), pt(-1.0, 0.0)); }), st);
                 f.fill(&Path::circle(c, r * 0.3), self.color);
             }
             Icon::Gear => {
@@ -112,16 +112,16 @@ impl<M> canvas::Program<M> for IconView {
                     }
                     b.close();
                 });
-                f.stroke(&path, st.clone());
-                f.stroke(&Path::circle(c, r * 0.3), st.clone());
+                f.stroke(&path, st);
+                f.stroke(&Path::circle(c, r * 0.3), st);
             }
             Icon::Close => {
-                f.stroke(&Path::line(pt(-0.6, -0.6), pt(0.6, 0.6)), st.clone());
-                f.stroke(&Path::line(pt(0.6, -0.6), pt(-0.6, 0.6)), st.clone());
+                f.stroke(&Path::line(pt(-0.6, -0.6), pt(0.6, 0.6)), st);
+                f.stroke(&Path::line(pt(0.6, -0.6), pt(-0.6, 0.6)), st);
             }
             Icon::Window => {
-                f.stroke(&Path::rectangle(pt(-0.9, -0.7), iced::Size::new(1.8 * r, 1.4 * r)), st.clone());
-                f.stroke(&Path::line(pt(-0.9, -0.3), pt(0.9, -0.3)), st.clone());
+                f.stroke(&Path::rectangle(pt(-0.9, -0.7), iced::Size::new(1.8 * r, 1.4 * r)), st);
+                f.stroke(&Path::line(pt(-0.9, -0.3), pt(0.9, -0.3)), st);
             }
             Icon::Logo => {
                 // OmaAsus mark: a glossy liquid drop-orb with an iris ring and a blade of light.

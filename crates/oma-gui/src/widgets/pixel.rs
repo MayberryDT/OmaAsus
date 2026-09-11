@@ -169,8 +169,8 @@ impl<M> canvas::Program<M> for OmaMark {
             g = g.add_stop(*from, *col).add_stop((to - 0.0005).max(*from), *col);
         }
         let fill = canvas::Fill { style: canvas::Style::Gradient(canvas::Gradient::Linear(g)), rule: canvas::fill::Rule::NonZero };
-        f.fill(&lobe, fill.clone());
-        f.fill(&body, fill.clone());
+        f.fill(&lobe, fill);
+        f.fill(&body, fill);
         f.fill(&diamond, fill);
         vec![f.into_geometry()]
     }

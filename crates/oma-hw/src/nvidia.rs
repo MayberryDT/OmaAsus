@@ -279,9 +279,12 @@ pub enum ClockKind {
     Memory,
 }
 
+/// A clock offset range `(min, max)` in MHz, where the driver reports one.
+type OffsetRange = Option<(i32, i32)>;
+
 /// Clock offset support through the raw NVML symbols (`nvmlDeviceGetClockOffsets`,
 /// driver 555+). Returns `(gpc_range, mem_range)`.
-fn clock_offset_ranges(d: &Device<'_>) -> (Option<(i32, i32)>, Option<(i32, i32)>) {
+fn clock_offset_ranges(d: &Device<'_>) -> (OffsetRange, OffsetRange) {
     let gpc = raw::get_clock_offsets(d, ClockKind::Graphics).map(|o| (o.min, o.max));
     let mem = raw::get_clock_offsets(d, ClockKind::Memory).map(|o| (o.min, o.max));
     (gpc, mem)

@@ -567,10 +567,10 @@ fn gpus(raw: &RawInventory) -> Vec<Gpu> {
         })
         .collect();
     // A dGPU that supergfxd powered off is gone from the bus but still there.
-    if let Some(gfx) = &raw.supergfx {
-        if gfx.vendor.eq_ignore_ascii_case("nvidia") && !out.iter().any(|g| g.vendor == GpuVendor::Nvidia) {
-            out.push(Gpu { id: DeviceId::new("gpu:nvidia"), vendor: GpuVendor::Nvidia, name: "NVIDIA GPU".into(), integrated: false, power: GpuPower::Off, pci_slot: None });
-        }
+    if let Some(gfx) = &raw.supergfx
+        && gfx.vendor.eq_ignore_ascii_case("nvidia") && !out.iter().any(|g| g.vendor == GpuVendor::Nvidia)
+    {
+        out.push(Gpu { id: DeviceId::new("gpu:nvidia"), vendor: GpuVendor::Nvidia, name: "NVIDIA GPU".into(), integrated: false, power: GpuPower::Off, pci_slot: None });
     }
     out
 }

@@ -1,0 +1,64 @@
+name: Packages
+
+on:
+  workflow_call:
+    outputs:
+      glibc:
+        description: Oldest glibc the portable binaries run on
+        value: ${{ jobs.portable.outputs.glibc }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  arch:
+    name: Arch package
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    timeout-minutes: 45
+    steps:
+      # Rust and the build-time part of the package's depends (makepkg runs
+      # with --nodeps here).
+      - name: Install Rust
+        run: pacman -Syu --noconfirm --needed git rust libxkbcommon wayland
+      - uses: actions/checkout@v7
+      - name: Build with makepkg
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/arch/build.sh dist --nodeps --nocheck
+      - uses: actions/upload-artifact@v7
+        with:
+          name: arch
+          path: dist/
+          if-no-files-found: error
+
+  portable:
+    name: Portable archive
+    # Ubuntu 24.04's glibc (2.39) decides how old a system the archive runs
+    # on; Arch's is newer.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      glibc: ${{ steps.archive.outputs.glibc }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libudev-dev libwayland-dev libxkbcommon-dev pkg-config
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Archive
+        id: archive
+        run: packaging/make-tarball.sh target/release dist >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: portable
+          path: dist/
+          if-no-files-found: error

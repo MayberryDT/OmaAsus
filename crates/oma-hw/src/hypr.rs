@@ -71,10 +71,10 @@ pub async fn subscribe(tx: tokio::sync::mpsc::Sender<HyprEvent>) -> anyhow::Resu
     let stream = UnixStream::connect(dir.join(".socket2.sock")).await?;
     let mut lines = BufReader::new(stream).lines();
     while let Some(line) = lines.next_line().await? {
-        if let Some(ev) = parse_event(&line) {
-            if tx.send(ev).await.is_err() {
-                break;
-            }
+        if let Some(ev) = parse_event(&line)
+            && tx.send(ev).await.is_err()
+        {
+            break;
         }
     }
     Ok(())

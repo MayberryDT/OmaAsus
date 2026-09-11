@@ -106,7 +106,32 @@ The interface is a port of [omarchy-site](https://github.com/omacom/omarchy-site
 
 ## Install
 
-Requirements: Rust 1.98+, Wayland, a Vulkan-capable GPU, Hyprland for the overlay and automation signals. Arch is the tested platform.
+Requirements: Wayland, a Vulkan-capable GPU, Hyprland for the overlay and automation signals. Arch is the tested platform.
+
+### From a release
+
+Each [release](https://github.com/Mhsbrian/OmaAsus/releases) carries a pacman package and a portable archive. Both install the helper too.
+
+Arch and Omarchy:
+
+```sh
+sudo pacman -U omaasus-<version>-1-x86_64.pkg.tar.zst
+```
+
+If you installed the helper by hand before, pacman stops on files that already exist; add `--overwrite '*'` the first time.
+
+Other distributions (systemd, polkit, and the glibc version the release notes give):
+
+```sh
+tar xf omaasus-<version>-x86_64-linux.tar.gz
+sudo omaasus-<version>-x86_64-linux/install.sh
+```
+
+`install.sh --uninstall` removes it again.
+
+### From source
+
+Requires Rust 1.98+.
 
 ```sh
 git clone https://github.com/Mhsbrian/OmaAsus
@@ -114,7 +139,7 @@ cd OmaAsus
 cargo build --release
 ```
 
-Binaries land in `target/release`: `omaasus` (GUI), `oma-helper` (root service), `oma` (CLI; some subcommands write to hardware). A `PKGBUILD` is in `packaging/`.
+Binaries land in `target/release`: `omaasus` (GUI), `oma-helper` (root service), `oma` (CLI; some subcommands write to hardware). `packaging/arch/build.sh` turns a checkout into a pacman package; [packaging/README.md](packaging/README.md) covers that and the release process.
 
 ### The helper
 
@@ -123,7 +148,7 @@ Fans, governors, GPU limits and lighting controllers sit behind root-only sysfs 
 - `com.omaasus.helper.control`: hwmon and NVIDIA fans, CPU governor, EPP, boost and limits, platform profile, firmware attributes and power limits, NVIDIA power limit and clock lock, the amdgpu DPM level. Allowed for the active local session without a prompt, like power-profiles-daemon.
 - `com.omaasus.helper.advanced`: GPU clock offsets, SMT, the GPU MUX, dGPU and eGPU switches, amdgpu overdrive, and HID writes, which include Lian Li hub fan speeds and the LiveDash. Asks for your password; polkit then remembers it for a few minutes.
 
-Install it from **Settings → Install helper** (runs through `pkexec`), or by hand:
+The release packages install it. With a source build, install it from **Settings → Install helper** (runs through `pkexec`), or by hand:
 
 ```sh
 sudo scripts/install-helper.sh target/release/oma-helper crates/oma-helper/data
@@ -144,7 +169,7 @@ o.bind("SUPER + CTRL + G", "Performance profile", hl.dsp.exec({ cmd = "omaasus p
 o.window({ title = "^OmaAsus$" }, { opacity = "1 1" })
 ```
 
-Older Hyprland: see `packaging/hyprland.conf`. Start the overlay daemon at login with the user unit in `packaging/omaasus.service`:
+Older Hyprland: see `packaging/hyprland.conf` (packages install both snippets under `/usr/share/omaasus`). Start the overlay daemon at login with the user unit, `packaging/omaasus.service`, which the packages install:
 
 ```sh
 systemctl --user enable --now omaasus

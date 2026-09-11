@@ -1,7 +1,8 @@
 //! System events: resume from sleep (logind) and the charger connecting or
 //! disconnecting (limits differ on battery) call for re-applying the active
 //! profile; a graphics switch starting and the dGPU coming back on the bus
-//! (supergfxd) call for staying off the dGPU first.
+//! (supergfxd) call for staying off the dGPU first; the helper handing back
+//! the fans it guarded as it stops calls for sending them again.
 
 use iced::futures::stream::{self, BoxStream, Stream, StreamExt};
 use iced::futures::SinkExt;
@@ -19,6 +20,9 @@ pub enum Event {
     GraphicsSwitch,
     /// The dGPU came back on the bus.
     DgpuArrived,
+    /// The helper stopped (a package upgrade, Settings → Reinstall helper,
+    /// `systemctl stop`) and handed back the fans it guarded.
+    FansHandedBack,
 }
 
 #[zbus::proxy(interface = "org.freedesktop.login1.Manager", default_service = "org.freedesktop.login1", default_path = "/org/freedesktop/login1")]
@@ -82,6 +86,17 @@ pub fn stream() -> impl Stream<Item = Event> {
                     sources.push(arrivals.boxed());
                     watching.push("dGPU arrivals");
                 }
+            }
+            // The helper says so as it stops, having handed the fans back. Anyone may
+            // send a signal on the system bus, even straight to us, so it's taken
+            // only from the owner of the helper's name, which only root can be: a
+            // proxy's signal stream follows that owner and drops everyone else's.
+            // That's zbus 5's SignalStream: it learns the owner with GetNameOwner
+            // (never starting the helper) and follows NameOwnerChanged. Check it
+            // still does when bumping zbus.
+            if let Ok(changes) = async { oma_hw::helper::HelperProxy::builder(&conn).cache_properties(zbus::proxy::CacheProperties::No).build().await?.receive_changed().await }.await {
+                sources.push(changes.filter_map(|s| async move { s.args().ok().filter(|a| a.what().as_str() == oma_hw::helper::HANDED_BACK).map(|_| Event::FansHandedBack) }).boxed());
+                watching.push("helper hand-backs");
             }
         }
         tracing::info!(events = %watching.join(", "), "watching system events");

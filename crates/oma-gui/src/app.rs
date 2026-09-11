@@ -505,10 +505,10 @@ impl App {
         Task::perform(
             async move {
                 let mut report = crate::apply::apply_profile(pr, cx).await;
-                if let Some((cc, Some(mode))) = cc {
-                    if let Err(e) = cc.activate_mode(&mode).await {
-                        report.failed.push(format!("CoolerControl: {e}"));
-                    }
+                if let Some((cc, Some(mode))) = cc
+                    && let Err(e) = cc.activate_mode(&mode).await
+                {
+                    report.failed.push(format!("CoolerControl: {e}"));
                 }
                 report
             },
@@ -631,10 +631,10 @@ impl App {
                 self.edit_cooling(|c| {
                     let hw = matches!(c.get(&target), Some(FanMode::HardwareCurve(_)));
                     let mut cv = crate::pages::cooling::preset(name, src);
-                    if let Some(FanMode::Curve(old)) | Some(FanMode::HardwareCurve(old)) = c.get(&target) {
-                        if !matches!(name, "coolant" | "pump") {
-                            cv.source = old.source.clone();
-                        }
+                    if let Some(FanMode::Curve(old)) | Some(FanMode::HardwareCurve(old)) = c.get(&target)
+                        && !matches!(name, "coolant" | "pump")
+                    {
+                        cv.source = old.source.clone();
                     }
                     if let Some(n) = points {
                         cv.points = cv.resample(n);
@@ -731,10 +731,10 @@ impl App {
                 }
                 // The Lighting page shows the same keyboard.
                 for d in self.model.iter().flat_map(|m| &m.lighting) {
-                    if matches!(&d.backend, oma_hw::model::LightingBackend::AsusdAura { path: p } if *p == path) {
-                        if let Some(oma_hw::lighting::LightState::Aura { level, .. }) = self.lights.get_mut(d.id.as_str()) {
-                            *level = v;
-                        }
+                    if matches!(&d.backend, oma_hw::model::LightingBackend::AsusdAura { path: p } if *p == path)
+                        && let Some(oma_hw::lighting::LightState::Aura { level, .. }) = self.lights.get_mut(d.id.as_str())
+                    {
+                        *level = v;
                     }
                 }
                 run(Box::pin(async move {
@@ -858,7 +858,7 @@ impl App {
                         if !cc.handshake().await {
                             return (false, Vec::new());
                         }
-                        match cc.login().await.and(cc.modes().await.map_err(|e| e)) {
+                        match cc.login().await.and(cc.modes().await) {
                             Ok(m) => (true, m),
                             Err(_) => (false, Vec::new()),
                         }
@@ -874,11 +874,11 @@ impl App {
             SettingsMsg::HudToggle(b) => self.config.overlay.hud_enabled = b,
             SettingsMsg::TrayToggle(b) => {
                 self.config.tray_enabled = b;
-                if !b {
-                    if let Some(h) = self.tray.take() {
-                        crate::config_store::save(&self.config);
-                        return Task::future(async move { h.shutdown().await }).discard();
-                    }
+                if !b
+                    && let Some(h) = self.tray.take()
+                {
+                    crate::config_store::save(&self.config);
+                    return Task::future(async move { h.shutdown().await }).discard();
                 }
             }
             SettingsMsg::TelemetryHz(v) => {
@@ -1137,10 +1137,10 @@ impl App {
                 // Keep the ASUS page's keyboard brightness in step.
                 if let (Some(k), Some(m)) = (&mut self.asus.kbd, &self.model) {
                     for d in &m.lighting {
-                        if matches!(&d.backend, oma_hw::model::LightingBackend::AsusdAura { path } if *path == k.path) {
-                            if let Some(LightState::Aura { level, .. }) = self.lights.get(d.id.as_str()) {
-                                k.brightness = *level;
-                            }
+                        if matches!(&d.backend, oma_hw::model::LightingBackend::AsusdAura { path } if *path == k.path)
+                            && let Some(LightState::Aura { level, .. }) = self.lights.get(d.id.as_str())
+                        {
+                            k.brightness = *level;
                         }
                     }
                 }
@@ -1276,7 +1276,7 @@ impl App {
 
     /// Thermal glow: tint all RGB devices from cool→hot by the CPU/GPU max temperature.
     fn rgb_thermal_tick(&mut self, snap: &telemetry::Snapshot) -> Task<Message> {
-        if !self.rgb_thermal || !self.rgb_server || snap.seq % 4 != 0 {
+        if !self.rgb_thermal || !self.rgb_server || !snap.seq.is_multiple_of(4) {
             return Task::none();
         }
         let t = snap.cpu.tctl_c.unwrap_or(0.0).max(snap.nvidia.as_ref().and_then(|n| n.temp_c).unwrap_or(0) as f64);
@@ -1511,14 +1511,14 @@ impl App {
                     self.cpu_edit = snap.cpu_control.clone();
                     self.cpu_synced = true;
                 }
-                if !self.gpu_dirty {
-                    if let Some(n) = &snap.nvidia {
-                        self.gpu_edit.gpc_offset_mhz = n.gpc_offset_mhz;
-                        self.gpu_edit.mem_offset_mhz = n.mem_offset_mhz;
-                        self.gpu_edit.persistence = n.persistence;
-                        self.gpu_edit.power_limit_w = n.power_limit_w.map(|w| w.round() as u32);
-                        self.gpu_edit.fan_percent = if n.fan_policy_manual.iter().any(|m| *m) { Some(n.fan_percent.clone()) } else { None };
-                    }
+                if !self.gpu_dirty
+                    && let Some(n) = &snap.nvidia
+                {
+                    self.gpu_edit.gpc_offset_mhz = n.gpc_offset_mhz;
+                    self.gpu_edit.mem_offset_mhz = n.mem_offset_mhz;
+                    self.gpu_edit.persistence = n.persistence;
+                    self.gpu_edit.power_limit_w = n.power_limit_w.map(|w| w.round() as u32);
+                    self.gpu_edit.fan_percent = if n.fan_policy_manual.iter().any(|m| *m) { Some(n.fan_percent.clone()) } else { None };
                 }
                 let rgb_probe = if !self.rgb_server && snap.seq % 20 == 5 && oma_hw::rgb::server_running() { Self::rgb_refresh() } else { Task::none() };
                 // The dGPU woke after startup: fetch its details for the GPU page
@@ -1602,11 +1602,11 @@ impl App {
                 if self.toast.is_some() && self.toast_at.is_none() {
                     self.toast_at = Some(now);
                 }
-                if let (Some((_, true)), Some(at)) = (&self.toast, self.toast_at) {
-                    if now.duration_since(at) > std::time::Duration::from_secs(6) {
-                        self.toast = None;
-                        self.toast_at = None;
-                    }
+                if let (Some((_, true)), Some(at)) = (&self.toast, self.toast_at)
+                    && now.duration_since(at) > std::time::Duration::from_secs(6)
+                {
+                    self.toast = None;
+                    self.toast_at = None;
                 }
                 widgets::set_phase(now.duration_since(self.t0).as_secs_f32());
                 widgets::set_thermal(self.smooth.heat, self.smooth.load);
@@ -1695,9 +1695,13 @@ impl App {
             }
             Message::FanResult(cmd, r) => {
                 self.fan_engine.report(&cmd, r.is_ok(), std::time::Instant::now());
-                if let Err(e) = r {
+                // A stopping helper (an upgrade, a reinstall) refuses for a moment:
+                // expected, and the engine sends the write again shortly.
+                if let Err(e) = r
+                    && !e.contains(oma_hw::helper::RESTARTING)
+                {
                     self.fan_errors += 1;
-                    if self.fan_errors <= 3 || self.fan_errors % 60 == 0 {
+                    if self.fan_errors <= 3 || self.fan_errors.is_multiple_of(60) {
                         self.toast = Some((format!("Fan control: {e}"), false));
                     }
                 }
@@ -1737,9 +1741,20 @@ impl App {
             }
             Message::System(ev) => {
                 use crate::events::Event;
-                // Limits and graphics state move with every one of these: refresh the ASUS view too.
+                // Limits and graphics state move with all of these but the helper's
+                // hand-back: refresh the ASUS view too.
                 let reload = Task::perform(crate::pages::asus::load(), Message::AsusLoaded);
                 match ev {
+                    // The helper handed back the fans it guarded as it stopped. Send
+                    // them again: that starts a fresh helper, which records the state
+                    // they were handed back in.
+                    Event::FansHandedBack => {
+                        // Not after a package removal: there's no helper left to start.
+                        if oma_hw::helper::activatable() {
+                            self.fan_engine.resend_all();
+                        }
+                        Task::none()
+                    }
                     // supergfxd kills whatever holds the dGPU while it switches: let go
                     // now, and stay away until the switch has finished.
                     Event::GraphicsSwitch => {

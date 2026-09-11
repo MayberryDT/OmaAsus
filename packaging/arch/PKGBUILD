@@ -1,0 +1,48 @@
+# Maintainer: Brian Honeycutt
+pkgname=omaasus
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Control center and Hyprland overlay for ASUS hardware'
+arch=('x86_64')
+url='https://github.com/Mhsbrian/OmaAsus'
+license=('MIT')
+depends=('dbus' 'gcc-libs' 'glibc' 'hicolor-icon-theme' 'libxkbcommon' 'polkit'
+         'systemd-libs' 'vulkan-icd-loader' 'wayland')
+makedepends=('cargo')
+optdepends=('asusctl: ROG laptop and Ally platform control'
+            'coolercontrol: hand fan curves to CoolerControl'
+            'gamemode: switch profiles when games register'
+            'nvidia-utils: NVIDIA GPU control through NVML'
+            'openrgb: lighting through the OpenRGB SDK'
+            'power-profiles-daemon: platform power profiles'
+            'supergfxctl: graphics mode switching on hybrid laptops'
+            'vulkan-driver: GPU-accelerated drawing')
+# The release profile strips the binaries and runs its own (thin) LTO.
+options=('!debug' '!lto')
+install=omaasus.install
+source=("$url/releases/download/v$pkgver/$pkgname-$pkgver-source.tar.gz")
+sha256sums=('SKIP') # packaging/arch/build.sh fills this in for each release
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --workspace
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  packaging/stage.sh "$pkgdir" target/release
+}

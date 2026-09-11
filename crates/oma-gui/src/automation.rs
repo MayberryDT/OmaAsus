@@ -157,10 +157,10 @@ pub fn stream() -> impl Stream<Item = AutoEvent> {
                         while let Some(ev) = hrx.recv().await {
                             let refresh = matches!(ev, HyprEvent::ActiveWindow { .. } | HyprEvent::Fullscreen(_) | HyprEvent::CloseWindow { .. } | HyprEvent::Workspace(_));
                             let _ = fwd.send(AutoEvent::Hypr(ev)).await;
-                            if refresh {
-                                if let Ok(w) = hypr::active_window().await {
-                                    let _ = fwd.send(AutoEvent::ActiveWindow(w)).await;
-                                }
+                            if refresh
+                                && let Ok(w) = hypr::active_window().await
+                            {
+                                let _ = fwd.send(AutoEvent::ActiveWindow(w)).await;
                             }
                         }
                     });
@@ -183,7 +183,7 @@ pub fn stream() -> impl Stream<Item = AutoEvent> {
                     let n = oma_hw::gamemode::client_count(c).await;
                     let _ = tx2.send(AutoEvent::GameMode(n)).await;
                 }
-                if i % 3 == 0 {
+                if i.is_multiple_of(3) {
                     let procs = tokio::task::spawn_blocking(process_names).await.unwrap_or_default();
                     let _ = tx2.send(AutoEvent::Processes(procs)).await;
                 }

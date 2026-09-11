@@ -98,13 +98,13 @@ pub async fn load() -> AsusState {
         return st;
     };
     if let Ok(objs) = oma_hw::asusd::discover(&conn).await {
-        if objs.has_platform {
-            if let Ok(p) = oma_hw::asusd::PlatformProxy::new(&conn).await {
-                st.profile = p.platform_profile().await.ok().map(PlatformProfile::from_u32);
-                st.choices = p.platform_profile_choices().await.unwrap_or_default().into_iter().map(PlatformProfile::from_u32).collect();
-                st.ppt_group = p.enable_ppt_group().await.ok();
-                st.charge_limit = p.charge_control_end_threshold().await.ok();
-            }
+        if objs.has_platform
+            && let Ok(p) = oma_hw::asusd::PlatformProxy::new(&conn).await
+        {
+            st.profile = p.platform_profile().await.ok().map(PlatformProfile::from_u32);
+            st.choices = p.platform_profile_choices().await.unwrap_or_default().into_iter().map(PlatformProfile::from_u32).collect();
+            st.ppt_group = p.enable_ppt_group().await.ok();
+            st.charge_limit = p.charge_control_end_threshold().await.ok();
         }
         for a in &objs.armoury_attrs {
             let cached = oma_hw::asusd::armoury_attr(&conn, a).await.ok();
@@ -113,16 +113,13 @@ pub async fn load() -> AsusState {
                 st.attrs.push(Attr::new(a, cached.as_ref(), live.as_ref()));
             }
         }
-        if let Some(path) = objs.aura_paths.first() {
-            if let Ok(b) = oma_hw::asusd::AuraProxy::builder(&conn).path(path.as_str()) {
-                if let Ok(a) = b.cache_properties(zbus::proxy::CacheProperties::No).build().await {
-                    if let (Ok(brightness), Ok(levels)) = (a.brightness().await, a.supported_brightness().await) {
-                        if !levels.is_empty() {
-                            st.kbd = Some(KbdLight { path: path.clone(), brightness, levels });
-                        }
-                    }
-                }
-            }
+        if let Some(path) = objs.aura_paths.first()
+            && let Ok(b) = oma_hw::asusd::AuraProxy::builder(&conn).path(path.as_str())
+            && let Ok(a) = b.cache_properties(zbus::proxy::CacheProperties::No).build().await
+            && let (Ok(brightness), Ok(levels)) = (a.brightness().await, a.supported_brightness().await)
+            && !levels.is_empty()
+        {
+            st.kbd = Some(KbdLight { path: path.clone(), brightness, levels });
         }
         st.asusd = Some(objs);
     }
@@ -236,33 +233,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
     scrollable(col).height(Length::Fill).into()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cached(current: i32) -> ArmouryAttr {
-        ArmouryAttr { attr: "ppt_pl1_spl".into(), name: String::new(), current, default: 80, min: 15, max: 80, step: 1, possible: Vec::new(), queued: -1 }
-    }
-
-    fn live(current: i64, writable: bool) -> FirmwareAttr {
-        FirmwareAttr { name: "ppt_pl1_spl".into(), current: Some(current), min: Some(15), max: Some(80), choices: Vec::new(), writable, owned_by: None }
-    }
-
-    #[test]
-    fn the_page_shows_what_the_firmware_runs() {
-        // asusd keeps a copy per power mode and charger state (80 W) while
-        // the firmware runs 35 W on battery: sysfs wins.
-        let a = Attr::new("ppt_pl1_spl", Some(&cached(80)), Some(&live(35, true)));
-        assert_eq!((a.current, a.min, a.max, a.default, a.queued), (Some(35), Some(15), Some(80), Some(80), None));
-        assert!(a.writable);
-        assert!(!Attr::new("nv_base_tgp", Some(&cached(80)), Some(&live(80, false))).writable, "read-only in sysfs stays read-only");
-        // Without sysfs, asusd's values and word stand.
-        let b = Attr::new("ppt_pl1_spl", Some(&cached(45)), None);
-        assert_eq!((b.current, b.writable), (Some(45), true));
-        assert_eq!(Attr::new("ppt_pl1_spl", Some(&cached(-1)), None).current, None, "-1 is asusd for unknown");
-    }
-}
-
 fn power_label(p: oma_hw::supergfx::GfxPower) -> &'static str {
     use oma_hw::supergfx::GfxPower;
     match p {
@@ -317,5 +287,32 @@ fn attr_row<'a>(app: &'a App, a: &'a Attr) -> Element<'a, Message> {
             _ => with_queued(row![widgets::body(p, label), widgets::hfill(), widgets::mono(p, fmt(cur), size::SMALL)].spacing(space::SM).align_y(iced::Alignment::Center)),
         },
         (_, cur) => with_queued(row![widgets::body(p, label), widgets::hfill(), widgets::mono(p, cur.map_or_else(|| "—".to_string(), fmt), size::SMALL), widgets::pill(p, "read-only", p.text_dim)].spacing(space::SM).align_y(iced::Alignment::Center)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cached(current: i32) -> ArmouryAttr {
+        ArmouryAttr { attr: "ppt_pl1_spl".into(), name: String::new(), current, default: 80, min: 15, max: 80, step: 1, possible: Vec::new(), queued: -1 }
+    }
+
+    fn live(current: i64, writable: bool) -> FirmwareAttr {
+        FirmwareAttr { name: "ppt_pl1_spl".into(), current: Some(current), min: Some(15), max: Some(80), choices: Vec::new(), writable, owned_by: None }
+    }
+
+    #[test]
+    fn the_page_shows_what_the_firmware_runs() {
+        // asusd keeps a copy per power mode and charger state (80 W) while
+        // the firmware runs 35 W on battery: sysfs wins.
+        let a = Attr::new("ppt_pl1_spl", Some(&cached(80)), Some(&live(35, true)));
+        assert_eq!((a.current, a.min, a.max, a.default, a.queued), (Some(35), Some(15), Some(80), Some(80), None));
+        assert!(a.writable);
+        assert!(!Attr::new("nv_base_tgp", Some(&cached(80)), Some(&live(80, false))).writable, "read-only in sysfs stays read-only");
+        // Without sysfs, asusd's values and word stand.
+        let b = Attr::new("ppt_pl1_spl", Some(&cached(45)), None);
+        assert_eq!((b.current, b.writable), (Some(45), true));
+        assert_eq!(Attr::new("ppt_pl1_spl", Some(&cached(-1)), None).current, None, "-1 is asusd for unknown");
     }
 }

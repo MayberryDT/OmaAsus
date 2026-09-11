@@ -7,11 +7,23 @@ use crate::nvidia::NvidiaControl;
 use std::path::Path;
 use std::time::Duration;
 
-/// What the helper answers while it goes idle and exits: nothing was written
-/// or claimed, and D-Bus starts a fresh helper for the next call.
+/// What the helper answers while it stops, before it gives up its name:
+/// nothing was written or claimed. After an idle exit the next call starts a
+/// fresh helper at once; a stop that hands fans back keeps refusing until the
+/// hand-back is done, usually well under a second.
 pub const RESTARTING: &str = "oma-helper is restarting; try again";
 
-/// A call, tried once more when an exiting helper refused it.
+/// What the helper's `Changed` signal says as it stops having handed the fans
+/// back: clients still running send theirs again.
+pub const HANDED_BACK: &str = "fans handed back";
+
+/// Whether D-Bus can start the helper: its activation file is in one of the
+/// standard system-service directories (a package removal takes it away).
+pub fn activatable() -> bool {
+    ["/usr/share", "/usr/local/share", "/lib"].iter().any(|dir| Path::new(dir).join("dbus-1/system-services/com.omaasus.Helper1.service").exists())
+}
+
+/// A call, tried once more when a stopping helper refused it.
 async fn again<T, F, Fut>(call: F) -> zbus::Result<T>
 where
     F: Fn() -> Fut,
@@ -184,7 +196,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_refusal_from_an_exiting_helper_is_tried_again_once() {
+    fn a_refusal_from_a_stopping_helper_is_tried_again_once() {
         let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().expect("runtime");
         let calls = std::cell::Cell::new(0);
         let r: zbus::Result<u32> = rt.block_on(again(|| {

@@ -51,7 +51,6 @@ pub mod size {
     pub const HEADLINE: f32 = 22.0;
     pub const DISPLAY: f32 = 28.0;
 }
-#[allow(dead_code)]
 
 #[allow(dead_code)]
 pub mod radius {

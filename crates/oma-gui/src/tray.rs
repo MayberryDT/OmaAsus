@@ -271,13 +271,13 @@ fn install_tray_dir(dir: &Path) -> std::io::Result<usize> {
 /// extra icon search path, so the bar finds the icon without an icon cache.
 pub fn install_icons() -> String {
     let system = Path::new("/usr/share/icons/hicolor/scalable/apps");
-    if !system.join(format!("{ICON_SYMBOLIC}.svg")).exists() {
-        if let Some(root) = user_icon_root() {
-            match install_theme(&root) {
-                Ok(0) => {}
-                Ok(n) => tracing::info!(files = n, dir = %root.display(), "installed user icons"),
-                Err(e) => tracing::warn!(error = %e, "cannot install user icons; the desktop entry may show a placeholder"),
-            }
+    if !system.join(format!("{ICON_SYMBOLIC}.svg")).exists()
+        && let Some(root) = user_icon_root()
+    {
+        match install_theme(&root) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(files = n, dir = %root.display(), "installed user icons"),
+            Err(e) => tracing::warn!(error = %e, "cannot install user icons; the desktop entry may show a placeholder"),
         }
     }
     let Some(dir) = tray_icon_dir() else { return String::new() };

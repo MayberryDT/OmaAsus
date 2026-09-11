@@ -1,0 +1,42 @@
+name: Check
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag the versions must match
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Clippy and tests
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    timeout-minutes: 30
+    steps:
+      - name: Install rustup
+        # smithay-client-toolkit's build script asks pkg-config for xkbcommon.
+        run: pacman -Syu --noconfirm --needed git rustup libxkbcommon wayland
+      - uses: actions/checkout@v7
+      # The rust-version the workspace declares, so lints only change when it does.
+      - name: Install the minimum supported Rust
+        run: |
+          msrv="$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)"
+          rustup toolchain install "$msrv" --profile minimal --component clippy
+          rustup default "$msrv"
+      - name: Versions agree
+        env:
+          TAG: ${{ inputs.tag }}
+        run: packaging/version.sh ${TAG:+"$TAG"}
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --locked

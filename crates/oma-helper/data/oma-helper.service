@@ -7,6 +7,9 @@ Type=dbus
 BusName=com.omaasus.Helper1
 ExecStart=/usr/bin/oma-helper
 Restart=on-failure
+# Stopping hands every client's fans back first. The same budget on every
+# distribution: some default to a few seconds (Omarchy: 5 s).
+TimeoutStopSec=15s
 # Hardening: the helper only needs sysfs, NVML and hidraw.
 ProtectHome=yes
 ProtectSystem=strict
