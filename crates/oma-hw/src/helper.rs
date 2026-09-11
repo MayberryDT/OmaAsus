@@ -5,6 +5,26 @@
 
 use crate::nvidia::NvidiaControl;
 use std::path::Path;
+use std::time::Duration;
+
+/// What the helper answers while it goes idle and exits: nothing was written
+/// or claimed, and D-Bus starts a fresh helper for the next call.
+pub const RESTARTING: &str = "oma-helper is restarting; try again";
+
+/// A call, tried once more when an exiting helper refused it.
+async fn again<T, F, Fut>(call: F) -> zbus::Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = zbus::Result<T>>,
+{
+    match call().await {
+        Err(e) if e.to_string().contains(RESTARTING) => {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            call().await
+        }
+        other => other,
+    }
+}
 
 #[zbus::proxy(
     interface = "com.omaasus.Helper1",
@@ -86,7 +106,8 @@ impl Controller {
         let path = path.as_ref().to_path_buf();
         let value = value.as_ref().to_string();
         if let Some(p) = &self.proxy {
-            let err = p.write_sysfs(&path.to_string_lossy(), &value).await?;
+            let path_s = path.to_string_lossy().into_owned();
+            let err = again(|| p.write_sysfs(&path_s, &value)).await?;
             if err.is_empty() { Ok(()) } else { Err(ControlError::Remote(err)) }
         } else {
             Ok(tokio::task::spawn_blocking(move || crate::sysfs::write(&path, &value)).await.map_err(|e| anyhow::anyhow!(e))??)
@@ -97,7 +118,7 @@ impl Controller {
     pub async fn write_batch(&self, entries: &[(std::path::PathBuf, String)]) -> Result<Vec<(String, String)>, ControlError> {
         if let Some(p) = &self.proxy {
             let req: Vec<(String, String)> = entries.iter().map(|(a, b)| (a.to_string_lossy().into_owned(), b.clone())).collect();
-            let res = p.write_sysfs_batch(req.clone()).await?;
+            let res = again(|| p.write_sysfs_batch(req.clone())).await?;
             Ok(req.into_iter().zip(res).filter(|(_, e)| !e.is_empty()).map(|((path, _), e)| (path, e)).collect())
         } else {
             let entries = entries.to_vec();
@@ -118,14 +139,15 @@ impl Controller {
             return Some(v);
         }
         let p = self.proxy.as_ref()?;
-        p.read_sysfs(&path.to_string_lossy()).await.ok()
+        let path_s = path.to_string_lossy().into_owned();
+        again(|| p.read_sysfs(&path_s)).await.ok()
     }
 
     /// Apply NVIDIA controls; returns per-step failures.
     pub async fn nvidia_apply(&self, index: u32, ctl: &NvidiaControl) -> Result<Vec<(String, String)>, ControlError> {
         if let Some(p) = &self.proxy {
             let json = serde_json::to_string(ctl).map_err(|e| anyhow::anyhow!(e))?;
-            let res = p.nvidia_apply(index, &json).await?;
+            let res = again(|| p.nvidia_apply(index, &json)).await?;
             let arr: Vec<(String, Option<String>)> = serde_json::from_str(&res).map_err(|e| anyhow::anyhow!(e))?;
             Ok(arr.into_iter().filter_map(|(s, e)| e.map(|e| (s, e))).collect())
         } else {
@@ -141,7 +163,7 @@ impl Controller {
 
     pub async fn hid_write(&self, path: &str, report: &[u8]) -> Result<usize, ControlError> {
         if let Some(p) = &self.proxy {
-            Ok(p.hid_write(path, report.to_vec()).await? as usize)
+            Ok(again(|| p.hid_write(path, report.to_vec())).await? as usize)
         } else {
             let path = path.to_string();
             let report = report.to_vec();
@@ -154,5 +176,30 @@ impl Controller {
             .await
             .map_err(|e| anyhow::anyhow!(e))??)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refusal_from_an_exiting_helper_is_tried_again_once() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().expect("runtime");
+        let calls = std::cell::Cell::new(0);
+        let r: zbus::Result<u32> = rt.block_on(again(|| {
+            calls.set(calls.get() + 1);
+            let first = calls.get() == 1;
+            async move { if first { Err(zbus::Error::Failure(RESTARTING.into())) } else { Ok(7) } }
+        }));
+        assert_eq!((r.ok(), calls.get()), (Some(7), 2));
+
+        let calls = std::cell::Cell::new(0);
+        let r: zbus::Result<u32> = rt.block_on(again(|| {
+            calls.set(calls.get() + 1);
+            async { Err(zbus::Error::Failure("polkit denied".into())) }
+        }));
+        assert!(r.is_err());
+        assert_eq!(calls.get(), 1, "other errors aren't retried");
     }
 }

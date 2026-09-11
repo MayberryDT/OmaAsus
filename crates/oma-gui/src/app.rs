@@ -1780,8 +1780,9 @@ impl App {
             Message::DgpuReady(ready) => {
                 self.dgpu_wait = false;
                 if !ready {
-                    // Where the mode stopped using the dGPU there is nothing to apply; otherwise say so.
-                    if telemetry::dgpu_gate() != telemetry::DgpuGateState::ModeOff {
+                    // Where the mode stopped using the dGPU, or the profile now has no
+                    // NVIDIA settings, there is nothing to apply; otherwise say so.
+                    if telemetry::dgpu_gate() != telemetry::DgpuGateState::ModeOff && self.active_profile().is_some_and(|p| p.gpu.nvidia.is_some()) {
                         tracing::warn!("deferred NVIDIA settings not applied: the dGPU didn't become ready");
                         self.toast = Some(("NVIDIA settings weren't applied: the dGPU didn't become ready. Apply the profile again once it is".into(), false));
                         self.toast_at = Some(std::time::Instant::now());

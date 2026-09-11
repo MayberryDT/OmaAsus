@@ -22,7 +22,7 @@ mod polkit;
 use oma_hw::nvidia::{NvidiaControl, NvidiaGpu};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 use zbus::interface;
@@ -215,10 +215,17 @@ struct Helper {
     last_active: Arc<Mutex<std::time::Instant>>,
     /// Calls in progress (polkit may be asking for a password).
     in_flight: Arc<AtomicUsize>,
+    /// Going idle: calls are refused from here on.
+    closing: Arc<AtomicBool>,
 }
 
 impl Helper {
     async fn authorize(&self, hdr: &Header<'_>, action: &str) -> zbus::fdo::Result<()> {
+        // Refused before anything is written or claimed; the caller tries once
+        // more and reaches a fresh helper.
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(zbus::fdo::Error::Failed(oma_hw::helper::RESTARTING.into()));
+        }
         let checked = {
             let _busy = Busy::enter(&self.in_flight);
             polkit::check(&self.conn, &sender(hdr), action, true).await
@@ -447,7 +454,8 @@ async fn main() -> anyhow::Result<()> {
     let last_active = Arc::new(Mutex::new(std::time::Instant::now()));
     let in_flight = Arc::new(AtomicUsize::new(0));
     let restoring = Arc::new(AtomicUsize::new(0));
-    conn.object_server().at(OBJ_PATH, Helper { conn: conn.clone(), claims: claims.clone(), last_active: last_active.clone(), in_flight: in_flight.clone() }).await?;
+    let closing = Arc::new(AtomicBool::new(false));
+    conn.object_server().at(OBJ_PATH, Helper { conn: conn.clone(), claims: claims.clone(), last_active: last_active.clone(), in_flight: in_flight.clone(), closing: closing.clone() }).await?;
     conn.request_name(BUS_NAME).await?;
     let (watch_conn, watch_claims, watch_restoring) = (conn.clone(), claims.clone(), restoring.clone());
     tokio::spawn(async move {
@@ -462,27 +470,18 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(IDLE_CHECK).await;
-            let quiet = || {
-                let idle = last_active.lock().unwrap().elapsed();
-                let guarding = claims.lock().unwrap().values().any(|c| !c.sysfs.is_empty() || !c.nvidia_fans.is_empty());
-                (idle, may_exit(idle, guarding, in_flight.load(Ordering::SeqCst) + restoring.load(Ordering::SeqCst)))
-            };
-            let (idle, go) = quiet();
-            if go {
-                // Hand the name back first, so a new call starts a fresh helper
-                // rather than reaching this one as it goes.
+            let idle = last_active.lock().unwrap().elapsed();
+            let guarding = claims.lock().unwrap().values().any(|c| !c.sysfs.is_empty() || !c.nvidia_fans.is_empty());
+            if may_exit(idle, guarding, in_flight.load(Ordering::SeqCst) + restoring.load(Ordering::SeqCst)) {
+                // Refuse calls from here on. Nothing awaits between the check and
+                // this, so none has started; a later one is refused before it
+                // writes or claims anything, and the caller's retry starts a
+                // fresh helper.
+                closing.store(true, Ordering::SeqCst);
+                info!(idle_s = idle.as_secs(), "idle; exiting (D-Bus starts the helper again when needed)");
+                // systemd stops a Type=dbus service once it gives up its name.
                 let _ = conn.release_name(BUS_NAME).await;
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                // A call that got in meanwhile keeps it running, so its claims
-                // aren't lost; it takes the name back unless a fresh helper has it.
-                if quiet().1 {
-                    info!(idle_s = idle.as_secs(), "idle; exiting (D-Bus starts the helper again when needed)");
-                    std::process::exit(0);
-                }
-                if conn.request_name(BUS_NAME).await.is_err() {
-                    std::process::exit(0);
-                }
-                info!("a call arrived while going idle; staying");
+                std::process::exit(0);
             }
         }
     });

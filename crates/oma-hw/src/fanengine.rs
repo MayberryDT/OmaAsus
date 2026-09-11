@@ -175,12 +175,13 @@ impl FanEngine {
                         }
                         continue;
                     };
-                    // Back from a hold that went to the top: drive from this reading,
-                    // not the one before the hold (hysteresis would pin the top).
+                    // Back from a hold that went to the top: the reading before the hold
+                    // means nothing now, so hysteresis mustn't compare against it (that
+                    // would pin the top); the ramp still brings the duty down.
                     if let Some(st) = self.state.get_mut(&fa.target)
                         && st.blind_since.take().is_some_and(|since| now.saturating_duration_since(since) >= BLIND_LIMIT)
                     {
-                        st.resend = true;
+                        st.last_temp = f64::INFINITY;
                     }
                     let want = curve.duty_at(t).max(floor);
                     let st = self.state.entry(fa.target.clone()).or_insert(ChannelState::new(-1.0, t));
@@ -312,6 +313,25 @@ mod tests {
         // 30.5 °C on (30, 20)→(80, 90) is 20.7 %.
         let c = e.evaluate(&cooling, &Temps { gpu: Some(30.5), ..Default::default() }, now + Duration::from_secs(33));
         assert!(c.first().and_then(|c| c.duty).is_some_and(|d| (d - 20.7).abs() < 1e-6), "back on the curve at once, not held at the top by hysteresis: {c:?}");
+    }
+
+    #[test]
+    fn recovery_from_a_blind_hold_ramps_down_despite_hysteresis() {
+        let mut e = FanEngine::new(Duration::from_secs(1));
+        let mut cooling = CoolingSettings::default();
+        cooling.set(FanTarget::new("superio:pwm2"), FanMode::Curve(FanCurve { points: vec![(30.0, 20.0), (80.0, 90.0)], ramp_s: 20.0, hysteresis_c: 3.0, min_duty: 0.0, source: TempSource::Gpu }));
+        let now = Instant::now();
+        let c = e.evaluate(&cooling, &Temps { gpu: Some(50.0), ..Default::default() }, now);
+        e.report(&c[0], true, now);
+        let blind = Temps { gpu_unread: true, ..Default::default() };
+        let _ = e.evaluate(&cooling, &blind, now + Duration::from_secs(1));
+        let c = e.evaluate(&cooling, &blind, now + Duration::from_secs(32));
+        assert_eq!(c.first().and_then(|c| c.duty), Some(90.0));
+        e.report(&c[0], true, now + Duration::from_secs(32));
+        // 51 °C is within the 3 °C margin of the 50 °C before the hold: that must
+        // not pin the top, and the 20 s ramp still applies (5 % per 1 s tick).
+        let c = e.evaluate(&cooling, &Temps { gpu: Some(51.0), ..Default::default() }, now + Duration::from_secs(33));
+        assert_eq!(c.first().and_then(|c| c.duty), Some(85.0), "one ramp step down from the top: {c:?}");
     }
 
     #[test]
