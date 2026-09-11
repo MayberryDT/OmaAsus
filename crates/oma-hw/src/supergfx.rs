@@ -49,6 +49,13 @@ impl GfxMode {
             _ => Self::None,
         }
     }
+
+    /// Whether the dGPU is meant to be in use in this mode, and so may be
+    /// opened for readings. In the others supergfxd powers it off, and kills
+    /// whatever holds it when it does.
+    pub fn uses_dgpu(self) -> bool {
+        matches!(self, Self::Hybrid | Self::NvidiaNoModeset | Self::AsusMuxDgpu | Self::AsusEgpu)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -226,6 +233,12 @@ mod tests {
         assert!(switch_blocker(GfxMode::Integrated, true, &[]).is_some());
         assert!(switch_blocker(GfxMode::Vfio, false, &["card0-DP-1".into()]).unwrap().contains("card0-DP-1"));
         assert_eq!(switch_blocker(GfxMode::Integrated, false, &[]), None);
+    }
+
+    #[test]
+    fn the_dgpu_is_in_use_only_in_modes_that_power_it() {
+        assert!(GfxMode::Hybrid.uses_dgpu() && GfxMode::AsusMuxDgpu.uses_dgpu());
+        assert!(!GfxMode::Integrated.uses_dgpu() && !GfxMode::Vfio.uses_dgpu() && !GfxMode::None.uses_dgpu());
     }
 
     #[test]

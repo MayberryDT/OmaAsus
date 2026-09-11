@@ -136,6 +136,11 @@ enum OverlayPhase {
     Closing(std::time::Instant),
 }
 
+/// How long OmaAsus stays away from the dGPU after resume, a graphics event,
+/// or before its own mode switch (supergfxd took ~16 s after a resume on the
+/// GA403WR, and killed OmaAsus for holding the dGPU meanwhile).
+const DGPU_HOLD_OFF: std::time::Duration = std::time::Duration::from_secs(20);
+
 const OVERLAY_OPEN: std::time::Duration = std::time::Duration::from_millis(280);
 const OVERLAY_CLOSE: std::time::Duration = std::time::Duration::from_millis(170);
 
@@ -340,7 +345,7 @@ impl App {
         let inv = Task::perform(async { Arc::new(oma_hw::capture::gather().await) }, Message::Hardware);
         let ctl = Task::perform(async { oma_hw::helper::Controller::connect().await.has_helper() }, Message::Controller);
         // Only when the dGPU is awake: NVML would wake a sleeping one.
-        let nvi = Task::perform(async { tokio::task::spawn_blocking(|| oma_hw::nvidia::awake().then(|| oma_hw::nvidia::NvidiaGpu::open(0).and_then(|g| g.info()).ok().map(Arc::new)).flatten()).await.unwrap_or(None) }, Message::NvidiaInfo);
+        let nvi = Task::perform(async { tokio::task::spawn_blocking(|| (oma_hw::nvidia::awake() && telemetry::dgpu_open_ok()).then(|| oma_hw::nvidia::NvidiaGpu::open(0).and_then(|g| g.info()).ok().map(Arc::new)).flatten()).await.unwrap_or(None) }, Message::NvidiaInfo);
         let open = if overlay_only { Task::none() } else { Task::done(Message::OpenWindow) };
         let cc_cfg = app.config.coolercontrol.clone();
         let cc = Task::perform(
@@ -740,7 +745,11 @@ impl App {
                     self.toast_at = Some(std::time::Instant::now());
                     return Task::none();
                 }
+                // supergfxd kills whatever holds the dGPU while it switches: let go first.
+                telemetry::hold_off_dgpu(DGPU_HOLD_OFF);
                 run(Box::pin(async move {
+                    // The sampler lets go within a tick.
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
                     let c = zbus::Connection::system().await.map_err(|e| e.to_string())?;
                     let action = oma_hw::supergfx::set_mode(&c, mode).await.map_err(|e| e.to_string())?;
                     Ok(format!("Graphics → {}: {}", mode.label(), action.label()))
@@ -1439,7 +1448,7 @@ impl App {
                 let rgb_probe = if !self.rgb_server && snap.seq % 20 == 5 && oma_hw::rgb::server_running() { Self::rgb_refresh() } else { Task::none() };
                 // The dGPU woke after startup: fetch its details for the GPU page
                 // (the sampler only reports it while awake, so this doesn't wake it).
-                let nvidia_info = if snap.nvidia.is_some() && self.nvidia_info.is_none() && snap.seq % 20 == 1 {
+                let nvidia_info = if snap.nvidia.is_some() && self.nvidia_info.is_none() && snap.seq % 20 == 1 && telemetry::dgpu_open_ok() {
                     Task::perform(async { tokio::task::spawn_blocking(|| oma_hw::nvidia::NvidiaGpu::open(0).and_then(|g| g.info()).ok().map(Arc::new)).await.unwrap_or(None) }, Message::NvidiaInfo)
                 } else {
                     Task::none()
@@ -1548,6 +1557,9 @@ impl App {
                 Task::none()
             }
             Message::AsusLoaded(st) => {
+                // The graphics mode says whether the dGPU is meant to be in use;
+                // supergfxd kills whatever holds it otherwise, and on a pending switch.
+                telemetry::allow_dgpu(st.gfx.as_ref().is_none_or(|g| g.mode.uses_dgpu() && g.pending_mode == oma_hw::supergfx::GfxMode::None));
                 self.asus = st;
                 Task::none()
             }
@@ -1643,14 +1655,27 @@ impl App {
                 self.load_lights()
             }
             Message::System(ev) => {
+                // Resume and graphics events can bring the dGPU back on the bus
+                // while supergfxd switches it off again: stay away meanwhile.
+                let settling = matches!(ev, crate::events::Event::Resumed | crate::events::Event::Graphics);
+                if settling {
+                    telemetry::hold_off_dgpu(DGPU_HOLD_OFF);
+                }
                 let reason = match ev {
                     crate::events::Event::Resumed => "resume",
                     crate::events::Event::Power(true) => "charger connected",
                     crate::events::Event::Power(false) => "charger disconnected",
                     crate::events::Event::Graphics => "graphics switch",
                 };
+                // NVIDIA limits skipped while the dGPU settles go in once it has.
+                let has_nvidia = self.model.as_ref().is_some_and(|m| m.gpus.iter().any(|g| g.vendor == oma_hw::model::GpuVendor::Nvidia));
+                let later = if settling && has_nvidia && self.asus.gfx.as_ref().is_none_or(|g| g.mode.uses_dgpu()) {
+                    Task::perform(tokio::time::sleep(DGPU_HOLD_OFF + std::time::Duration::from_secs(2)), |_| Message::Reapply("graphics settled"))
+                } else {
+                    Task::none()
+                };
                 // Limits and graphics state moved with it: refresh the ASUS view too.
-                Task::batch([Task::perform(crate::pages::asus::load(), Message::AsusLoaded), Task::done(Message::Reapply(reason))])
+                Task::batch([Task::perform(crate::pages::asus::load(), Message::AsusLoaded), Task::done(Message::Reapply(reason)), later])
             }
             Message::Applied(r) => {
                 self.toast = Some(match r {

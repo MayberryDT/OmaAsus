@@ -144,6 +144,10 @@ pub async fn apply_profile(p: Profile, cx: Context) -> Report {
         if !oma_hw::nvidia::awake() {
             // Waking the dGPU just to set limits would cost battery; they go in on the next apply with it awake.
             r.skipped.push("NVIDIA (asleep or off)".into());
+        } else if !crate::telemetry::dgpu_open_ok() {
+            // supergfxd may be switching it off again (after resume or a mode change)
+            // and kills whatever holds it, the helper included.
+            r.skipped.push("NVIDIA (graphics settling)".into());
         } else {
             match ctl.nvidia_apply(0, nv).await {
                 Ok(errs) if errs.is_empty() => r.applied.push("NVIDIA".into()),

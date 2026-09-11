@@ -120,15 +120,54 @@ enum NvmlAction {
     Release,
 }
 
-fn nvml_action(state: DgpuState, resting: bool) -> NvmlAction {
+/// `keep_away`: resting after idling, settling, or the gate is closed.
+fn nvml_action(state: DgpuState, keep_away: bool) -> NvmlAction {
     match state {
-        DgpuState::Active if !resting => NvmlAction::Poll,
+        DgpuState::Active if !keep_away => NvmlAction::Poll,
         _ => NvmlAction::Release,
     }
 }
 
+/// When the NVIDIA GPU may be opened at all. supergfxd kills any process
+/// holding it while it switches modes or re-applies one (after resume the
+/// dGPU comes back on the bus and supergfxd switches it off again), so it is
+/// opened only where the graphics mode means it to be in use, and not while
+/// things settle.
+struct DgpuGate {
+    allowed: bool,
+    hold_until: Option<std::time::Instant>,
+}
+
+static GATE: std::sync::Mutex<DgpuGate> = std::sync::Mutex::new(DgpuGate { allowed: true, hold_until: None });
+
+/// Whether the graphics mode means the dGPU to be in use (always, without supergfxd).
+pub fn allow_dgpu(on: bool) {
+    if let Ok(mut g) = GATE.lock() {
+        if g.allowed != on {
+            tracing::info!(allowed = on, "dGPU readings {}", if on { "allowed" } else { "off: the graphics mode doesn't use the dGPU" });
+        }
+        g.allowed = on;
+    }
+}
+
+/// Keep away from the dGPU for a while: after resume or a graphics event, and
+/// before switching modes.
+pub fn hold_off_dgpu(d: Duration) {
+    if let Ok(mut g) = GATE.lock() {
+        let until = std::time::Instant::now() + d;
+        g.hold_until = Some(g.hold_until.map_or(until, |u| u.max(until)));
+    }
+}
+
+/// Whether anything in OmaAsus may open the dGPU now.
+pub fn dgpu_open_ok() -> bool {
+    GATE.lock().is_ok_and(|g| g.allowed && g.hold_until.is_none_or(|u| std::time::Instant::now() >= u))
+}
+
 /// Idle this long with a handle open, and the handle is let go.
 const NVML_IDLE: Duration = Duration::from_secs(5);
+/// A dGPU that appears while OmaAsus runs is left alone this long first.
+const NVML_SETTLE: Duration = Duration::from_secs(15);
 /// After letting go, stay away this long so runtime PM can suspend the GPU.
 const NVML_REST: Duration = Duration::from_secs(20);
 /// How often to look for an NVIDIA GPU that isn't on the bus.
@@ -146,6 +185,10 @@ struct NvidiaSource {
     next_scan: Option<std::time::Instant>,
     /// What the last sample found.
     state: Option<DgpuState>,
+    /// Since when the dGPU has been on the bus.
+    present_since: Option<std::time::Instant>,
+    /// A sample has been taken (a dGPU there from the start doesn't settle).
+    observed: bool,
 }
 
 impl NvidiaSource {
@@ -154,10 +197,19 @@ impl NvidiaSource {
             self.device = oma_hw::nvidia::pci_device();
             self.next_scan = Some(now + NVML_RESCAN);
         }
-        let resting = self.rest_until.is_some_and(|t| now < t);
         let state = oma_hw::nvidia::power_state(self.device.as_deref());
         self.state = Some(state);
-        if nvml_action(state, resting) == NvmlAction::Release {
+        // A dGPU that appears while running (resume, a mode switch) is often
+        // about to be switched off again by supergfxd: give it time first.
+        if matches!(state, DgpuState::Absent) {
+            self.present_since = None;
+        } else if self.present_since.is_none() {
+            self.present_since = Some(if self.observed { now } else { now.checked_sub(NVML_SETTLE).unwrap_or(now) });
+        }
+        self.observed = true;
+        let settling = self.present_since.is_some_and(|t| now.duration_since(t) < NVML_SETTLE);
+        let keep_away = settling || self.rest_until.is_some_and(|t| now < t) || !dgpu_open_ok();
+        if nvml_action(state, keep_away) == NvmlAction::Release {
             self.gpu = None;
             self.idle_since = None;
             return None;
@@ -455,6 +507,19 @@ mod tests {
         assert_eq!(nvml_action(DgpuState::Active, true), NvmlAction::Release, "resting after idling");
         assert_eq!(nvml_action(DgpuState::Suspended, false), NvmlAction::Release, "NVML would wake it");
         assert_eq!(nvml_action(DgpuState::Absent, false), NvmlAction::Release);
+    }
+
+    #[test]
+    fn the_dgpu_is_left_alone_when_the_gate_is_closed() {
+        allow_dgpu(false);
+        assert!(!dgpu_open_ok(), "graphics mode doesn't use it");
+        allow_dgpu(true);
+        hold_off_dgpu(Duration::from_secs(60));
+        assert!(!dgpu_open_ok(), "held off after resume or a graphics event");
+        hold_off_dgpu(Duration::from_secs(1));
+        assert!(!dgpu_open_ok(), "a shorter hold doesn't cut a longer one short");
+        GATE.lock().expect("gate").hold_until = None;
+        assert!(dgpu_open_ok());
     }
 
     #[test]
