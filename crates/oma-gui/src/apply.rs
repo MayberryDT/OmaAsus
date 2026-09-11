@@ -45,6 +45,8 @@ pub struct Report {
     pub skipped: Vec<String>,
     pub failed: Vec<String>,
     pub superseded: bool,
+    /// NVIDIA settings were skipped only until the dGPU is ready.
+    pub nvidia_deferred: bool,
 }
 
 impl Report {
@@ -73,16 +75,19 @@ pub async fn apply_profile(p: Profile, cx: Context) -> Report {
     }
     checkpoint!();
 
+    // Who owns power modes, and so firmware limits, where asusd keeps its own
+    // copy: the model's answer. It can still be building in the first seconds
+    // after launch; a profile applied then asks the daemons directly, in the
+    // same order, rather than drop its power mode or go behind asusd's back.
+    let (owner, modes) = match &cx.model {
+        Some(m) => (m.controls.power_owner, m.controls.power_modes.clone()),
+        None if p.cpu.power_mode.is_some() || !p.asusd.is_empty() => fallback_power_modes().await,
+        None => (None, Vec::new()),
+    };
+
     // 1. Power mode, through whichever component owns it here.
     let mut mode_changed = false;
     if let Some(wanted) = &p.cpu.power_mode {
-        // The hardware model can still be building during the first seconds
-        // after launch; a profile applied then must not silently drop its
-        // power mode, so ask the daemons directly in that window.
-        let (owner, modes) = match &cx.model {
-            Some(m) => (m.controls.power_owner, m.controls.power_modes.clone()),
-            None => fallback_power_modes().await,
-        };
         match match_power_mode(wanted, &modes) {
             None if modes.is_empty() => r.skipped.push(format!("power mode {wanted} (nothing controls power modes here)")),
             None => r.skipped.push(format!("power mode {wanted} (not on this machine)")),
@@ -104,7 +109,7 @@ pub async fn apply_profile(p: Profile, cx: Context) -> Report {
             tokio::time::sleep(Duration::from_millis(1000)).await;
             checkpoint!();
         }
-        let via_asusd = cx.model.as_ref().is_some_and(|m| m.controls.power_owner == Some(Owner::Asusd));
+        let via_asusd = owner == Some(Owner::Asusd);
         for (name, wanted) in limits {
             let Some(mut attr) = FirmwareAttr::read_live(name) else {
                 r.skipped.push(format!("{name} (not on this machine)"));
@@ -148,19 +153,7 @@ pub async fn apply_profile(p: Profile, cx: Context) -> Report {
     checkpoint!();
 
     // 4. GPUs.
-    if let Some(nv) = &p.gpu.nvidia {
-        if !oma_hw::nvidia::awake() {
-            // Waking the dGPU just to set limits would cost battery; they go in on the next apply with it awake.
-            r.skipped.push("NVIDIA (asleep or off)".into());
-        } else {
-            let nv = profile_nvidia_control(nv);
-            match ctl.nvidia_apply(0, &nv).await {
-                Ok(errs) if errs.is_empty() => r.applied.push("NVIDIA".into()),
-                Ok(errs) => r.failed.push(format!("NVIDIA: {}", errs.iter().map(|(s, e)| format!("{s} ({e})")).collect::<Vec<_>>().join(", "))),
-                Err(e) => r.failed.push(format!("NVIDIA: {e}")),
-            }
-        }
-    }
+    nvidia_step(&p, &ctl, &mut r).await;
     if let Some(level) = &p.gpu.amd_perf_level {
         let slots: Vec<String> = cx.model.as_ref().map(|m| m.gpus.iter().filter(|g| g.vendor == GpuVendor::Amd).filter_map(|g| g.pci_slot.clone()).collect()).unwrap_or_default();
         if slots.is_empty() {
@@ -215,6 +208,44 @@ pub async fn apply_profile(p: Profile, cx: Context) -> Report {
     r
 }
 
+/// The profile's NVIDIA settings, where the dGPU can take them now.
+async fn nvidia_step(p: &Profile, ctl: &Controller, r: &mut Report) {
+    use crate::telemetry::DgpuGateState;
+    let Some(nv) = &p.gpu.nvidia else { return };
+    if !oma_hw::nvidia::awake() {
+        // Waking the dGPU just to set limits would cost battery; they go in on the next apply with it awake.
+        r.skipped.push("NVIDIA (asleep or off)".into());
+        return;
+    }
+    // supergfxd kills whatever holds the dGPU while it switches, the helper included.
+    match crate::telemetry::dgpu_gate() {
+        DgpuGateState::Open => {}
+        DgpuGateState::ModeOff => {
+            r.skipped.push("NVIDIA (the graphics mode doesn't use it)".into());
+            return;
+        }
+        DgpuGateState::Settling | DgpuGateState::Unknown => {
+            r.skipped.push("NVIDIA (graphics settling; applied once it has)".into());
+            r.nvidia_deferred = true;
+            return;
+        }
+    }
+    let nv = profile_nvidia_control(nv);
+    match ctl.nvidia_apply(0, &nv).await {
+        Ok(errs) if errs.is_empty() => r.applied.push("NVIDIA".into()),
+        Ok(errs) => r.failed.push(format!("NVIDIA: {}", errs.iter().map(|(s, e)| format!("{s} ({e})")).collect::<Vec<_>>().join(", "))),
+        Err(e) => r.failed.push(format!("NVIDIA: {e}")),
+    }
+}
+
+/// The profile's NVIDIA settings alone: what an apply deferred while the dGPU settled.
+pub async fn apply_nvidia(p: Profile) -> Report {
+    let ctl = Controller::connect().await;
+    let mut r = Report::default();
+    nvidia_step(&p, &ctl, &mut r).await;
+    r
+}
+
 /// A profile describes a complete GPU state: when it names no power limit it
 /// means the card's stock limit, not "whatever the previous profile left".
 /// Otherwise Quiet's 300 W would follow you into Gaming.
@@ -226,21 +257,26 @@ fn profile_nvidia_control(nv: &oma_hw::nvidia::NvidiaControl) -> oma_hw::nvidia:
     nv
 }
 
-/// Power modes without a model: power-profiles-daemon if it answers, else the
-/// ACPI platform profile in sysfs, else nothing.
+/// Power modes without a model, in the order the model gives power modes an
+/// owner: asusd if it answers, then power-profiles-daemon, then the ACPI
+/// platform profile in sysfs, else nothing. Stops at the first that answers,
+/// and each question is bounded so a hung daemon can't stall the apply.
 async fn fallback_power_modes() -> (Option<Owner>, Vec<String>) {
-    let ppd = match zbus::Connection::system().await {
-        Ok(c) => oma_hw::ppd::state(&c).await.ok().map(|s| s.profiles.into_iter().map(|p| p.name).collect::<Vec<_>>()),
-        Err(_) => None,
-    };
-    let sysfs = oma_hw::sysfs::read_string("/sys/firmware/acpi/platform_profile_choices").map(|s| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>());
-    pick_fallback(ppd, sysfs)
-}
-
-fn pick_fallback(ppd: Option<Vec<String>>, sysfs: Option<Vec<String>>) -> (Option<Owner>, Vec<String>) {
-    match (ppd, sysfs) {
-        (Some(modes), _) if !modes.is_empty() => (Some(Owner::PowerProfilesDaemon), modes),
-        (_, Some(choices)) if !choices.is_empty() => (Some(Owner::Sysfs), choices),
+    async fn within<T, E>(f: impl std::future::Future<Output = Result<T, E>>) -> Option<T> {
+        tokio::time::timeout(Duration::from_secs(2), f).await.ok()?.ok()
+    }
+    if let Some(c) = within(zbus::Connection::system()).await {
+        if let Some(p) = within(PlatformProxy::new(&c)).await
+            && let Some(choices) = within(p.platform_profile_choices()).await.filter(|v| !v.is_empty())
+        {
+            return (Some(Owner::Asusd), choices.into_iter().map(|m| PlatformProfile::from_u32(m).label().to_string()).collect());
+        }
+        if let Some(s) = within(oma_hw::ppd::state(&c)).await.filter(|s| !s.profiles.is_empty()) {
+            return (Some(Owner::PowerProfilesDaemon), s.profiles.into_iter().map(|p| p.name).collect());
+        }
+    }
+    match oma_hw::sysfs::read_string("/sys/firmware/acpi/platform_profile_choices").map(|s| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>()) {
+        Some(choices) if !choices.is_empty() => (Some(Owner::Sysfs), choices),
         _ => (None, Vec::new()),
     }
 }
@@ -291,14 +327,6 @@ async fn write_attr(name: &str, value: i64, via_asusd: bool, ctl: &Controller) -
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fallback_prefers_ppd_then_sysfs() {
-        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(pick_fallback(Some(v(&["power-saver", "balanced"])), Some(v(&["quiet"]))), (Some(Owner::PowerProfilesDaemon), v(&["power-saver", "balanced"])));
-        assert_eq!(pick_fallback(Some(vec![]), Some(v(&["quiet", "performance"]))), (Some(Owner::Sysfs), v(&["quiet", "performance"])));
-        assert_eq!(pick_fallback(None, None), (None, vec![]));
-    }
 
     #[test]
     fn profile_without_limit_means_stock_limit() {

@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 
 /// Pause before a failed write, or an unconfirmed release, is tried again.
 pub const RETRY: Duration = Duration::from_secs(5);
+/// A curve whose temperature can't be read holds its duty this long, then
+/// runs at its top.
+pub const BLIND_LIMIT: Duration = Duration::from_secs(30);
 
 /// Temperatures the engine can read this tick.
 #[derive(Debug, Clone, Default)]
@@ -23,6 +26,10 @@ pub struct Temps {
     pub board: Option<f64>,
     /// (driver, label) → °C for arbitrary hwmon sources.
     pub hwmon: BTreeMap<(String, String), f64>,
+    /// The GPU is there but not being read right now: its temperature is
+    /// unknown, not absent, so curves that include it hold instead of
+    /// following the rest.
+    pub gpu_unread: bool,
 }
 
 impl Temps {
@@ -34,6 +41,7 @@ impl Temps {
             TempSource::Coolant => self.coolant,
             TempSource::Vrm => self.vrm,
             TempSource::Motherboard => self.board,
+            TempSource::CpuGpuMax if self.gpu_unread => None,
             TempSource::CpuGpuMax => match (self.cpu_tctl.or(self.cpu_package), self.gpu) {
                 (Some(a), Some(b)) => Some(a.max(b)),
                 (a, b) => a.or(b),
@@ -72,11 +80,13 @@ struct ChannelState {
     resend: bool,
     /// The hardware curve last programmed, so edits are sent again.
     curve: Option<FanCurve>,
+    /// Since when the curve's temperature hasn't been readable.
+    blind_since: Option<Instant>,
 }
 
 impl ChannelState {
     fn new(duty: f64, temp: f64) -> Self {
-        Self { last_duty: duty, last_temp: temp, resend: false, curve: None }
+        Self { last_duty: duty, last_temp: temp, resend: false, curve: None, blind_since: None }
     }
 }
 
@@ -149,7 +159,30 @@ impl FanEngine {
                     }
                 }
                 FanMode::Curve(curve) => {
-                    let Some(t) = temps.resolve(&curve.source) else { continue };
+                    let Some(t) = temps.resolve(&curve.source) else {
+                        // No reading: hold the duty a while, then run at the curve's
+                        // top, so a fan never idles through heat it can't see.
+                        if let Some(st) = self.state.get_mut(&fa.target) {
+                            let blind = now.saturating_duration_since(*st.blind_since.get_or_insert(now));
+                            let top = curve.points.iter().map(|p| p.1).fold(curve.min_duty, f64::max).clamp(floor, 100.0);
+                            // Sent again after a failed write too (`resend`), or a fan that
+                            // couldn't be set would stay where it was for the whole blind spell.
+                            if blind >= BLIND_LIMIT && (st.resend || (st.last_duty - top).abs() >= 0.5) {
+                                st.last_duty = top;
+                                st.resend = false;
+                                out.push(Command { target: fa.target.clone(), duty: Some(top), hw_curve: None });
+                            }
+                        }
+                        continue;
+                    };
+                    // Back from a hold that went to the top: the reading before the hold
+                    // means nothing now, so hysteresis mustn't compare against it (that
+                    // would pin the top); the ramp still brings the duty down.
+                    if let Some(st) = self.state.get_mut(&fa.target)
+                        && st.blind_since.take().is_some_and(|since| now.saturating_duration_since(since) >= BLIND_LIMIT)
+                    {
+                        st.last_temp = f64::INFINITY;
+                    }
                     let want = curve.duty_at(t).max(floor);
                     let st = self.state.entry(fa.target.clone()).or_insert(ChannelState::new(-1.0, t));
                     if st.resend || st.last_duty < 0.0 {
@@ -261,6 +294,69 @@ mod tests {
         assert_eq!(c.duty_at(20.0), 25.0); // min_duty
         assert!((c.duty_at(50.0) - 60.0).abs() < 1e-6);
         assert_eq!(c.duty_at(90.0), 100.0);
+    }
+
+    #[test]
+    fn a_curve_that_cannot_see_holds_then_runs_at_its_top() {
+        let mut e = FanEngine::new(Duration::from_secs(1));
+        let mut cooling = CoolingSettings::default();
+        cooling.set(FanTarget::new("superio:pwm2"), FanMode::Curve(FanCurve { points: vec![(30.0, 20.0), (80.0, 90.0)], ramp_s: 0.0, hysteresis_c: 0.0, min_duty: 0.0, source: TempSource::Gpu }));
+        let now = Instant::now();
+        let c = e.evaluate(&cooling, &Temps { gpu: Some(30.0), ..Default::default() }, now);
+        assert_eq!(c[0].duty, Some(20.0));
+        e.report(&c[0], true, now);
+        let blind = Temps { gpu_unread: true, ..Default::default() };
+        assert!(e.evaluate(&cooling, &blind, now + Duration::from_secs(1)).is_empty(), "holds");
+        assert!(e.evaluate(&cooling, &blind, now + Duration::from_secs(20)).is_empty(), "still holds");
+        let c = e.evaluate(&cooling, &blind, now + Duration::from_secs(32));
+        assert_eq!(c.first().and_then(|c| c.duty), Some(90.0), "the curve's top");
+        // 30.5 °C on (30, 20)→(80, 90) is 20.7 %.
+        let c = e.evaluate(&cooling, &Temps { gpu: Some(30.5), ..Default::default() }, now + Duration::from_secs(33));
+        assert!(c.first().and_then(|c| c.duty).is_some_and(|d| (d - 20.7).abs() < 1e-6), "back on the curve at once, not held at the top by hysteresis: {c:?}");
+    }
+
+    #[test]
+    fn recovery_from_a_blind_hold_ramps_down_despite_hysteresis() {
+        let mut e = FanEngine::new(Duration::from_secs(1));
+        let mut cooling = CoolingSettings::default();
+        cooling.set(FanTarget::new("superio:pwm2"), FanMode::Curve(FanCurve { points: vec![(30.0, 20.0), (80.0, 90.0)], ramp_s: 20.0, hysteresis_c: 3.0, min_duty: 0.0, source: TempSource::Gpu }));
+        let now = Instant::now();
+        let c = e.evaluate(&cooling, &Temps { gpu: Some(50.0), ..Default::default() }, now);
+        e.report(&c[0], true, now);
+        let blind = Temps { gpu_unread: true, ..Default::default() };
+        let _ = e.evaluate(&cooling, &blind, now + Duration::from_secs(1));
+        let c = e.evaluate(&cooling, &blind, now + Duration::from_secs(32));
+        assert_eq!(c.first().and_then(|c| c.duty), Some(90.0));
+        e.report(&c[0], true, now + Duration::from_secs(32));
+        // 51 °C is within the 3 °C margin of the 50 °C before the hold: that must
+        // not pin the top, and the 20 s ramp still applies (5 % per 1 s tick).
+        let c = e.evaluate(&cooling, &Temps { gpu: Some(51.0), ..Default::default() }, now + Duration::from_secs(33));
+        assert_eq!(c.first().and_then(|c| c.duty), Some(85.0), "one ramp step down from the top: {c:?}");
+    }
+
+    #[test]
+    fn a_failed_top_write_while_blind_is_retried() {
+        let mut e = FanEngine::new(Duration::from_secs(1));
+        let mut cooling = CoolingSettings::default();
+        cooling.set(FanTarget::new("superio:pwm2"), FanMode::Curve(FanCurve { points: vec![(30.0, 20.0), (80.0, 90.0)], ramp_s: 0.0, hysteresis_c: 0.0, min_duty: 0.0, source: TempSource::Gpu }));
+        let now = Instant::now();
+        let c = e.evaluate(&cooling, &Temps { gpu: Some(30.0), ..Default::default() }, now);
+        e.report(&c[0], true, now);
+        let blind = Temps { gpu_unread: true, ..Default::default() };
+        let _ = e.evaluate(&cooling, &blind, now + Duration::from_secs(1));
+        let c = e.evaluate(&cooling, &blind, now + Duration::from_secs(32));
+        assert_eq!(c.first().and_then(|c| c.duty), Some(90.0));
+        e.report(&c[0], false, now + Duration::from_secs(32));
+        let c = e.evaluate(&cooling, &blind, now + Duration::from_secs(32) + RETRY + Duration::from_secs(1));
+        assert_eq!(c.first().and_then(|c| c.duty), Some(90.0), "sent again after the backoff");
+    }
+
+    #[test]
+    fn a_max_curve_holds_while_its_gpu_is_unread() {
+        let unread = Temps { cpu_tctl: Some(50.0), gpu_unread: true, ..Default::default() };
+        assert_eq!(unread.resolve(&TempSource::CpuGpuMax), None);
+        let no_gpu = Temps { cpu_tctl: Some(50.0), ..Default::default() };
+        assert_eq!(no_gpu.resolve(&TempSource::CpuGpuMax), Some(50.0), "a machine with no GPU reading at all");
     }
 
     #[test]

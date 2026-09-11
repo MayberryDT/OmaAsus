@@ -115,13 +115,25 @@ pub struct SlashSnapshot {
 /// Gather everything detection reads. Blocking sysfs/HID/NVML work runs on a
 /// blocking thread; D-Bus services that aren't running are simply absent.
 pub async fn gather() -> RawInventory {
-    let (system, sysfs, pci_display, drm_connectors, nvidia) =
-        tokio::task::spawn_blocking(|| (detect::inventory(), snapshot_sysfs(), pci_display(), drm_connectors(), nvidia_infos())).await.expect("capture thread");
-    let (asusd, supergfx, ppd) = match zbus::Connection::system().await {
-        Ok(c) => (asusd_snapshot(&c).await, supergfx::state(&c).await.ok(), ppd::state(&c).await.ok()),
-        Err(_) => (None, None, None),
+    let (asusd, supergfx, ppd, gfx_running) = match zbus::Connection::system().await {
+        Ok(c) => (asusd_snapshot(&c).await, supergfx::state(&c).await.ok(), ppd::state(&c).await.ok(), supergfx::present(&c).await),
+        Err(_) => (None, None, None, false),
     };
+    // supergfxd kills whatever holds the dGPU while it switches.
+    let look = look_at_dgpu(gfx_running, supergfx.as_ref());
+    let (system, sysfs, pci_display, drm_connectors, nvidia) =
+        tokio::task::spawn_blocking(move || (detect::inventory(), snapshot_sysfs(), pci_display(), drm_connectors(), if look { nvidia_infos() } else { Vec::new() })).await.expect("capture thread");
     RawInventory { format: FORMAT, captured_at: chrono::Local::now().to_rfc3339(), system, asusd, supergfx, ppd, nvidia, pci_display, drm_connectors, sysfs }
+}
+
+/// Whether startup may open the dGPU: where supergfxd runs, only once it has
+/// said its mode uses the dGPU and nothing is switching (a stale pending
+/// switch only costs these details; the GPU page fetches them later).
+fn look_at_dgpu(gfx_running: bool, gfx: Option<&supergfx::GfxState>) -> bool {
+    match gfx {
+        Some(g) => g.mode.uses_dgpu() && g.pending_mode == supergfx::GfxMode::None,
+        None => !gfx_running,
+    }
 }
 
 /// NVML info per GPU, with the UUID redacted: fixtures are shared. Skipped
@@ -324,4 +336,20 @@ fn record(out: &mut BTreeMap<String, SysfsAttr>, path: &Path) {
     }
     let value = std::fs::read(path).ok().filter(|b| b.len() <= MAX_VALUE).and_then(|b| String::from_utf8(b).ok()).map(|s| s.trim_end().to_owned());
     out.insert(path.to_string_lossy().into_owned(), SysfsAttr { value, mode: meta.permissions().mode() & 0o777 });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use supergfx::{GfxMode, GfxState, UserActionRequired};
+
+    #[test]
+    fn startup_opens_the_dgpu_only_when_supergfxd_allows() {
+        let state = |mode, pending_mode| GfxState { version: "5.2.7".into(), mode, supported: vec![], vendor: "Nvidia".into(), power: None, pending_mode, pending_action: UserActionRequired::Nothing };
+        assert!(look_at_dgpu(false, None), "no supergfxd");
+        assert!(!look_at_dgpu(true, None), "supergfxd runs but didn't answer");
+        assert!(look_at_dgpu(true, Some(&state(GfxMode::Hybrid, GfxMode::None))));
+        assert!(!look_at_dgpu(true, Some(&state(GfxMode::Integrated, GfxMode::None))));
+        assert!(!look_at_dgpu(true, Some(&state(GfxMode::Hybrid, GfxMode::Integrated))), "a switch pending");
+    }
 }

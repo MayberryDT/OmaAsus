@@ -49,6 +49,13 @@ impl GfxMode {
             _ => Self::None,
         }
     }
+
+    /// Whether the dGPU is meant to be in use in this mode, and so may be
+    /// opened for readings. In the others supergfxd powers it off, and kills
+    /// whatever holds it when it does.
+    pub fn uses_dgpu(self) -> bool {
+        matches!(self, Self::Hybrid | Self::NvidiaNoModeset | Self::AsusMuxDgpu | Self::AsusEgpu)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -62,6 +69,36 @@ pub enum GfxPower {
     Unknown = 5,
 }
 
+impl GfxPower {
+    pub fn from_u32(v: u32) -> Self {
+        match v {
+            0 => Self::Active,
+            1 => Self::Suspended,
+            2 => Self::Off,
+            3 => Self::AsusDisabled,
+            4 => Self::AsusMuxDiscreet,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Whether the dGPU is on the bus in this state (awake or runtime-suspended);
+    /// `None` when supergfxd couldn't tell.
+    pub fn on_bus(self) -> Option<bool> {
+        match self {
+            Self::Active | Self::Suspended | Self::AsusMuxDiscreet => Some(true),
+            Self::Off | Self::AsusDisabled => Some(false),
+            Self::Unknown => None,
+        }
+    }
+}
+
+/// Whether a `NotifyGfxStatus` change means the dGPU came back on the bus
+/// (resume, a switch by something else). supergfxd reports every runtime-PM
+/// wake and sleep the same way; those don't count.
+pub fn dgpu_arrived(last: Option<GfxPower>, now: GfxPower) -> bool {
+    last.and_then(GfxPower::on_bus) == Some(false) && now.on_bus() == Some(true)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[repr(u32)]
 pub enum UserActionRequired {
@@ -73,6 +110,24 @@ pub enum UserActionRequired {
 }
 
 impl UserActionRequired {
+    pub fn from_u32(v: u32) -> Self {
+        match v {
+            0 => Self::Logout,
+            1 => Self::Reboot,
+            2 => Self::SwitchToIntegrated,
+            3 => Self::AsusEgpuDisable,
+            _ => Self::Nothing,
+        }
+    }
+
+    /// Whether a switch that answered this is running. supergfxd starts its
+    /// staged actions and then returns what the user must do (log out,
+    /// reboot), and those actions can run at once (a session without a display
+    /// manager, `always_reboot`). Only its refusals mean nothing happens.
+    pub fn switch_runs(self) -> bool {
+        !matches!(self, Self::SwitchToIntegrated | Self::AsusEgpuDisable)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Logout => "Log out to finish switching",
@@ -128,14 +183,7 @@ where
 
 pub async fn state(conn: &zbus::Connection) -> zbus::Result<GfxState> {
     let p = SuperGfxProxy::builder(conn).cache_properties(zbus::proxy::CacheProperties::No).build().await?;
-    let power = timed(p.power()).await.ok().map(|v| match v {
-        0 => GfxPower::Active,
-        1 => GfxPower::Suspended,
-        2 => GfxPower::Off,
-        3 => GfxPower::AsusDisabled,
-        4 => GfxPower::AsusMuxDiscreet,
-        _ => GfxPower::Unknown,
-    });
+    let power = timed(p.power()).await.ok().map(GfxPower::from_u32);
     Ok(GfxState {
         version: timed(p.version()).await?,
         mode: GfxMode::from_u32(timed(p.mode()).await?),
@@ -143,14 +191,30 @@ pub async fn state(conn: &zbus::Connection) -> zbus::Result<GfxState> {
         vendor: timed(p.vendor()).await?,
         power,
         pending_mode: GfxMode::from_u32(timed(p.pending_mode()).await?),
-        pending_action: match timed(p.pending_user_action()).await? {
-            0 => UserActionRequired::Logout,
-            1 => UserActionRequired::Reboot,
-            2 => UserActionRequired::SwitchToIntegrated,
-            3 => UserActionRequired::AsusEgpuDisable,
-            _ => UserActionRequired::Nothing,
-        },
+        pending_action: UserActionRequired::from_u32(timed(p.pending_user_action()).await?),
     })
+}
+
+/// supergfxd's mode and the mode it is switching to (`None` when no switch is
+/// running; a switch refused with a user action leaves it set).
+pub async fn switch_state(conn: &zbus::Connection) -> zbus::Result<(GfxMode, GfxMode)> {
+    let p = SuperGfxProxy::builder(conn).cache_properties(zbus::proxy::CacheProperties::No).build().await?;
+    Ok((GfxMode::from_u32(timed(p.mode()).await?), GfxMode::from_u32(timed(p.pending_mode()).await?)))
+}
+
+/// Whether a switch has finished: nothing pending, or the mode already the
+/// pending one (supergfxd leaves a same-mode request pending).
+pub fn switch_done(mode: GfxMode, pending: GfxMode) -> bool {
+    pending == GfxMode::None || pending == mode
+}
+
+/// Whether supergfxd is on the bus, whatever it answers.
+pub async fn present(conn: &zbus::Connection) -> bool {
+    let Ok(name) = zbus::names::BusName::try_from("org.supergfxctl.Daemon") else { return false };
+    match zbus::fdo::DBusProxy::new(conn).await {
+        Ok(d) => d.name_has_owner(name).await.unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 /// Request a mode switch. This can take a long time (the daemon waits for the
@@ -158,13 +222,7 @@ pub async fn state(conn: &zbus::Connection) -> zbus::Result<GfxState> {
 pub async fn set_mode(conn: &zbus::Connection, mode: GfxMode) -> zbus::Result<UserActionRequired> {
     let p = SuperGfxProxy::builder(conn).cache_properties(zbus::proxy::CacheProperties::No).build().await?;
     let r = tokio::time::timeout(Duration::from_secs(90), p.set_mode(mode as u32)).await.map_err(|_| zbus::Error::Failure("supergfxd SetMode timed out".into()))??;
-    Ok(match r {
-        0 => UserActionRequired::Logout,
-        1 => UserActionRequired::Reboot,
-        2 => UserActionRequired::SwitchToIntegrated,
-        3 => UserActionRequired::AsusEgpuDisable,
-        _ => UserActionRequired::Nothing,
-    })
+    Ok(UserActionRequired::from_u32(r))
 }
 
 /// A laptop has an internal panel connector; desktops don't. Switching a
@@ -226,6 +284,38 @@ mod tests {
         assert!(switch_blocker(GfxMode::Integrated, true, &[]).is_some());
         assert!(switch_blocker(GfxMode::Vfio, false, &["card0-DP-1".into()]).unwrap().contains("card0-DP-1"));
         assert_eq!(switch_blocker(GfxMode::Integrated, false, &[]), None);
+    }
+
+    #[test]
+    fn the_dgpu_is_in_use_only_in_modes_that_power_it() {
+        assert!(GfxMode::Hybrid.uses_dgpu() && GfxMode::AsusMuxDgpu.uses_dgpu() && GfxMode::NvidiaNoModeset.uses_dgpu() && GfxMode::AsusEgpu.uses_dgpu());
+        assert!(!GfxMode::Integrated.uses_dgpu() && !GfxMode::Vfio.uses_dgpu() && !GfxMode::None.uses_dgpu());
+    }
+
+    #[test]
+    fn only_coming_back_on_the_bus_counts_as_arriving() {
+        use GfxPower::*;
+        assert!(dgpu_arrived(Some(Off), Active) && dgpu_arrived(Some(AsusDisabled), Suspended));
+        assert!(!dgpu_arrived(Some(Suspended), Active), "a runtime-PM wake");
+        assert!(!dgpu_arrived(Some(Active), Suspended), "a runtime-PM sleep");
+        assert!(!dgpu_arrived(None, Active), "the first reading");
+        assert!(!dgpu_arrived(Some(Unknown), Active), "supergfxd couldn't tell before");
+    }
+
+    #[test]
+    fn a_switch_runs_unless_it_was_refused() {
+        use UserActionRequired::*;
+        assert!(Nothing.switch_runs() && Logout.switch_runs() && Reboot.switch_runs());
+        assert!(!SwitchToIntegrated.switch_runs() && !AsusEgpuDisable.switch_runs());
+        assert_eq!(UserActionRequired::from_u32(0), Logout);
+        assert_eq!(UserActionRequired::from_u32(4), Nothing);
+    }
+
+    #[test]
+    fn a_switch_is_done_when_nothing_is_pending_or_it_is_already_there() {
+        assert!(switch_done(GfxMode::Hybrid, GfxMode::None));
+        assert!(switch_done(GfxMode::Hybrid, GfxMode::Hybrid), "a same-mode request stays pending");
+        assert!(!switch_done(GfxMode::Hybrid, GfxMode::Integrated));
     }
 
     #[test]

@@ -299,6 +299,18 @@ pub fn sensor_hidden(driver: &str, label: &str) -> bool {
     }
 }
 
+/// The energy-performance preferences the cpufreq EPP interface defines
+/// (amd-pstate-epp and intel_pstate take the same strings; kernel docs).
+pub const EPP_STANDARD: [&str; 5] = ["default", "performance", "balance_performance", "balance_power", "power"];
+
+/// Under the `performance` governor both EPP drivers hold EPP at
+/// `performance` and reject other values; amd-pstate-epp then also lists only
+/// `performance` as available (kernel amd-pstate and intel_pstate docs;
+/// seen on the GA403WR).
+pub fn epp_pinned_by_governor(governor: &str) -> bool {
+    governor == "performance"
+}
+
 /// Firmware attributes that switch or power off GPUs. supergfxd owns them when it runs.
 pub fn is_gpu_switch(attr: &str) -> bool {
     matches!(attr, "dgpu_disable" | "gpu_mux_mode" | "egpu_enable")

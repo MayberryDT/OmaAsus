@@ -125,6 +125,8 @@ pub struct App {
     /// Number of the latest profile apply; older ones stop when they see it change.
     apply_generation: Arc<std::sync::atomic::AtomicU64>,
     last_reapply: Option<std::time::Instant>,
+    /// Deferred NVIDIA settings are waiting for the dGPU to be ready.
+    dgpu_wait: bool,
 }
 
 /// The overlay panel slides down from the bar when it opens and folds back up
@@ -134,6 +136,52 @@ enum OverlayPhase {
     Opening(std::time::Instant),
     Open,
     Closing(std::time::Instant),
+}
+
+/// How long OmaAsus stays away from the dGPU when a graphics switch starts or
+/// before it asks for one; waiting for the switch to finish extends it. (On
+/// the GA403WR a sleep hook's switch killed OmaAsus ~4 s after the system
+/// came back, for holding the dGPU.)
+const DGPU_HOLD_OFF: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Stay off the dGPU until supergfxd's switch has finished. It has no
+/// completion signal, so it is polled until nothing is pending or the mode is
+/// the pending one; an error keeps it waiting, and the wait is bounded.
+fn wait_for_switch() -> Task<Message> {
+    Task::perform(
+        async {
+            let started = std::time::Instant::now();
+            let conn = zbus::Connection::system().await.ok();
+            // A logout wait (30 s in supergfxd) plus the switch itself.
+            while started.elapsed() < std::time::Duration::from_secs(90) {
+                // Longer than a slow pass (two calls, 3 s timeout each), so the hold never lapses.
+                telemetry::hold_off_dgpu(std::time::Duration::from_secs(8));
+                if let Some(c) = &conn
+                    && let Ok((mode, pending)) = oma_hw::supergfx::switch_state(c).await
+                    && oma_hw::supergfx::switch_done(mode, pending)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        },
+        |()| Message::GraphicsSettled,
+    )
+}
+
+/// Whether supergfxd runs, and its mode when it answers: where it runs, the
+/// dGPU is left alone until it has said.
+fn probe_graphics() -> Task<Message> {
+    Task::perform(
+        async {
+            let Ok(c) = zbus::Connection::system().await else { return (false, None) };
+            if !oma_hw::supergfx::present(&c).await {
+                return (false, None);
+            }
+            (true, oma_hw::supergfx::state(&c).await.ok().map(|s| s.mode))
+        },
+        |(running, mode)| Message::GfxProbe(running, mode),
+    )
 }
 
 const OVERLAY_OPEN: std::time::Duration = std::time::Duration::from_millis(280);
@@ -237,6 +285,15 @@ pub enum Message {
     AutoApply(uuid::Uuid),
     /// Apply the active profile again (resume, charger, graphics switch).
     Reapply(&'static str),
+    /// A graphics switch supergfxd was running has finished (or stopped being awaited).
+    GraphicsSettled,
+    /// Whether supergfxd runs, and its mode when it answered (startup, and
+    /// again while it runs without answering).
+    GfxProbe(bool, Option<oma_hw::supergfx::GfxMode>),
+    GfxRetry,
+    /// Whether the dGPU became ready for NVIDIA settings an apply deferred.
+    DgpuReady(bool),
+    NvidiaApplied(String, crate::apply::Report),
     ProfileApplied(String, crate::apply::Origin, crate::apply::Report),
     System(crate::events::Event),
     ToggleOverlay,
@@ -336,11 +393,12 @@ impl App {
             overlay_anchor: Anchor::Right | Anchor::Top,
             apply_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_reapply: None,
+            dgpu_wait: false,
         };
         let inv = Task::perform(async { Arc::new(oma_hw::capture::gather().await) }, Message::Hardware);
         let ctl = Task::perform(async { oma_hw::helper::Controller::connect().await.has_helper() }, Message::Controller);
         // Only when the dGPU is awake: NVML would wake a sleeping one.
-        let nvi = Task::perform(async { tokio::task::spawn_blocking(|| oma_hw::nvidia::awake().then(|| oma_hw::nvidia::NvidiaGpu::open(0).and_then(|g| g.info()).ok().map(Arc::new)).flatten()).await.unwrap_or(None) }, Message::NvidiaInfo);
+        let nvi = Task::perform(async { tokio::task::spawn_blocking(|| (oma_hw::nvidia::awake() && telemetry::dgpu_open_ok()).then(|| oma_hw::nvidia::NvidiaGpu::open(0).and_then(|g| g.info()).ok().map(Arc::new)).flatten()).await.unwrap_or(None) }, Message::NvidiaInfo);
         let open = if overlay_only { Task::none() } else { Task::done(Message::OpenWindow) };
         let cc_cfg = app.config.coolercontrol.clone();
         let cc = Task::perform(
@@ -364,7 +422,7 @@ impl App {
             iced::font::load(theme::font::SANS_BYTES).map(|r| Message::FontLoaded(r.is_ok())),
             iced::font::load(theme::font::MONO_BYTES).map(|r| Message::FontLoaded(r.is_ok())),
         ]);
-        (app, Task::batch([fonts, inv, ctl, nvi, cc, rgb, asus, load_ppd(), open]))
+        (app, Task::batch([fonts, inv, ctl, nvi, cc, rgb, asus, load_ppd(), probe_graphics(), open]))
     }
 
     fn namespace() -> String {
@@ -632,6 +690,28 @@ impl App {
         }
     }
 
+    /// Wait (bounded) for the dGPU to be ready, then apply the active profile's
+    /// NVIDIA settings alone; never more than one wait at a time.
+    fn nvidia_when_ready(&mut self) -> Task<Message> {
+        if self.dgpu_wait || !self.active_profile().is_some_and(|p| p.gpu.nvidia.is_some()) {
+            return Task::none();
+        }
+        self.dgpu_wait = true;
+        Task::perform(
+            async {
+                // A switch (up to its 90 s wait) and the settle after it.
+                for _ in 0..120 {
+                    if telemetry::dgpu_open_ok() {
+                        return true;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                false
+            },
+            Message::DgpuReady,
+        )
+    }
+
     /// Why the graphics mode can't switch to `mode` right now, if anything.
     fn gfx_blocker(&self, mode: oma_hw::supergfx::GfxMode) -> Option<String> {
         let busy = self.snapshot.as_ref().and_then(|s| s.nvidia.as_ref()).is_some_and(|n| n.util_gpu.unwrap_or(0) > 10 || n.process_count.unwrap_or(0) > 0);
@@ -740,7 +820,11 @@ impl App {
                     self.toast_at = Some(std::time::Instant::now());
                     return Task::none();
                 }
+                // supergfxd kills whatever holds the dGPU while it switches: let go first.
+                telemetry::hold_off_dgpu(DGPU_HOLD_OFF);
                 run(Box::pin(async move {
+                    // The sampler lets go within a tick.
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
                     let c = zbus::Connection::system().await.map_err(|e| e.to_string())?;
                     let action = oma_hw::supergfx::set_mode(&c, mode).await.map_err(|e| e.to_string())?;
                     Ok(format!("Graphics → {}: {}", mode.label(), action.label()))
@@ -1439,7 +1523,7 @@ impl App {
                 let rgb_probe = if !self.rgb_server && snap.seq % 20 == 5 && oma_hw::rgb::server_running() { Self::rgb_refresh() } else { Task::none() };
                 // The dGPU woke after startup: fetch its details for the GPU page
                 // (the sampler only reports it while awake, so this doesn't wake it).
-                let nvidia_info = if snap.nvidia.is_some() && self.nvidia_info.is_none() && snap.seq % 20 == 1 {
+                let nvidia_info = if snap.nvidia.is_some() && self.nvidia_info.is_none() && snap.seq % 20 == 1 && telemetry::dgpu_open_ok() {
                     Task::perform(async { tokio::task::spawn_blocking(|| oma_hw::nvidia::NvidiaGpu::open(0).and_then(|g| g.info()).ok().map(Arc::new)).await.unwrap_or(None) }, Message::NvidiaInfo)
                 } else {
                     Task::none()
@@ -1548,6 +1632,12 @@ impl App {
                 Task::none()
             }
             Message::AsusLoaded(st) => {
+                // The graphics mode says whether the dGPU is meant to be in use. A
+                // pending mode doesn't say a switch runs (a refused one stays set),
+                // and a state that didn't load keeps the last answer.
+                if let Some(g) = &st.gfx {
+                    telemetry::allow_dgpu(g.mode.uses_dgpu());
+                }
                 self.asus = st;
                 Task::none()
             }
@@ -1641,17 +1731,76 @@ impl App {
                     });
                     self.toast_at = Some(std::time::Instant::now());
                 }
-                self.load_lights()
+                // NVIDIA settings skipped while the dGPU settled go in once it has.
+                let nvidia = if report.nvidia_deferred { self.nvidia_when_ready() } else { Task::none() };
+                Task::batch([self.load_lights(), nvidia])
             }
             Message::System(ev) => {
-                let reason = match ev {
-                    crate::events::Event::Resumed => "resume",
-                    crate::events::Event::Power(true) => "charger connected",
-                    crate::events::Event::Power(false) => "charger disconnected",
-                    crate::events::Event::Graphics => "graphics switch",
-                };
-                // Limits and graphics state moved with it: refresh the ASUS view too.
-                Task::batch([Task::perform(crate::pages::asus::load(), Message::AsusLoaded), Task::done(Message::Reapply(reason))])
+                use crate::events::Event;
+                // Limits and graphics state move with every one of these: refresh the ASUS view too.
+                let reload = Task::perform(crate::pages::asus::load(), Message::AsusLoaded);
+                match ev {
+                    // supergfxd kills whatever holds the dGPU while it switches: let go
+                    // now, and stay away until the switch has finished.
+                    Event::GraphicsSwitch => {
+                        telemetry::hold_off_dgpu(DGPU_HOLD_OFF);
+                        Task::batch([reload, wait_for_switch()])
+                    }
+                    // Its settings go in once it has settled, where the mode uses it;
+                    // nothing else in the profile depends on it.
+                    Event::DgpuArrived => {
+                        let used = self.asus.gfx.as_ref().is_none_or(|g| g.mode.uses_dgpu());
+                        Task::batch([reload, if used { self.nvidia_when_ready() } else { Task::none() }])
+                    }
+                    Event::Resumed => Task::batch([reload, Task::done(Message::Reapply("resume"))]),
+                    Event::Power(on) => Task::batch([reload, Task::done(Message::Reapply(if on { "charger connected" } else { "charger disconnected" }))]),
+                }
+            }
+            Message::GraphicsSettled => Task::batch([Task::perform(crate::pages::asus::load(), Message::AsusLoaded), Task::done(Message::Reapply("graphics switch"))]),
+            Message::GfxProbe(running, mode) => match (running, mode) {
+                (false, _) => {
+                    telemetry::no_graphics_manager();
+                    Task::none()
+                }
+                (true, Some(m)) => {
+                    telemetry::allow_dgpu(m.uses_dgpu());
+                    Task::none()
+                }
+                // supergfxd runs but didn't answer (starting, busy, or no permission):
+                // the dGPU is left alone; ask again.
+                (true, None) => Task::perform(tokio::time::sleep(std::time::Duration::from_secs(10)), |()| Message::GfxRetry),
+            },
+            Message::GfxRetry => {
+                if telemetry::dgpu_mode_known() {
+                    Task::none()
+                } else {
+                    probe_graphics()
+                }
+            }
+            Message::DgpuReady(ready) => {
+                self.dgpu_wait = false;
+                if !ready {
+                    // Where the mode stopped using the dGPU, or the profile now has no
+                    // NVIDIA settings, there is nothing to apply; otherwise say so.
+                    if telemetry::dgpu_gate() != telemetry::DgpuGateState::ModeOff && self.active_profile().is_some_and(|p| p.gpu.nvidia.is_some()) {
+                        tracing::warn!("deferred NVIDIA settings not applied: the dGPU didn't become ready");
+                        self.toast = Some(("NVIDIA settings weren't applied: the dGPU didn't become ready. Apply the profile again once it is".into(), false));
+                        self.toast_at = Some(std::time::Instant::now());
+                    }
+                    return Task::none();
+                }
+                let Some(p) = self.active_profile().filter(|p| p.gpu.nvidia.is_some()).cloned() else { return Task::none() };
+                let name = p.name.clone();
+                Task::perform(crate::apply::apply_nvidia(p), move |r| Message::NvidiaApplied(name.clone(), r))
+            }
+            Message::NvidiaApplied(name, report) => {
+                tracing::info!(profile = %name, applied = ?report.applied, skipped = ?report.skipped, failed = ?report.failed, "deferred NVIDIA settings");
+                if let Err(e) = report.summary(&name) {
+                    self.toast = Some((e, false));
+                    self.toast_at = Some(std::time::Instant::now());
+                }
+                // The gate closed again before it ran (another switch): wait once more.
+                if report.nvidia_deferred { self.nvidia_when_ready() } else { Task::none() }
             }
             Message::Applied(r) => {
                 self.toast = Some(match r {
@@ -1850,6 +1999,18 @@ impl App {
                 );
             }
             GpuMsg::Apply => {
+                // Opening the dGPU while supergfxd switches gets OmaAsus killed.
+                let why = match telemetry::dgpu_gate() {
+                    telemetry::DgpuGateState::Open => None,
+                    telemetry::DgpuGateState::Settling => Some("The dGPU is settling after a graphics change; apply again in a few seconds"),
+                    telemetry::DgpuGateState::ModeOff => Some("The graphics mode doesn't use the dGPU; change it on the ASUS page first"),
+                    telemetry::DgpuGateState::Unknown => Some("Waiting for supergfxd to report the graphics mode"),
+                };
+                if let Some(why) = why {
+                    self.toast = Some((why.into(), false));
+                    self.toast_at = Some(std::time::Instant::now());
+                    return Task::none();
+                }
                 let ctl_state = self.gpu_edit.clone();
                 self.gpu_dirty = false;
                 return Task::perform(

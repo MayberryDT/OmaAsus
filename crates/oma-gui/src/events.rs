@@ -1,9 +1,11 @@
-//! System events that call for re-applying the active profile: resume from
-//! sleep (logind), the charger connecting or disconnecting (limits differ on
-//! battery), and graphics mode switches (supergfxd).
+//! System events: resume from sleep (logind) and the charger connecting or
+//! disconnecting (limits differ on battery) call for re-applying the active
+//! profile; a graphics switch starting and the dGPU coming back on the bus
+//! (supergfxd) call for staying off the dGPU first.
 
 use iced::futures::stream::{self, BoxStream, Stream, StreamExt};
 use iced::futures::SinkExt;
+use oma_hw::supergfx::{dgpu_arrived, GfxPower, SuperGfxProxy, UserActionRequired};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -11,7 +13,12 @@ pub enum Event {
     Resumed,
     /// Mains power connected (`true`) or disconnected.
     Power(bool),
-    Graphics,
+    /// supergfxd has started a switch: anything but a refusal (a switch that
+    /// waits for a logout has started too, and runs at once without a display
+    /// manager). It kills whatever holds the dGPU meanwhile.
+    GraphicsSwitch,
+    /// The dGPU came back on the bus.
+    DgpuArrived,
 }
 
 #[zbus::proxy(interface = "org.freedesktop.login1.Manager", default_service = "org.freedesktop.login1", default_path = "/org/freedesktop/login1")]
@@ -48,12 +55,36 @@ pub fn stream() -> impl Stream<Item = Event> {
                 sources.push(sleep.filter_map(|s| async move { s.args().ok().filter(|a| !*a.start()).map(|_| Event::Resumed) }).boxed());
                 watching.push("resume");
             }
-            if let Ok(gfx) = async { oma_hw::supergfx::SuperGfxProxy::new(&conn).await?.receive_notify_gfx_status().await }.await {
-                sources.push(gfx.map(|_| Event::Graphics).boxed());
-                watching.push("graphics switches");
+            if let Ok(gfx) = SuperGfxProxy::new(&conn).await {
+                // supergfxd announces a switch right after starting it, with what the
+                // user must do; only its refusals mean nothing happens. The signal can
+                // lose a race with an early KillNvidia: the mode gate and the settle
+                // after the dGPU arrives are the main protection.
+                if let Ok(actions) = gfx.receive_notify_action().await {
+                    sources.push(actions.filter_map(|s| async move { s.args().ok().filter(|a| UserActionRequired::from_u32(*a.action()).switch_runs()).map(|_| Event::GraphicsSwitch) }).boxed());
+                    watching.push("graphics switches");
+                }
+                // Its status signal also reports every runtime-PM wake and sleep;
+                // only the dGPU coming back on the bus matters.
+                if let Ok(status) = gfx.receive_notify_gfx_status().await {
+                    // It sends changes only: start from what it says now, so the first change counts.
+                    let initial = oma_hw::supergfx::state(&conn).await.ok().and_then(|s| s.power);
+                    let arrivals = status
+                        .scan(initial, |last: &mut Option<GfxPower>, s| {
+                            let now = s.args().ok().map(|a| GfxPower::from_u32(*a.status()));
+                            let arrived = now.is_some_and(|n| dgpu_arrived(*last, n));
+                            if now.is_some() {
+                                *last = now;
+                            }
+                            std::future::ready(Some(arrived))
+                        })
+                        .filter_map(|arrived| async move { arrived.then_some(Event::DgpuArrived) });
+                    sources.push(arrivals.boxed());
+                    watching.push("dGPU arrivals");
+                }
             }
         }
-        tracing::info!(events = %watching.join(", "), "re-applying the active profile on system events");
+        tracing::info!(events = %watching.join(", "), "watching system events");
         let mut events = stream::select_all(sources);
         while let Some(e) = events.next().await {
             if out.send(e).await.is_err() {

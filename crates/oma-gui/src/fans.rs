@@ -141,6 +141,10 @@ impl FanBackend {
                 self.hid(hub, &report).await
             }
             Via::Nvidia { gpu, .. } => {
+                // supergfxd kills whatever holds the dGPU while it switches; the engine retries.
+                if !crate::telemetry::dgpu_open_ok() {
+                    return Err("the dGPU is settling after a graphics change".into());
+                }
                 let ctl = oma_hw::nvidia::NvidiaControl::fans_only(cmd.duty.map(|d| d.round() as u32));
                 let errs = self.ctl.nvidia_apply(*gpu, &ctl).await.map_err(|e| e.to_string())?;
                 errs.first().map(|(s, e)| Err(format!("{s}: {e}"))).unwrap_or(Ok(()))
@@ -267,10 +271,11 @@ pub fn temps_from(snap: &crate::telemetry::Snapshot) -> oma_hw::fanengine::Temps
     oma_hw::fanengine::Temps {
         cpu_tctl: snap.cpu.tctl_c,
         cpu_package: snap.cpu.tctl_c,
-        gpu: snap.gpu().and_then(|g| g.temp_c),
+        gpu: snap.curve_gpu_temp(),
         coolant: snap.coolant_c,
         vrm: snap.vrm_c,
         board: snap.board_c,
         hwmon: snap.hwmon_temps.iter().map(|((d, l), v)| ((d.clone(), l.clone()), *v)).collect(),
+        gpu_unread: snap.gpu_unread(),
     }
 }

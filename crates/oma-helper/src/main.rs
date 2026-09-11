@@ -22,6 +22,7 @@ mod polkit;
 use oma_hw::nvidia::{NvidiaControl, NvidiaGpu};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 use zbus::interface;
@@ -32,6 +33,9 @@ const BUS_NAME: &str = "com.omaasus.Helper1";
 const OBJ_PATH: &str = "/com/omaasus/Helper1";
 const ACTION_CONTROL: &str = "com.omaasus.helper.control";
 const ACTION_ADVANCED: &str = "com.omaasus.helper.advanced";
+/// Idle this long, with no client's fans to guard, and the helper exits.
+const IDLE_EXIT: std::time::Duration = std::time::Duration::from_secs(300);
+const IDLE_CHECK: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Classify a canonical (symlink-resolved) sysfs path into the polkit action
 /// guarding writes to it, or `None` if it may not be written at all.
@@ -177,6 +181,29 @@ struct Claims {
 
 type ClaimMap = Arc<Mutex<HashMap<String, Claims>>>;
 
+/// Work in progress (a call, a password prompt, a restore), counted while it
+/// lives so the idle exit waits for it.
+struct Busy(Arc<AtomicUsize>);
+
+impl Busy {
+    fn enter(count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count.clone())
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether the helper may exit: idle long enough, guarding no client's fans,
+/// and nothing in progress.
+fn may_exit(idle: std::time::Duration, guarding: bool, busy: usize) -> bool {
+    idle >= IDLE_EXIT && !guarding && busy == 0
+}
+
 fn sender(hdr: &Header<'_>) -> String {
     hdr.sender().map(|s| s.to_string()).unwrap_or_default()
 }
@@ -184,11 +211,28 @@ fn sender(hdr: &Header<'_>) -> String {
 struct Helper {
     conn: zbus::Connection,
     claims: ClaimMap,
+    /// When a client last asked for anything, for the idle exit.
+    last_active: Arc<Mutex<std::time::Instant>>,
+    /// Calls in progress (polkit may be asking for a password).
+    in_flight: Arc<AtomicUsize>,
+    /// Going idle: calls are refused from here on.
+    closing: Arc<AtomicBool>,
 }
 
 impl Helper {
     async fn authorize(&self, hdr: &Header<'_>, action: &str) -> zbus::fdo::Result<()> {
-        match polkit::check(&self.conn, &sender(hdr), action, true).await {
+        // Refused before anything is written or claimed; the caller tries once
+        // more and reaches a fresh helper.
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(zbus::fdo::Error::Failed(oma_hw::helper::RESTARTING.into()));
+        }
+        let checked = {
+            let _busy = Busy::enter(&self.in_flight);
+            polkit::check(&self.conn, &sender(hdr), action, true).await
+        };
+        // Idle time counts from the answer, not the question.
+        *self.last_active.lock().unwrap() = std::time::Instant::now();
+        match checked {
             Ok(true) => Ok(()),
             Ok(false) => Err(zbus::fdo::Error::AccessDenied(format!("polkit denied {action}"))),
             Err(e) => Err(zbus::fdo::Error::Failed(format!("polkit check failed: {e}"))),
@@ -225,7 +269,8 @@ impl Helper {
 
 /// Put back every fan setting a vanished client changed, so a crashed GUI
 /// never leaves fans at a fixed manual duty.
-fn restore(claims: &ClaimMap, client: &str) {
+async fn restore(conn: zbus::Connection, claims: ClaimMap, client: String) {
+    let client = client.as_str();
     let Some(c) = claims.lock().unwrap().remove(client) else { return };
     if c.sysfs.is_empty() && c.nvidia_fans.is_empty() {
         return;
@@ -237,6 +282,26 @@ fn restore(claims: &ClaimMap, client: &str) {
         match oma_hw::sysfs::write(&p, &v) {
             Ok(()) => info!(path = %p.display(), value = %v, "restored"),
             Err(e) => warn!(path = %p.display(), error = %e, "restore failed"),
+        }
+    }
+    if !c.nvidia_fans.is_empty() {
+        // supergfxd kills whatever holds the dGPU while it switches: wait for a
+        // running switch to finish (bounded: a refused one leaves its mode set).
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(90) {
+            match oma_hw::supergfx::switch_state(&conn).await {
+                Ok((mode, pending)) if oma_hw::supergfx::switch_done(mode, pending) => break,
+                // Not there at all: nothing to wait for.
+                Err(_) if !oma_hw::supergfx::present(&conn).await => break,
+                // Switching, or there but not answering (blocked mid-switch): wait.
+                _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+            }
+        }
+        // NVML would wake a sleeping GPU; one that is off has had its driver
+        // unloaded, and the driver starts with its fans on automatic.
+        if !oma_hw::nvidia::awake() {
+            info!("NVIDIA fans left to the driver: the GPU is asleep or off");
+            return;
         }
     }
     for index in c.nvidia_fans {
@@ -254,14 +319,21 @@ fn restore(claims: &ClaimMap, client: &str) {
 }
 
 /// Restore claims of any client that drops off the bus.
-async fn watch_clients(conn: zbus::Connection, claims: ClaimMap) -> anyhow::Result<()> {
+async fn watch_clients(conn: zbus::Connection, claims: ClaimMap, restoring: Arc<AtomicUsize>) -> anyhow::Result<()> {
     use futures_util::StreamExt;
     let dbus = zbus::fdo::DBusProxy::new(&conn).await?;
     let mut changes = dbus.receive_name_owner_changed().await?;
     while let Some(signal) = changes.next().await {
         let Ok(args) = signal.args() else { continue };
         if args.new_owner().is_none() {
-            restore(&claims, args.name().as_str());
+            // Its own task (restoring NVIDIA fans may wait for a graphics switch),
+            // counted from now so the idle exit waits for it.
+            let busy = Busy::enter(&restoring);
+            let (conn, claims, client) = (conn.clone(), claims.clone(), args.name().to_string());
+            tokio::spawn(async move {
+                restore(conn, claims, client).await;
+                drop(busy);
+            });
         }
     }
     Ok(())
@@ -379,12 +451,38 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?)).init();
     let conn = zbus::Connection::system().await?;
     let claims = ClaimMap::default();
-    conn.object_server().at(OBJ_PATH, Helper { conn: conn.clone(), claims: claims.clone() }).await?;
+    let last_active = Arc::new(Mutex::new(std::time::Instant::now()));
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let restoring = Arc::new(AtomicUsize::new(0));
+    let closing = Arc::new(AtomicBool::new(false));
+    conn.object_server().at(OBJ_PATH, Helper { conn: conn.clone(), claims: claims.clone(), last_active: last_active.clone(), in_flight: in_flight.clone(), closing: closing.clone() }).await?;
     conn.request_name(BUS_NAME).await?;
-    let watch_conn = conn.clone();
+    let (watch_conn, watch_claims, watch_restoring) = (conn.clone(), claims.clone(), restoring.clone());
     tokio::spawn(async move {
-        if let Err(e) = watch_clients(watch_conn, claims).await {
+        if let Err(e) = watch_clients(watch_conn, watch_claims, watch_restoring).await {
             warn!(error = %e, "client watchdog stopped; crashed clients' fans will not be restored");
+        }
+    });
+    // Exit when idle, so D-Bus starts a fresh helper next time: systemd works
+    // out device access (the NVIDIA device groups) when the helper starts, and
+    // one started before the NVIDIA driver loaded would never get it. Never
+    // while a client holds fans: the watchdog has to outlive that client.
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(IDLE_CHECK).await;
+            let idle = last_active.lock().unwrap().elapsed();
+            let guarding = claims.lock().unwrap().values().any(|c| !c.sysfs.is_empty() || !c.nvidia_fans.is_empty());
+            if may_exit(idle, guarding, in_flight.load(Ordering::SeqCst) + restoring.load(Ordering::SeqCst)) {
+                // Refuse calls from here on. Nothing awaits between the check and
+                // this, so none has started; a later one is refused before it
+                // writes or claims anything, and the caller's retry starts a
+                // fresh helper.
+                closing.store(true, Ordering::SeqCst);
+                info!(idle_s = idle.as_secs(), "idle; exiting (D-Bus starts the helper again when needed)");
+                // systemd stops a Type=dbus service once it gives up its name.
+                let _ = conn.release_name(BUS_NAME).await;
+                std::process::exit(0);
+            }
         }
     });
     info!("oma-helper {} ready on {BUS_NAME}", env!("CARGO_PKG_VERSION"));
@@ -395,6 +493,26 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_helper_exits_only_when_nothing_needs_it() {
+        let long = IDLE_EXIT + std::time::Duration::from_secs(1);
+        assert!(may_exit(long, false, 0));
+        assert!(!may_exit(long, true, 0), "a client's fans to guard");
+        assert!(!may_exit(long, false, 1), "a call, prompt or restore in progress");
+        assert!(!may_exit(IDLE_EXIT / 2, false, 0), "not idle long enough");
+    }
+
+    #[test]
+    fn busy_counts_while_it_lives() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let a = Busy::enter(&count);
+        let b = Busy::enter(&count);
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        drop(a);
+        drop(b);
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
 
     fn class(p: &str) -> Option<&'static str> {
         classify_canonical(Path::new(p))

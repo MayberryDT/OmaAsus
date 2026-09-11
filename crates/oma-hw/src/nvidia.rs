@@ -235,7 +235,8 @@ impl NvidiaGpu {
             out.push(("persistence".into(), d.set_persistent(p).map_err(|e| e.to_string())));
         }
         if ctl.reset_power_limit {
-            if let Ok(def) = d.power_management_limit_default() {
+            let range = d.power_management_limit_constraints().ok().map(|c| (c.min_limit, c.max_limit));
+            if let Some(def) = stock_limit_to_write(d.power_management_limit_default().ok(), d.power_management_limit().ok(), range) {
                 out.push(("power_limit_reset".into(), d.set_power_management_limit(def).map_err(|e| e.to_string())));
             }
         } else if let Some(w) = ctl.power_limit_w {
@@ -392,6 +393,24 @@ pub enum DgpuState {
     Active,
 }
 
+/// The stock limit (mW) to write when a profile names none: only where the
+/// limit can be set at all (laptop GPUs refuse any; some report min == max),
+/// where it isn't at stock already, and not when the current limit can't be
+/// read, so an apply never fails on a write that couldn't work.
+pub fn stock_limit_to_write(default_mw: Option<u32>, current_mw: Option<u32>, range_mw: Option<(u32, u32)>) -> Option<u32> {
+    match (default_mw, current_mw, range_mw) {
+        (Some(def), Some(cur), Some((lo, hi))) if lo < hi && cur != def => Some(def),
+        _ => None,
+    }
+}
+
+/// Whether runtime power management may suspend the dGPU (`power/control` is
+/// `auto`, as supergfxd's udev rule sets it). Where it may not, letting go of
+/// NVML so the GPU can sleep gains nothing.
+pub fn runtime_pm_allowed(device: Option<&std::path::Path>) -> bool {
+    device.is_some_and(|d| crate::sysfs::read_string(d.join("power/control")).as_deref() == Some("auto"))
+}
+
 /// The NVIDIA display device's PCI directory, if one is on the bus.
 pub fn pci_device() -> Option<std::path::PathBuf> {
     crate::sysfs::list_dir("/sys/bus/pci/devices")
@@ -430,6 +449,15 @@ mod power_tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(power_state(Some(&dir)), DgpuState::Absent, "gone from the bus");
         assert_eq!(power_state(None), DgpuState::Absent);
+    }
+
+    #[test]
+    fn stock_limit_is_written_only_where_it_can_and_must_be() {
+        assert_eq!(stock_limit_to_write(Some(115_000), Some(80_000), Some((5_000, 150_000))), Some(115_000));
+        assert_eq!(stock_limit_to_write(Some(115_000), Some(115_000), Some((5_000, 150_000))), None, "already stock");
+        assert_eq!(stock_limit_to_write(Some(80_000), None, Some((5_000, 150_000))), None, "current limit unreadable");
+        assert_eq!(stock_limit_to_write(Some(80_000), Some(95_000), Some((80_000, 80_000))), None, "no range to set");
+        assert_eq!(stock_limit_to_write(Some(80_000), Some(95_000), None), None, "constraints unreadable");
     }
 }
 
