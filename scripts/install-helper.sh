@@ -1,8 +1,38 @@
 #!/usr/bin/env bash
 # Installs the OmaAsus privileged helper: binary, D-Bus policy, polkit
 # actions, systemd unit and udev rules. Run as root (the GUI invokes it via
-# pkexec). Usage: install-helper.sh <path-to-oma-helper-binary> <data-dir>
+# pkexec). Usage:
+#   install-helper.sh <path-to-oma-helper-binary> <data-dir>
+#   install-helper.sh --uninstall   remove a hand-installed helper again
 set -euo pipefail
+
+FILES=(
+    /usr/bin/oma-helper
+    /usr/share/dbus-1/system.d/com.omaasus.Helper1.conf
+    /usr/share/dbus-1/system-services/com.omaasus.Helper1.service
+    /usr/share/polkit-1/actions/com.omaasus.helper.policy
+    /usr/lib/systemd/system/oma-helper.service
+    /usr/lib/udev/rules.d/70-omaasus.rules
+)
+
+if [[ ${1:-} == --uninstall ]]; then
+    # A hand install leaves files pacman does not own, and the package then
+    # refuses to install over them ("exists in filesystem"). Take them out
+    # first; the helper hands its fans back as it stops.
+    if command -v pacman >/dev/null && pacman -Qo /usr/bin/oma-helper >/dev/null 2>&1; then
+        echo "oma-helper is owned by a package; remove it with pacman instead" >&2
+        exit 1
+    fi
+    systemctl stop oma-helper.service 2>/dev/null || true
+    systemctl disable oma-helper.service 2>/dev/null || true
+    rm -f "${FILES[@]}"
+    systemctl daemon-reload
+    udevadm control --reload-rules || true
+    systemctl reload dbus.service 2>/dev/null || busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig 2>/dev/null || true
+    echo "oma-helper removed"
+    exit 0
+fi
+
 BIN="${1:?helper binary path}"
 DATA="${2:?data dir}"
 # put <mode> <source> <target>; a packaged install passes its own files

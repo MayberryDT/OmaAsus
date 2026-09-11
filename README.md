@@ -154,6 +154,12 @@ The release packages install it. With a source build, install it from **Settings
 sudo scripts/install-helper.sh target/release/oma-helper crates/oma-helper/data
 ```
 
+A helper installed this way is not owned by pacman, so the package later refuses to install over it. Before switching to the package, remove it:
+
+```sh
+sudo scripts/install-helper.sh --uninstall
+```
+
 That installs the binary, D-Bus policy, polkit actions, the systemd unit, and udev rules giving your user access to Aura, Ryujin, Lian Li and LiveDash devices. Run it again after pulling changes to the helper.
 
 D-Bus starts the helper when OmaAsus first needs it; it isn't enabled at boot. Its device access is granted by driver group (`char-nvidia`, `char-hidraw` and so on), which systemd resolves when the helper starts. So the helper exits after five idle minutes, never while it guards a client's fans, and the next start picks up an NVIDIA driver loaded in the meantime, as after a switch to Hybrid. If a profile ever reports `cannot open the GPU through NVML`, run `sudo systemctl restart oma-helper`.
