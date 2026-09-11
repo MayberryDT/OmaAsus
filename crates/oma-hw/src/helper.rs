@@ -11,6 +11,9 @@ use std::time::Duration;
 /// or claimed, and D-Bus starts a fresh helper for the next call.
 pub const RESTARTING: &str = "oma-helper is restarting; try again";
 
+/// The helper's name on the system bus.
+pub const BUS_NAME: &str = "com.omaasus.Helper1";
+
 /// The helper's D-Bus interface.
 pub const INTERFACE: &str = "com.omaasus.Helper1";
 
@@ -18,18 +21,27 @@ pub const INTERFACE: &str = "com.omaasus.Helper1";
 /// back: clients still running send theirs again.
 pub const HANDED_BACK: &str = "fans handed back";
 
-/// A call, tried once more when an exiting helper refused it.
+/// How D-Bus starts the helper; gone once the package is removed.
+pub const ACTIVATION_FILE: &str = "/usr/share/dbus-1/system-services/com.omaasus.Helper1.service";
+
+/// How long a call keeps trying while a stopping helper refuses it: the stop
+/// hands the fans back first, which takes a moment with NVIDIA fans.
+const RESTART_PATIENCE: Duration = Duration::from_secs(3);
+const RESTART_POLL: Duration = Duration::from_millis(300);
+
+/// A call, tried again while a stopping helper refuses it, until the helper
+/// D-Bus starts next answers.
 async fn again<T, F, Fut>(call: F) -> zbus::Result<T>
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = zbus::Result<T>>,
 {
-    match call().await {
-        Err(e) if e.to_string().contains(RESTARTING) => {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            call().await
+    let started = tokio::time::Instant::now();
+    loop {
+        match call().await {
+            Err(e) if e.to_string().contains(RESTARTING) && started.elapsed() < RESTART_PATIENCE => tokio::time::sleep(RESTART_POLL).await,
+            other => return other,
         }
-        other => other,
     }
 }
 
@@ -191,7 +203,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_refusal_from_an_exiting_helper_is_tried_again_once() {
+    fn a_call_gives_up_on_a_helper_that_keeps_refusing() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().start_paused(true).build().expect("runtime");
+        let calls = std::cell::Cell::new(0);
+        let r: zbus::Result<u32> = rt.block_on(again(|| {
+            calls.set(calls.get() + 1);
+            async { Err(zbus::Error::Failure(RESTARTING.into())) }
+        }));
+        assert!(r.is_err());
+        assert_eq!(calls.get(), 11, "every 300 ms for 3 s");
+    }
+
+    #[test]
+    fn a_refusal_from_a_stopping_helper_is_tried_again() {
         let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().expect("runtime");
         let calls = std::cell::Cell::new(0);
         let r: zbus::Result<u32> = rt.block_on(again(|| {

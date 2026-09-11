@@ -87,9 +87,16 @@ pub fn stream() -> impl Stream<Item = Event> {
                     watching.push("dGPU arrivals");
                 }
             }
-            // The helper says so once it has handed the fans back and let go of its
-            // name. Matched without a sender: it's usually not running when this starts.
-            let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).interface(oma_hw::helper::INTERFACE).and_then(|b| b.member("Changed")).map(|b| b.build());
+            // The helper says so as it stops, having handed the fans back. Anyone may
+            // send a signal on the system bus: the bus delivers only those sent by the
+            // owner of the helper's name, which only root can be (zbus leaves a
+            // well-known sender for the bus to check).
+            let rule = zbus::MatchRule::builder()
+                .msg_type(zbus::message::Type::Signal)
+                .sender(oma_hw::helper::BUS_NAME)
+                .and_then(|b| b.interface(oma_hw::helper::INTERFACE))
+                .and_then(|b| b.member("Changed"))
+                .map(|b| b.build());
             if let Ok(rule) = rule
                 && let Ok(messages) = zbus::MessageStream::for_match_rule(rule, &conn, None).await
             {

@@ -555,13 +555,14 @@ async fn main() -> anyhow::Result<()> {
     while restoring.load(Ordering::SeqCst) > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let _ = conn.release_name(BUS_NAME).await;
     // Clients still running send their fans again, which starts a fresh helper
-    // once this one has exited. Said after the name is gone, so their calls
-    // don't reach this one.
+    // once this one has exited (a call that lands sooner is refused and tried
+    // again). Said while the name is still ours: anyone may send a signal on
+    // the system bus, so clients only take this one from the name's owner.
     if handed_back && let Ok(emitter) = SignalEmitter::new(&conn, OBJ_PATH) {
         let _ = Helper::changed(&emitter, oma_hw::helper::HANDED_BACK.into()).await;
     }
+    let _ = conn.release_name(BUS_NAME).await;
     info!("stopped");
     Ok(())
 }

@@ -20,6 +20,7 @@ post_upgrade() {
 }
 
 post_remove() {
-    # Once the files are gone, so a running GUI can't start it again.
+    # Once the files are gone: a running GUI then finds no helper to start
+    # and leaves the fans to firmware.
     systemctl stop oma-helper.service 2>/dev/null || :
 }

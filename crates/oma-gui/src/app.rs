@@ -1745,7 +1745,10 @@ impl App {
                     // them again: that starts a fresh helper, which records the state
                     // they were handed back in.
                     Event::FansHandedBack => {
-                        self.fan_engine.resend_all();
+                        // Not after a package removal: there's no helper left to start.
+                        if std::path::Path::new(oma_hw::helper::ACTIVATION_FILE).exists() {
+                            self.fan_engine.resend_all();
+                        }
                         Task::none()
                     }
                     // supergfxd kills whatever holds the dGPU while it switches: let go
