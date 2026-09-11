@@ -34,10 +34,10 @@ It runs as a window, as a tray item, and as a layer-shell overlay you toggle ove
 | ROG laptops | Power modes, fan curves per power mode, charge limit, firmware attributes (PPT limits, dGPU TGP, panel overdrive and others), keyboard Aura lighting, the Slash LED bar | `asusd` 6.x. Where `asusd` doesn't manage the fan curves, one curve per fan is written to `asus_custom_fan_curve` (untested) |
 | Graphics modes | Integrated, Hybrid, VFIO, MUX and eGPU | `supergfxd` 5.x |
 | ASUS desktop boards | Nuvoton Super I/O fan headers, including the board's own Smart Fan IV curves; VRM, board and coolant temperatures; an experimental text readout on the LiveDash OLED of ROG Extreme boards | `nct6775`, `asus-ec-sensors`, HID |
-| Coolers | ROG Ryujin II pump and fans (the III should work through the same driver, untested); Lian Li UNI FAN hubs (the desktop's hub is tested, other models are recognised by product id but untested) | `rog_ryujin`, HID |
+| Coolers | ROG Ryujin II 360 pump and fans (tested on the EVA edition; the III should work through the same driver, untested); Lian Li UNI FAN hubs (the desktop's hub is tested, other models are recognised by product id but untested) | `asus_rog_ryujin`, HID |
 | NVIDIA GPUs | Power limit, clock lock and offsets (driver 555+), fans, persistence | NVML |
 | AMD GPUs | DPM performance level, temperature, power | amdgpu sysfs |
-| CPUs | Governor, EPP, SMT, frequency limits, temperatures; boost under `amd-pstate` and `acpi-cpufreq`; package power from an APU's reported power, or RAPL where the kernel lets users read it | cpufreq (`amd-pstate-epp`, `intel_pstate`), hwmon |
+| CPUs | Governor, EPP, SMT, frequency limits, temperatures; boost where the driver offers it (`amd-pstate` from Linux 6.11, `acpi-cpufreq`); package power from an APU's reported power, or RAPL where the kernel lets users read it | cpufreq (`amd-pstate`, `acpi-cpufreq`, `intel_pstate`), hwmon, powercap |
 | Everything else | Any hwmon fan output and sensor, OpenRGB devices, power modes | hwmon, the OpenRGB SDK, `power-profiles-daemon` or ACPI `platform_profile` |
 
 It also works with CoolerControl, which can own the fans instead, GameMode and Hyprland IPC. None of these is required. A machine without a component doesn't get its controls. The ROG Ally goes through the same `asusd` interfaces but hasn't been tried.
@@ -46,7 +46,7 @@ It also works with CoolerControl, which can own the fans instead, GameMode and H
 
 | Machine | Exercised |
 |---|---|
-| ROG Crosshair X670E Extreme, Ryzen 9 7950X, RTX 4090, ROG Ryujin II 360 EVA, Lian Li UNI FAN hub | With OmaAsus 0.1: board headers and Smart Fan IV curves, the Ryujin, the Lian Li hub, NVIDIA tuning, OpenRGB. The current build, with the hardware model, hasn't been run there yet. The EVA edition of the Ryujin needs `rog_ryujin` bound to it by hand |
+| ROG Crosshair X670E Extreme, Ryzen 9 7950X, RTX 4090, ROG Ryujin II 360 EVA, Lian Li UNI FAN hub | With OmaAsus 0.1: board headers and Smart Fan IV curves, the Ryujin, the Lian Li hub, NVIDIA tuning, OpenRGB. The current build, with the hardware model, hasn't been run there yet. This Ryujin's id isn't upstream, so the `asus_rog_ryujin` driver is bound to it by hand |
 | ROG Zephyrus G14 GA403WR, Ryzen AI 9 HX 370, Radeon 890M, NVIDIA dGPU | `asusd` fan curves written and read back with `oma curves`; keyboard Aura and the Slash bar written and read back with `oma lighting`; the amdgpu DPM level set from the Graphics page; firmware attributes and charge limit read and shown; `supergfxd` observed in Integrated mode. Not yet: power-mode, firmware-attribute and charge-limit writes, fan curves and lighting from the GUI, graphics switches, NVIDIA tuning |
 
 Both run Arch with Omarchy.
@@ -120,8 +120,8 @@ Binaries land in `target/release`: `omaasus` (GUI), `oma-helper` (root service),
 
 Fans, governors, GPU limits and lighting controllers sit behind root-only sysfs and hidraw nodes. OmaAsus ships one small system service, `com.omaasus.Helper1`, gated by two polkit actions:
 
-- `com.omaasus.helper.control`: fans, CPU governor, EPP, boost and limits, platform profile, firmware attributes and power limits, NVIDIA power limit, clock lock and fans, the amdgpu DPM level. Allowed for the active local session without a prompt, like power-profiles-daemon.
-- `com.omaasus.helper.advanced`: GPU clock offsets, SMT, the GPU MUX and dGPU switches, amdgpu overdrive, raw HID writes. Asks for your password; polkit then remembers it for a few minutes.
+- `com.omaasus.helper.control`: hwmon and NVIDIA fans, CPU governor, EPP, boost and limits, platform profile, firmware attributes and power limits, NVIDIA power limit and clock lock, the amdgpu DPM level. Allowed for the active local session without a prompt, like power-profiles-daemon.
+- `com.omaasus.helper.advanced`: GPU clock offsets, SMT, the GPU MUX, dGPU and eGPU switches, amdgpu overdrive, and HID writes, which include Lian Li hub fan speeds and the LiveDash. Asks for your password; polkit then remembers it for a few minutes.
 
 Install it from **Settings → Install helper** (runs through `pkexec`), or by hand:
 
@@ -203,7 +203,7 @@ oma watch [secs]              live CPU/GPU line
 oma curves [set | off]        asusd fan curves per power mode (writes)
 oma lighting [show]           asusd keyboard and Slash lighting (show writes)
 oma capture [dir]             save this machine's inventory as a test fixture
-oma nvidia | cpu | daemons | rgb [--set index]
+oma nvidia | cpu | daemons | rgb [--set index]   (rgb --set writes)
 ```
 
 ## Safety
