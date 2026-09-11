@@ -115,13 +115,17 @@ impl Snapshot {
     /// resting after idle), so curves hold their duty rather than follow
     /// another GPU's temperature; otherwise the GPU `gpu()` shows.
     pub fn curve_gpu_temp(&self) -> Option<f64> {
-        if let Some(n) = &self.nvidia {
-            return n.temp_c.map(f64::from);
+        match &self.nvidia {
+            Some(n) => n.temp_c.map(f64::from),
+            None if self.gpu_unread() => None,
+            None => self.gpu().and_then(|g| g.temp_c),
         }
-        match self.dgpu {
-            Some(DgpuState::Active) => None,
-            _ => self.gpu().and_then(|g| g.temp_c),
-        }
+    }
+
+    /// The dGPU is awake but not being read (settling, a switch running,
+    /// resting after idle): its temperature is unknown, not absent.
+    pub fn gpu_unread(&self) -> bool {
+        self.nvidia.is_none() && self.dgpu == Some(DgpuState::Active)
     }
 }
 
@@ -157,9 +161,31 @@ struct DgpuGate {
     arrived: Option<std::time::Instant>,
 }
 
+/// Why the dGPU may or may not be opened now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DgpuGateState {
+    Open,
+    /// The graphics mode uses it, but a switch is running or it just came onto the bus.
+    Settling,
+    /// The graphics mode doesn't use it.
+    ModeOff,
+    /// supergfxd runs but hasn't said which mode it is in.
+    Unknown,
+}
+
 impl DgpuGate {
+    fn state(&self, now: std::time::Instant) -> DgpuGateState {
+        match self.mode_ok {
+            None => DgpuGateState::Unknown,
+            Some(false) => DgpuGateState::ModeOff,
+            Some(true) if self.hold_until.is_none_or(|u| now >= u) && self.arrived.is_none_or(|t| now.duration_since(t) >= NVML_SETTLE) => DgpuGateState::Open,
+            Some(true) => DgpuGateState::Settling,
+        }
+    }
+
+    #[cfg(test)]
     fn open(&self, now: std::time::Instant) -> bool {
-        self.mode_ok == Some(true) && self.hold_until.is_none_or(|u| now >= u) && self.arrived.is_none_or(|t| now.duration_since(t) >= NVML_SETTLE)
+        self.state(now) == DgpuGateState::Open
     }
 }
 
@@ -185,9 +211,30 @@ pub fn hold_off_dgpu(d: Duration) {
     }
 }
 
+/// No graphics manager runs, so nothing will power the dGPU off under OmaAsus.
+/// Opens the gate unless the graphics mode has already had its say.
+pub fn no_graphics_manager() {
+    if let Ok(mut g) = GATE.lock()
+        && g.mode_ok.is_none()
+    {
+        tracing::info!("dGPU readings allowed: no graphics manager runs");
+        g.mode_ok = Some(true);
+    }
+}
+
+/// Whether the graphics mode's answer is known yet.
+pub fn dgpu_mode_known() -> bool {
+    GATE.lock().is_ok_and(|g| g.mode_ok.is_some())
+}
+
+/// Why the dGPU may or may not be opened now (a poisoned lock reads as unknown: closed).
+pub fn dgpu_gate() -> DgpuGateState {
+    GATE.lock().map(|g| g.state(std::time::Instant::now())).unwrap_or(DgpuGateState::Unknown)
+}
+
 /// Whether anything in OmaAsus may open the dGPU now.
 pub fn dgpu_open_ok() -> bool {
-    GATE.lock().is_ok_and(|g| g.open(std::time::Instant::now()))
+    dgpu_gate() == DgpuGateState::Open
 }
 
 /// When the dGPU counts as newly arrived: it came onto the bus after OmaAsus
@@ -203,7 +250,7 @@ fn next_arrival(was_present: Option<bool>, present: bool, arrived: Option<std::t
 /// Idle this long with a handle open, and the handle is let go.
 const NVML_IDLE: Duration = Duration::from_secs(5);
 /// A dGPU that comes onto the bus while OmaAsus runs is left alone this long first.
-pub const NVML_SETTLE: Duration = Duration::from_secs(15);
+const NVML_SETTLE: Duration = Duration::from_secs(15);
 /// After letting go, stay away this long so runtime PM can suspend the GPU.
 const NVML_REST: Duration = Duration::from_secs(20);
 /// How often to look for an NVIDIA GPU that isn't on the bus.
@@ -251,9 +298,11 @@ impl NvidiaSource {
         }
         let t = self.gpu.as_ref()?.telemetry().ok()?;
         let busy = t.util_gpu.unwrap_or(0) > 0 || t.process_count.unwrap_or(0) > 0;
+        // Idle, it is let go so runtime PM can suspend it; where runtime PM may
+        // not (a desktop card), it is read without pause.
         if busy {
             self.idle_since = None;
-        } else if now.duration_since(*self.idle_since.get_or_insert(now)) >= NVML_IDLE {
+        } else if now.duration_since(*self.idle_since.get_or_insert(now)) >= NVML_IDLE && oma_hw::nvidia::runtime_pm_allowed(self.device.as_deref()) {
             self.gpu = None;
             self.idle_since = None;
             self.rest_until = Some(now + NVML_REST);
@@ -553,6 +602,19 @@ mod tests {
         assert!(DgpuGate { hold_until: Some(ago(1)), ..known }.open(now), "the switch is over");
         assert!(!DgpuGate { arrived: Some(ago(3)), ..known }.open(now), "just came onto the bus");
         assert!(DgpuGate { arrived: Some(ago(20)), ..known }.open(now), "settled");
+        assert_eq!(DgpuGate::default().state(now), DgpuGateState::Unknown);
+        assert_eq!(DgpuGate { mode_ok: Some(false), ..known }.state(now), DgpuGateState::ModeOff);
+        assert_eq!(DgpuGate { arrived: Some(ago(3)), ..known }.state(now), DgpuGateState::Settling);
+    }
+
+    #[test]
+    fn curves_never_follow_another_gpu_for_an_unread_dgpu() {
+        let igpu = AmdGpuTelemetry { edge_c: Some(45.0), ..Default::default() };
+        let awake_unread = Snapshot { amd: Some(igpu), amd_integrated: true, dgpu: Some(DgpuState::Active), ..Default::default() };
+        assert!(awake_unread.gpu_unread());
+        assert_eq!(awake_unread.curve_gpu_temp(), None);
+        let off = Snapshot { dgpu: Some(DgpuState::Absent), ..awake_unread.clone() };
+        assert_eq!(off.curve_gpu_temp(), Some(45.0), "with the dGPU off the iGPU is the GPU");
     }
 
     #[test]

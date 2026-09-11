@@ -276,5 +276,6 @@ pub fn temps_from(snap: &crate::telemetry::Snapshot) -> oma_hw::fanengine::Temps
         vrm: snap.vrm_c,
         board: snap.board_c,
         hwmon: snap.hwmon_temps.iter().map(|((d, l), v)| ((d.clone(), l.clone()), *v)).collect(),
+        gpu_unread: snap.gpu_unread(),
     }
 }

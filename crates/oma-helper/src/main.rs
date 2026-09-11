@@ -22,6 +22,7 @@ mod polkit;
 use oma_hw::nvidia::{NvidiaControl, NvidiaGpu};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 use zbus::interface;
@@ -180,6 +181,29 @@ struct Claims {
 
 type ClaimMap = Arc<Mutex<HashMap<String, Claims>>>;
 
+/// Work in progress (a call, a password prompt, a restore), counted while it
+/// lives so the idle exit waits for it.
+struct Busy(Arc<AtomicUsize>);
+
+impl Busy {
+    fn enter(count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count.clone())
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether the helper may exit: idle long enough, guarding no client's fans,
+/// and nothing in progress.
+fn may_exit(idle: std::time::Duration, guarding: bool, busy: usize) -> bool {
+    idle >= IDLE_EXIT && !guarding && busy == 0
+}
+
 fn sender(hdr: &Header<'_>) -> String {
     hdr.sender().map(|s| s.to_string()).unwrap_or_default()
 }
@@ -189,12 +213,19 @@ struct Helper {
     claims: ClaimMap,
     /// When a client last asked for anything, for the idle exit.
     last_active: Arc<Mutex<std::time::Instant>>,
+    /// Calls in progress (polkit may be asking for a password).
+    in_flight: Arc<AtomicUsize>,
 }
 
 impl Helper {
     async fn authorize(&self, hdr: &Header<'_>, action: &str) -> zbus::fdo::Result<()> {
+        let checked = {
+            let _busy = Busy::enter(&self.in_flight);
+            polkit::check(&self.conn, &sender(hdr), action, true).await
+        };
+        // Idle time counts from the answer, not the question.
         *self.last_active.lock().unwrap() = std::time::Instant::now();
-        match polkit::check(&self.conn, &sender(hdr), action, true).await {
+        match checked {
             Ok(true) => Ok(()),
             Ok(false) => Err(zbus::fdo::Error::AccessDenied(format!("polkit denied {action}"))),
             Err(e) => Err(zbus::fdo::Error::Failed(format!("polkit check failed: {e}"))),
@@ -250,8 +281,10 @@ async fn restore(conn: zbus::Connection, claims: ClaimMap, client: String) {
         // supergfxd kills whatever holds the dGPU while it switches: wait for a
         // running switch to finish (bounded: a refused one leaves its mode set).
         for _ in 0..180 {
-            match oma_hw::supergfx::pending_mode(&conn).await {
-                Ok(oma_hw::supergfx::GfxMode::None) | Err(_) => break,
+            match oma_hw::supergfx::switch_state(&conn).await {
+                // No supergfxd, or nothing (left) to wait for.
+                Err(_) => break,
+                Ok((mode, pending)) if oma_hw::supergfx::switch_done(mode, pending) => break,
                 Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
             }
         }
@@ -277,15 +310,21 @@ async fn restore(conn: zbus::Connection, claims: ClaimMap, client: String) {
 }
 
 /// Restore claims of any client that drops off the bus.
-async fn watch_clients(conn: zbus::Connection, claims: ClaimMap) -> anyhow::Result<()> {
+async fn watch_clients(conn: zbus::Connection, claims: ClaimMap, restoring: Arc<AtomicUsize>) -> anyhow::Result<()> {
     use futures_util::StreamExt;
     let dbus = zbus::fdo::DBusProxy::new(&conn).await?;
     let mut changes = dbus.receive_name_owner_changed().await?;
     while let Some(signal) = changes.next().await {
         let Ok(args) = signal.args() else { continue };
         if args.new_owner().is_none() {
-            // Its own task: restoring NVIDIA fans may wait for a graphics switch.
-            tokio::spawn(restore(conn.clone(), claims.clone(), args.name().to_string()));
+            // Its own task (restoring NVIDIA fans may wait for a graphics switch),
+            // counted from now so the idle exit waits for it.
+            let busy = Busy::enter(&restoring);
+            let (conn, claims, client) = (conn.clone(), claims.clone(), args.name().to_string());
+            tokio::spawn(async move {
+                restore(conn, claims, client).await;
+                drop(busy);
+            });
         }
     }
     Ok(())
@@ -404,12 +443,13 @@ async fn main() -> anyhow::Result<()> {
     let conn = zbus::Connection::system().await?;
     let claims = ClaimMap::default();
     let last_active = Arc::new(Mutex::new(std::time::Instant::now()));
-    conn.object_server().at(OBJ_PATH, Helper { conn: conn.clone(), claims: claims.clone(), last_active: last_active.clone() }).await?;
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let restoring = Arc::new(AtomicUsize::new(0));
+    conn.object_server().at(OBJ_PATH, Helper { conn: conn.clone(), claims: claims.clone(), last_active: last_active.clone(), in_flight: in_flight.clone() }).await?;
     conn.request_name(BUS_NAME).await?;
-    let watch_conn = conn.clone();
-    let watch_claims = claims.clone();
+    let (watch_conn, watch_claims, watch_restoring) = (conn.clone(), claims.clone(), restoring.clone());
     tokio::spawn(async move {
-        if let Err(e) = watch_clients(watch_conn, watch_claims).await {
+        if let Err(e) = watch_clients(watch_conn, watch_claims, watch_restoring).await {
             warn!(error = %e, "client watchdog stopped; crashed clients' fans will not be restored");
         }
     });
@@ -422,8 +462,12 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep(IDLE_CHECK).await;
             let idle = last_active.lock().unwrap().elapsed();
             let guarding = claims.lock().unwrap().values().any(|c| !c.sysfs.is_empty() || !c.nvidia_fans.is_empty());
-            if idle >= IDLE_EXIT && !guarding {
+            if may_exit(idle, guarding, in_flight.load(Ordering::SeqCst) + restoring.load(Ordering::SeqCst)) {
                 info!(idle_s = idle.as_secs(), "idle; exiting (D-Bus starts the helper again when needed)");
+                // Hand the name back first, so a new call starts a fresh helper
+                // rather than reaching this one as it goes.
+                let _ = conn.release_name(BUS_NAME).await;
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 std::process::exit(0);
             }
         }
@@ -436,6 +480,26 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_helper_exits_only_when_nothing_needs_it() {
+        let long = IDLE_EXIT + std::time::Duration::from_secs(1);
+        assert!(may_exit(long, false, 0));
+        assert!(!may_exit(long, true, 0), "a client's fans to guard");
+        assert!(!may_exit(long, false, 1), "a call, prompt or restore in progress");
+        assert!(!may_exit(IDLE_EXIT / 2, false, 0), "not idle long enough");
+    }
+
+    #[test]
+    fn busy_counts_while_it_lives() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let a = Busy::enter(&count);
+        let b = Busy::enter(&count);
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        drop(a);
+        drop(b);
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
 
     fn class(p: &str) -> Option<&'static str> {
         classify_canonical(Path::new(p))

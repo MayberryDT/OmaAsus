@@ -13,8 +13,9 @@ pub enum Event {
     Resumed,
     /// Mains power connected (`true`) or disconnected.
     Power(bool),
-    /// supergfxd is switching modes now (not a switch waiting for a logout, or
-    /// refused): it kills whatever holds the dGPU meanwhile.
+    /// supergfxd has started a switch: anything but a refusal (a switch that
+    /// waits for a logout has started too, and runs at once without a display
+    /// manager). It kills whatever holds the dGPU meanwhile.
     GraphicsSwitch,
     /// The dGPU came back on the bus.
     DgpuArrived,
@@ -55,17 +56,21 @@ pub fn stream() -> impl Stream<Item = Event> {
                 watching.push("resume");
             }
             if let Ok(gfx) = SuperGfxProxy::new(&conn).await {
-                // supergfxd announces a switch before it touches the dGPU, with what
-                // the user must do first; `Nothing` means it runs now.
+                // supergfxd announces a switch right after starting it, with what the
+                // user must do; only its refusals mean nothing happens. The signal can
+                // lose a race with an early KillNvidia: the mode gate and the settle
+                // after the dGPU arrives are the main protection.
                 if let Ok(actions) = gfx.receive_notify_action().await {
-                    sources.push(actions.filter_map(|s| async move { s.args().ok().filter(|a| *a.action() == UserActionRequired::Nothing as u32).map(|_| Event::GraphicsSwitch) }).boxed());
+                    sources.push(actions.filter_map(|s| async move { s.args().ok().filter(|a| UserActionRequired::from_u32(*a.action()).switch_runs()).map(|_| Event::GraphicsSwitch) }).boxed());
                     watching.push("graphics switches");
                 }
                 // Its status signal also reports every runtime-PM wake and sleep;
                 // only the dGPU coming back on the bus matters.
                 if let Ok(status) = gfx.receive_notify_gfx_status().await {
+                    // It sends changes only: start from what it says now, so the first change counts.
+                    let initial = oma_hw::supergfx::state(&conn).await.ok().and_then(|s| s.power);
                     let arrivals = status
-                        .scan(None, |last: &mut Option<GfxPower>, s| {
+                        .scan(initial, |last: &mut Option<GfxPower>, s| {
                             let now = s.args().ok().map(|a| GfxPower::from_u32(*a.status()));
                             let arrived = now.is_some_and(|n| dgpu_arrived(*last, n));
                             if now.is_some() {
