@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Builds the portable release archive from release binaries:
 #   make-tarball.sh <bindir> <outdir>
-# The binaries may link only glibc, libgcc and libudev; Wayland, xkbcommon,
-# Vulkan and NVML are loaded at runtime. Prints `glibc=<oldest version the
-# binaries run on>` for $GITHUB_OUTPUT.
+# The binaries may depend directly only on glibc, libgcc and libudev (what
+# libudev pulls in is the system's business: Ubuntu's links libcap); Wayland,
+# xkbcommon, Vulkan and NVML are loaded at runtime. Prints `glibc=<oldest
+# version the binaries run on>` for $GITHUB_OUTPUT.
 set -euo pipefail
 bin="${1:?directory with omaasus, oma and oma-helper}"
 out="${2:?output directory}"
@@ -12,9 +13,9 @@ version="$("$src/packaging/version.sh")"
 name="omaasus-$version-x86_64-linux"
 binaries=("$bin/omaasus" "$bin/oma" "$bin/oma-helper")
 
-allowed='^(linux-vdso\.so\.1|libudev\.so\.1|libgcc_s\.so\.1|libm\.so\.6|libc\.so\.6|/lib64/ld-linux-x86-64\.so\.2)$'
+allowed='^(libudev\.so\.1|libgcc_s\.so\.1|libc\.so\.6|libm\.so\.6|libdl\.so\.2|libpthread\.so\.0|librt\.so\.1|ld-linux-x86-64\.so\.2)$'
 for b in "${binaries[@]}"; do
-    extra="$(ldd "$b" | awk '{print $1}' | grep -Ev "$allowed" || true)"
+    extra="$(objdump -p "$b" | awk '$1 == "NEEDED" {print $2}' | grep -Ev "$allowed" || true)"
     if [[ -n $extra ]]; then
         echo "$b links libraries the archive can't count on:" $extra >&2
         exit 1
