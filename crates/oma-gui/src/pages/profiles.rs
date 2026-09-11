@@ -148,10 +148,10 @@ fn summary(pr: &Profile) -> String {
     if let Some(c) = &pr.cpu.control {
         parts.push(c.epp.clone().unwrap_or_else(|| c.governor.clone()));
     }
-    if let Some(n) = &pr.gpu.nvidia {
-        if let Some(w) = n.power_limit_w {
-            parts.push(format!("{w} W"));
-        }
+    if let Some(n) = &pr.gpu.nvidia
+        && let Some(w) = n.power_limit_w
+    {
+        parts.push(format!("{w} W"));
     }
     if !pr.cooling.fans.is_empty() {
         parts.push(format!("{} fans", pr.cooling.fans.len()));

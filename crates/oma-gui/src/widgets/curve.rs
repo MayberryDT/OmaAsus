@@ -62,7 +62,7 @@ impl<M: Clone> canvas::Program<M> for CurveEditor<'_, M> {
         let hit = |p: Point| self.points.iter().position(|&(t, d)| to_px(r, t, d).distance(p) < 12.0);
         match event {
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-                let Some(p) = pos else { return None };
+                let p = pos?;
                 if let Some(i) = state.drag {
                     if !self.editable {
                         return None;

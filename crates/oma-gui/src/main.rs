@@ -2,9 +2,9 @@
 //!
 //! Entry points:
 //! * `omaasus`            — start the daemon (with a tray item in the bar) and
-//!                          open the main window.
+//!   open the main window.
 //! * `omaasus --overlay`  — start in the background; the overlay is toggled
-//!                          with `omaasus toggle` (bind it to a Hyprland key).
+//!   with `omaasus toggle` (bind it to a Hyprland key).
 //! * `omaasus toggle|show|hide|window|quit` — talk to a running instance.
 //!   `omaasus window` starts the app when nothing is running (desktop entry).
 

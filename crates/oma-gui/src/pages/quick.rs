@@ -322,10 +322,10 @@ fn short_cpu(model: &str) -> String {
 /// lspci puts the marketing name last in brackets ("… [Radeon 880M / 890M] (rev c1)");
 /// NVML names start with the vendor ("NVIDIA GeForce RTX …").
 fn short_gpu(name: &str) -> String {
-    if let Some((_, rest)) = name.rsplit_once('[') {
-        if let Some((n, _)) = rest.split_once(']') {
-            return n.to_string();
-        }
+    if let Some((_, rest)) = name.rsplit_once('[')
+        && let Some((n, _)) = rest.split_once(']')
+    {
+        return n.to_string();
     }
     name.trim_start_matches("NVIDIA ").trim_start_matches("GeForce ").to_string()
 }

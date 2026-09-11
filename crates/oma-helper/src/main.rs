@@ -258,10 +258,10 @@ impl Helper {
             return;
         }
         for p in [duty, enable] {
-            if !c.sysfs.contains_key(&p) {
-                if let Some(v) = oma_hw::sysfs::read_string(&p) {
-                    c.sysfs.insert(p, v);
-                }
+            if !c.sysfs.contains_key(&p)
+                && let Some(v) = oma_hw::sysfs::read_string(&p)
+            {
+                c.sysfs.insert(p, v);
             }
         }
     }

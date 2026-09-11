@@ -171,7 +171,7 @@ pub fn cpu_info() -> CpuInfo {
     let logical_cpus = cpus.len() as u32;
     let siblings: u32 = field("siblings").and_then(|s| s.parse().ok()).unwrap_or(logical_cpus);
     let cores: u32 = field("cpu cores").and_then(|s| s.parse().ok()).unwrap_or(logical_cpus);
-    let threads_per_core = if cores > 0 { (siblings / cores).max(1) } else { 1 };
+    let threads_per_core = siblings.checked_div(cores).map_or(1, |t| t.max(1));
     let split = |p: PathBuf| -> Vec<String> {
         sysfs::read_string(p)
             .map(|s| s.split_whitespace().map(str::to_owned).collect())

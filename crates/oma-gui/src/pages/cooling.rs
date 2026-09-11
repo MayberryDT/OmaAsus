@@ -135,8 +135,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
             let live_duty = app.fan_engine_duty(&target);
             let floor = app.fan_engine.floor(&target);
             let body: Element<Message> = match mode {
-                FanMode::Auto if takes_duty => widgets::dim(p, "Firmware / driver default behaviour. Pick Fixed or Curve to take control.").into(),
-                FanMode::Auto => widgets::dim(p, "Runs the firmware's own curve for the current power mode. Pick Firmware curve to set this profile's own.").into(),
+                FanMode::Auto if takes_duty => widgets::dim(p, "Firmware / driver default behaviour. Pick Fixed or Curve to take control."),
+                FanMode::Auto => widgets::dim(p, "Runs the firmware's own curve for the current power mode. Pick Firmware curve to set this profile's own."),
                 FanMode::Fixed(d) => column![
                     row![widgets::eyebrow(p, "Duty"), widgets::hfill(), widgets::mono(p, format!("{d:.0}%"), size::SMALL)],
                     slider(floor..=100.0, d.max(floor), |v| Message::Cooling(CoolingMsg::Fixed(v))).step(1.0).style(slider_style(p)),
