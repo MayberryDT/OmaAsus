@@ -20,11 +20,20 @@ MemoryDenyWriteExecute=no
 NoNewPrivileges=yes
 PrivateTmp=yes
 ReadWritePaths=/sys /dev
+# Device access by driver group, not by node path: a path such as /dev/nvidia0
+# is resolved when the unit starts, and at boot the NVIDIA nodes can appear
+# seconds after the driver loads. A missing path silently drops the rule and
+# every NVML call then fails with "internal driver error". Groups come from
+# /proc/devices and exist as soon as the module is loaded.
 DeviceAllow=char-hidraw rw
-DeviceAllow=/dev/nvidiactl rw
-DeviceAllow=/dev/nvidia0 rw
-DeviceAllow=/dev/nvidia-uvm rw
+DeviceAllow=char-nvidia rw
+DeviceAllow=char-nvidiactl rw
+DeviceAllow=char-nvidia-modeset rw
+DeviceAllow=char-nvidia-uvm rw
+DeviceAllow=char-nvidia-caps rw
 CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_RAWIO CAP_DAC_OVERRIDE
 
-[Install]
-WantedBy=multi-user.target
+# No [Install] section on purpose: the helper is started by D-Bus activation
+# (com.omaasus.Helper1.service) the first time OmaAsus asks for it, once the
+# desktop and the graphics driver are up. Starting it at boot only invites the
+# race above.

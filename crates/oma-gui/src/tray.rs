@@ -183,14 +183,39 @@ pub const ICON_SYMBOLIC: &str = "omaasus-symbolic";
 pub const ICON_APP: &str = "omaasus";
 const SVG_SYMBOLIC: &str = include_str!("../assets/icons/omaasus-symbolic.svg");
 const SVG_APP: &str = include_str!("../assets/icons/omaasus.svg");
+/// Pre-rasterised copies for hosts that want bitmaps at bar sizes.
+const PNG_SIZES: [u32; 6] = [16, 22, 24, 32, 48, 64];
+const PNG_SYMBOLIC: [&[u8]; 6] = [
+    include_bytes!("../assets/icons/omaasus-symbolic-16.png"),
+    include_bytes!("../assets/icons/omaasus-symbolic-22.png"),
+    include_bytes!("../assets/icons/omaasus-symbolic-24.png"),
+    include_bytes!("../assets/icons/omaasus-symbolic-32.png"),
+    include_bytes!("../assets/icons/omaasus-symbolic-48.png"),
+    include_bytes!("../assets/icons/omaasus-symbolic-64.png"),
+];
+const PNG_APP: [&[u8]; 6] = [
+    include_bytes!("../assets/icons/omaasus-16.png"),
+    include_bytes!("../assets/icons/omaasus-22.png"),
+    include_bytes!("../assets/icons/omaasus-24.png"),
+    include_bytes!("../assets/icons/omaasus-32.png"),
+    include_bytes!("../assets/icons/omaasus-48.png"),
+    include_bytes!("../assets/icons/omaasus-64.png"),
+];
 
 /// Where the user's icon theme lives (`$XDG_DATA_HOME/icons`).
 pub fn user_icon_root() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|b| b.data_dir().join("icons"))
 }
 
-fn write_if_changed(path: &Path, content: &str) -> std::io::Result<bool> {
-    if std::fs::read_to_string(path).map(|c| c == content).unwrap_or(false) {
+/// A directory OmaAsus owns outright, handed to the tray host as the item's
+/// `IconThemePath`. Hosts read that property two ways (a flat directory of
+/// icon files, or a theme root with `hicolor/...`), so it holds both.
+pub fn tray_icon_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|b| b.data_dir().join("omaasus/tray-icons"))
+}
+
+fn write_if_changed(path: &Path, content: &[u8]) -> std::io::Result<bool> {
+    if std::fs::read(path).map(|c| c == content).unwrap_or(false) {
         return Ok(false);
     }
     if let Some(dir) = path.parent() {
@@ -200,25 +225,71 @@ fn write_if_changed(path: &Path, content: &str) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// Make sure the tray and app icons resolve through the icon theme. A package
-/// installs them under `/usr/share/icons`; a `cargo install` build drops user
-/// copies into `$XDG_DATA_HOME/icons/hicolor` instead. Returns the directory
-/// handed to the host as the item's extra icon search path.
-pub fn install_icons() -> String {
-    let system = Path::new("/usr/share/icons/hicolor/scalable/apps");
-    if system.join(format!("{ICON_SYMBOLIC}.svg")).exists() {
-        return String::new();
-    }
-    let Some(root) = user_icon_root() else { return String::new() };
-    let apps = root.join("hicolor/scalable/apps");
-    for (name, svg) in [(ICON_SYMBOLIC, SVG_SYMBOLIC), (ICON_APP, SVG_APP)] {
-        match write_if_changed(&apps.join(format!("{name}.svg")), svg) {
-            Ok(true) => tracing::info!(icon = name, dir = %apps.display(), "installed user icon"),
-            Ok(false) => {}
-            Err(e) => tracing::warn!(icon = name, error = %e, "cannot install user icon; the tray may show a placeholder"),
+/// Lay the two icons out as a hicolor theme under `root` (`root/hicolor/...`).
+/// Returns how many files changed.
+fn install_theme(root: &Path) -> std::io::Result<usize> {
+    let mut changed = 0;
+    let hicolor = root.join("hicolor");
+    for (name, svg, pngs) in [(ICON_SYMBOLIC, SVG_SYMBOLIC, &PNG_SYMBOLIC), (ICON_APP, SVG_APP, &PNG_APP)] {
+        changed += usize::from(write_if_changed(&hicolor.join(format!("scalable/apps/{name}.svg")), svg.as_bytes())?);
+        for (size, png) in PNG_SIZES.iter().zip(pngs.iter()) {
+            changed += usize::from(write_if_changed(&hicolor.join(format!("{size}x{size}/apps/{name}.png")), png)?);
         }
     }
-    root.to_string_lossy().into_owned()
+    Ok(changed)
+}
+
+/// A minimal `index.theme` so a private theme root is usable on its own,
+/// without relying on the system hicolor index being merged in.
+fn index_theme() -> String {
+    let mut dirs: Vec<String> = PNG_SIZES.iter().map(|s| format!("{s}x{s}/apps")).collect();
+    dirs.push("scalable/apps".into());
+    let mut out = format!("[Icon Theme]\nName=hicolor\nComment=OmaAsus tray icons\nHidden=true\nDirectories={}\n", dirs.join(","));
+    for s in PNG_SIZES {
+        out.push_str(&format!("\n[{s}x{s}/apps]\nSize={s}\nContext=Applications\nType=Fixed\n"));
+    }
+    out.push_str("\n[scalable/apps]\nSize=64\nMinSize=8\nMaxSize=512\nContext=Applications\nType=Scalable\n");
+    out
+}
+
+/// Fill the private tray directory: flat files plus a complete theme root.
+fn install_tray_dir(dir: &Path) -> std::io::Result<usize> {
+    let mut changed = install_theme(dir)?;
+    changed += usize::from(write_if_changed(&dir.join("hicolor/index.theme"), index_theme().as_bytes())?);
+    for (name, svg, pngs) in [(ICON_SYMBOLIC, SVG_SYMBOLIC, &PNG_SYMBOLIC), (ICON_APP, SVG_APP, &PNG_APP)] {
+        changed += usize::from(write_if_changed(&dir.join(format!("{name}.svg")), svg.as_bytes())?);
+        // The flat PNG is the largest size: hosts scale down, never up.
+        changed += usize::from(write_if_changed(&dir.join(format!("{name}.png")), pngs[pngs.len() - 1])?);
+    }
+    Ok(changed)
+}
+
+/// Make sure the tray and app icons resolve. A package installs them under
+/// `/usr/share/icons`; a `cargo` build drops user copies into
+/// `$XDG_DATA_HOME/icons/hicolor` (for the desktop entry) instead. Either
+/// way the private tray directory is (re)written and returned as the item's
+/// extra icon search path, so the bar finds the icon without an icon cache.
+pub fn install_icons() -> String {
+    let system = Path::new("/usr/share/icons/hicolor/scalable/apps");
+    if !system.join(format!("{ICON_SYMBOLIC}.svg")).exists() {
+        if let Some(root) = user_icon_root() {
+            match install_theme(&root) {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(files = n, dir = %root.display(), "installed user icons"),
+                Err(e) => tracing::warn!(error = %e, "cannot install user icons; the desktop entry may show a placeholder"),
+            }
+        }
+    }
+    let Some(dir) = tray_icon_dir() else { return String::new() };
+    match install_tray_dir(&dir) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(files = n, dir = %dir.display(), "refreshed tray icons"),
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot write tray icons; the bar may show a placeholder");
+            return String::new();
+        }
+    }
+    dir.to_string_lossy().into_owned()
 }
 
 /// Subscription stream: registers the item and forwards clicks.
@@ -267,16 +338,37 @@ mod tests {
             assert_eq!(svg.matches("<path").count(), 3, "lobe, body and diamond");
         }
         assert!(SVG_SYMBOLIC.contains("width=\"16\""));
+        for png in PNG_SYMBOLIC.iter().chain(PNG_APP.iter()) {
+            assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        }
     }
 
     #[test]
     fn write_if_changed_is_idempotent() {
         let dir = std::env::temp_dir().join(format!("omaasus-icons-{}", std::process::id()));
         let path = dir.join("a/b/icon.svg");
-        assert!(write_if_changed(&path, "one").unwrap());
-        assert!(!write_if_changed(&path, "one").unwrap());
-        assert!(write_if_changed(&path, "two").unwrap());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
+        assert!(write_if_changed(&path, b"one").unwrap());
+        assert!(!write_if_changed(&path, b"one").unwrap());
+        assert!(write_if_changed(&path, b"two").unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"two");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tray_dir_has_both_layouts() {
+        let dir = std::env::temp_dir().join(format!("omaasus-tray-{}", std::process::id()));
+        let n = install_tray_dir(&dir).unwrap();
+        // 2 icons x (1 svg + 6 png) in the theme, the same again flat as svg + png, plus index.theme
+        assert_eq!(n, 2 * 7 + 2 * 2 + 1);
+        assert!(dir.join("omaasus-symbolic.svg").exists());
+        assert!(dir.join("omaasus-symbolic.png").exists());
+        assert!(dir.join("hicolor/scalable/apps/omaasus-symbolic.svg").exists());
+        assert!(dir.join("hicolor/22x22/apps/omaasus-symbolic.png").exists());
+        assert!(dir.join("hicolor/64x64/apps/omaasus.png").exists());
+        let idx = std::fs::read_to_string(dir.join("hicolor/index.theme")).unwrap();
+        assert!(idx.contains("Directories=16x16/apps,"));
+        assert!(idx.contains("[scalable/apps]"));
+        assert_eq!(install_tray_dir(&dir).unwrap(), 0, "second run changes nothing");
         let _ = std::fs::remove_dir_all(dir);
     }
 

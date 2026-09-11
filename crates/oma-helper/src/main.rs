@@ -331,7 +331,10 @@ impl Helper {
         let ctl: NvidiaControl = serde_json::from_str(&control_json).map_err(|e| zbus::fdo::Error::InvalidArgs(e.to_string()))?;
         let advanced = ctl.touches_advanced();
         self.authorize(&hdr, if advanced { ACTION_ADVANCED } else { ACTION_CONTROL }).await?;
-        let gpu = NvidiaGpu::open(index).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        let gpu = NvidiaGpu::open(index).map_err(|e| {
+            warn!(error = %e, "cannot open the GPU through NVML");
+            zbus::fdo::Error::Failed(format!("cannot open the GPU through NVML: {e} (if the helper started before the NVIDIA driver, `systemctl restart oma-helper`)"))
+        })?;
         {
             let mut all = self.claims.lock().unwrap();
             let c = all.entry(sender(&hdr)).or_default();

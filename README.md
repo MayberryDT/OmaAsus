@@ -99,6 +99,8 @@ sudo scripts/install-helper.sh target/release/oma-helper crates/oma-helper/data
 
 That installs the binary, D-Bus policy, polkit actions, the systemd unit, and udev rules giving your user access to Aura, Ryujin, Lian Li and LiveDash devices.
 
+The service is started on demand by D-Bus the first time OmaAsus asks for it, not at boot. Its device allow-list names driver groups (`char-nvidia`, `char-hidraw`, …) rather than `/dev` paths, because a path that does not exist yet when the unit starts is silently dropped, and the NVIDIA nodes can appear seconds after the driver loads. If a profile ever reports `cannot open the GPU through NVML`, `systemctl restart oma-helper` is the fix.
+
 ### Hyprland
 
 Hyprland 0.56+ (Lua config), append to `~/.config/hypr/bindings.lua`:
@@ -176,6 +178,8 @@ oma nvidia | cpu | daemons | rgb
 - On desktops without an internal panel, `supergfxd`'s Integrated mode is never offered; it would unbind your display GPU.
 - Releasing a fan output restores the saved `pwm_enable` mode on board headers, returns GPU fans to automatic, and re-enables PWM sync on Lian Li channels. The Ryujin falls back to a safe fixed duty.
 - Stalled devices are quarantined for a minute rather than allowed to block the app.
+- A profile is a complete GPU state: one that names no power limit restores the card's stock limit, so a Quiet profile's cap never follows you into Gaming.
+- CPU boost is written per policy where the kernel offers it. power-profiles-daemon restores boost per policy when it leaves power-saver, and a global boost of 0 makes that fail, which used to break every Quiet → Balanced switch.
 - Closing the window only keeps the daemon alive while a bar actually hosts the tray item; without one, closing still exits so nothing runs invisibly.
 
 ## Status

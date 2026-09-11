@@ -76,18 +76,23 @@ pub async fn apply_profile(p: Profile, cx: Context) -> Report {
     // 1. Power mode, through whichever component owns it here.
     let mut mode_changed = false;
     if let Some(wanted) = &p.cpu.power_mode {
-        match &cx.model {
-            None => r.skipped.push("power mode (hardware not detected yet)".into()),
-            Some(m) => match match_power_mode(wanted, &m.controls.power_modes) {
-                None => r.skipped.push(format!("power mode {wanted} (not on this machine)")),
-                Some(mode) => match set_power_mode(m.controls.power_owner, mode, &ctl).await {
-                    Ok(true) => {
-                        mode_changed = true;
-                        r.applied.push(format!("power mode {mode}"));
-                    }
-                    Ok(false) => {}
-                    Err(e) => r.failed.push(format!("power mode: {e}")),
-                },
+        // The hardware model can still be building during the first seconds
+        // after launch; a profile applied then must not silently drop its
+        // power mode, so ask the daemons directly in that window.
+        let (owner, modes) = match &cx.model {
+            Some(m) => (m.controls.power_owner, m.controls.power_modes.clone()),
+            None => fallback_power_modes().await,
+        };
+        match match_power_mode(wanted, &modes) {
+            None if modes.is_empty() => r.skipped.push(format!("power mode {wanted} (nothing controls power modes here)")),
+            None => r.skipped.push(format!("power mode {wanted} (not on this machine)")),
+            Some(mode) => match set_power_mode(owner, mode, &ctl).await {
+                Ok(true) => {
+                    mode_changed = true;
+                    r.applied.push(format!("power mode {mode}"));
+                }
+                Ok(false) => {}
+                Err(e) => r.failed.push(format!("power mode: {e}")),
             },
         }
     }
@@ -126,7 +131,10 @@ pub async fn apply_profile(p: Profile, cx: Context) -> Report {
             target.governor = info.available_governors.first().cloned().unwrap_or_default();
         }
         if let Some(epp) = &target.epp {
-            if !info.available_epp.is_empty() && !info.available_epp.contains(epp) {
+            // A one-entry list is the governor pinning EPP, not the CPU's choices.
+            if info.available_epp.len() > 1 && !info.available_epp.contains(epp) {
+                // Say so rather than silently writing less than the profile asks for.
+                r.skipped.push(format!("EPP {epp} (this CPU offers {})", info.available_epp.join(" ")));
                 target.epp = None;
             }
         }
@@ -149,7 +157,8 @@ pub async fn apply_profile(p: Profile, cx: Context) -> Report {
             // and kills whatever holds it, the helper included.
             r.skipped.push("NVIDIA (graphics settling)".into());
         } else {
-            match ctl.nvidia_apply(0, nv).await {
+            let nv = profile_nvidia_control(nv);
+            match ctl.nvidia_apply(0, &nv).await {
                 Ok(errs) if errs.is_empty() => r.applied.push("NVIDIA".into()),
                 Ok(errs) => r.failed.push(format!("NVIDIA: {}", errs.iter().map(|(s, e)| format!("{s} ({e})")).collect::<Vec<_>>().join(", "))),
                 Err(e) => r.failed.push(format!("NVIDIA: {e}")),
@@ -210,6 +219,36 @@ pub async fn apply_profile(p: Profile, cx: Context) -> Report {
     r
 }
 
+/// A profile describes a complete GPU state: when it names no power limit it
+/// means the card's stock limit, not "whatever the previous profile left".
+/// Otherwise Quiet's 300 W would follow you into Gaming.
+fn profile_nvidia_control(nv: &oma_hw::nvidia::NvidiaControl) -> oma_hw::nvidia::NvidiaControl {
+    let mut nv = nv.clone();
+    if nv.power_limit_w.is_none() {
+        nv.reset_power_limit = true;
+    }
+    nv
+}
+
+/// Power modes without a model: power-profiles-daemon if it answers, else the
+/// ACPI platform profile in sysfs, else nothing.
+async fn fallback_power_modes() -> (Option<Owner>, Vec<String>) {
+    let ppd = match zbus::Connection::system().await {
+        Ok(c) => oma_hw::ppd::state(&c).await.ok().map(|s| s.profiles.into_iter().map(|p| p.name).collect::<Vec<_>>()),
+        Err(_) => None,
+    };
+    let sysfs = oma_hw::sysfs::read_string("/sys/firmware/acpi/platform_profile_choices").map(|s| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>());
+    pick_fallback(ppd, sysfs)
+}
+
+fn pick_fallback(ppd: Option<Vec<String>>, sysfs: Option<Vec<String>>) -> (Option<Owner>, Vec<String>) {
+    match (ppd, sysfs) {
+        (Some(modes), _) if !modes.is_empty() => (Some(Owner::PowerProfilesDaemon), modes),
+        (_, Some(choices)) if !choices.is_empty() => (Some(Owner::Sysfs), choices),
+        _ => (None, Vec::new()),
+    }
+}
+
 /// Select `mode` through its owner. `Ok(false)` when it was already selected.
 async fn set_power_mode(owner: Option<Owner>, mode: &str, ctl: &Controller) -> Result<bool, String> {
     let system = || async { zbus::Connection::system().await.map_err(|e| e.to_string()) };
@@ -256,6 +295,25 @@ async fn write_attr(name: &str, value: i64, via_asusd: bool, ctl: &Controller) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_prefers_ppd_then_sysfs() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(pick_fallback(Some(v(&["power-saver", "balanced"])), Some(v(&["quiet"]))), (Some(Owner::PowerProfilesDaemon), v(&["power-saver", "balanced"])));
+        assert_eq!(pick_fallback(Some(vec![]), Some(v(&["quiet", "performance"]))), (Some(Owner::Sysfs), v(&["quiet", "performance"])));
+        assert_eq!(pick_fallback(None, None), (None, vec![]));
+    }
+
+    #[test]
+    fn profile_without_limit_means_stock_limit() {
+        use oma_hw::nvidia::NvidiaControl;
+        let none = NvidiaControl::default();
+        assert!(profile_nvidia_control(&none).reset_power_limit);
+        let some = NvidiaControl { power_limit_w: Some(300), ..Default::default() };
+        let got = profile_nvidia_control(&some);
+        assert!(!got.reset_power_limit);
+        assert_eq!(got.power_limit_w, Some(300));
+    }
 
     #[test]
     fn summaries_say_what_happened() {
