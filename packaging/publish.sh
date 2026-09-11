@@ -27,9 +27,18 @@ sed -e "s|@VERSION@|$version|g" -e "s|@PKG@|${pkg[0]}|g" -e "s|@GLIBC@|${GLIBC:?
 echo >> "$notes"
 gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$tag" --jq .body >> "$notes"
 
-if gh release view "$tag" "${repo[@]}" >/dev/null 2>&1; then
-    gh release upload "$tag" "${repo[@]}" --clobber -- *
-    gh release edit "$tag" "${repo[@]}" --title "OmaAsus $version" --notes-file "$notes" --draft=false
-else
-    gh release create "$tag" "${repo[@]}" --verify-tag --title "OmaAsus $version" --notes-file "$notes" -- *
-fi
+# A draft is what an interrupted run leaves; finish it. A published release
+# keeps its files: rebuilt ones would change the checksums people verified.
+case "$(gh release view "$tag" "${repo[@]}" --json isDraft -q .isDraft 2>/dev/null || true)" in
+    true)
+        gh release upload "$tag" "${repo[@]}" --clobber -- *
+        gh release edit "$tag" "${repo[@]}" --title "OmaAsus $version" --notes-file "$notes" --draft=false
+        ;;
+    false)
+        echo "release $tag is already published; delete it first to publish it again" >&2
+        exit 1
+        ;;
+    *)
+        gh release create "$tag" "${repo[@]}" --verify-tag --title "OmaAsus $version" --notes-file "$notes" -- *
+        ;;
+esac

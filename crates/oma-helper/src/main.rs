@@ -36,6 +36,11 @@ const ACTION_ADVANCED: &str = "com.omaasus.helper.advanced";
 /// Idle this long, with no client's fans to guard, and the helper exits.
 const IDLE_EXIT: std::time::Duration = std::time::Duration::from_secs(300);
 const IDLE_CHECK: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a restore waits out a running graphics switch before it touches
+/// NVIDIA fans (supergfxd kills whatever holds the dGPU while it switches).
+const SWITCH_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
+/// The same while the helper stops, which has to fit the unit's TimeoutStopSec.
+const STOP_SWITCH_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Classify a canonical (symlink-resolved) sysfs path into the polkit action
 /// guarding writes to it, or `None` if it may not be written at all.
@@ -283,7 +288,7 @@ fn restore_order(sysfs: BTreeMap<PathBuf, String>) -> Vec<(PathBuf, String)> {
 /// Put back every fan setting a client changed: when the client vanishes, so
 /// a crashed GUI never leaves fans at a fixed manual duty, and when the
 /// helper stops.
-async fn restore(conn: zbus::Connection, claims: ClaimMap, client: String, reason: &str) {
+async fn restore(conn: zbus::Connection, claims: ClaimMap, client: String, reason: &str, switch_wait: std::time::Duration) {
     let client = client.as_str();
     let Some(c) = claims.lock().unwrap().remove(client) else { return };
     if c.sysfs.is_empty() && c.nvidia_fans.is_empty() {
@@ -300,7 +305,7 @@ async fn restore(conn: zbus::Connection, claims: ClaimMap, client: String, reaso
         // supergfxd kills whatever holds the dGPU while it switches: wait for a
         // running switch to finish (bounded: a refused one leaves its mode set).
         let started = std::time::Instant::now();
-        while started.elapsed() < std::time::Duration::from_secs(90) {
+        while started.elapsed() < switch_wait {
             match oma_hw::supergfx::switch_state(&conn).await {
                 Ok((mode, pending)) if oma_hw::supergfx::switch_done(mode, pending) => break,
                 // Not there at all: nothing to wait for.
@@ -343,7 +348,7 @@ async fn watch_clients(conn: zbus::Connection, claims: ClaimMap, restoring: Arc<
             let busy = Busy::enter(&restoring);
             let (conn, claims, client) = (conn.clone(), claims.clone(), args.name().to_string());
             tokio::spawn(async move {
-                restore(conn, claims, client, "client vanished").await;
+                restore(conn, claims, client, "client vanished", SWITCH_WAIT).await;
                 drop(busy);
             });
         }
@@ -486,6 +491,11 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(IDLE_CHECK).await;
+            // Stopping: the stop path hands the fans back and exits; exiting
+            // here could cut one of its restores short.
+            if idle_closing.load(Ordering::SeqCst) {
+                return;
+            }
             let idle = last_active.lock().unwrap().elapsed();
             let guarding = idle_claims.lock().unwrap().values().any(|c| !c.sysfs.is_empty() || !c.nvidia_fans.is_empty());
             if may_exit(idle, guarding, in_flight.load(Ordering::SeqCst) + idle_restoring.load(Ordering::SeqCst)) {
@@ -512,7 +522,7 @@ async fn main() -> anyhow::Result<()> {
     closing.store(true, Ordering::SeqCst);
     let clients: Vec<String> = claims.lock().unwrap().keys().cloned().collect();
     for client in clients {
-        restore(conn.clone(), claims.clone(), client, "helper stopping").await;
+        restore(conn.clone(), claims.clone(), client, "helper stopping", STOP_SWITCH_WAIT).await;
     }
     // And any restore the watchdog had already started.
     while restoring.load(Ordering::SeqCst) > 0 {

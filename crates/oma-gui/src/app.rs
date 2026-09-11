@@ -1737,9 +1737,17 @@ impl App {
             }
             Message::System(ev) => {
                 use crate::events::Event;
-                // Limits and graphics state move with every one of these: refresh the ASUS view too.
+                // Limits and graphics state move with all of these but the helper
+                // going: refresh the ASUS view too.
                 let reload = Task::perform(crate::pages::asus::load(), Message::AsusLoaded);
                 match ev {
+                    // It handed back the fans it guarded as it went. Send them again:
+                    // that starts a fresh helper, which records the state they were
+                    // handed back in.
+                    Event::HelperGone => {
+                        self.fan_engine.invalidate();
+                        Task::none()
+                    }
                     // supergfxd kills whatever holds the dGPU while it switches: let go
                     // now, and stay away until the switch has finished.
                     Event::GraphicsSwitch => {

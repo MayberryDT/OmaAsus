@@ -1,7 +1,8 @@
 //! System events: resume from sleep (logind) and the charger connecting or
 //! disconnecting (limits differ on battery) call for re-applying the active
 //! profile; a graphics switch starting and the dGPU coming back on the bus
-//! (supergfxd) call for staying off the dGPU first.
+//! (supergfxd) call for staying off the dGPU first; the helper giving up its
+//! bus name calls for sending the fans again.
 
 use iced::futures::stream::{self, BoxStream, Stream, StreamExt};
 use iced::futures::SinkExt;
@@ -19,6 +20,9 @@ pub enum Event {
     GraphicsSwitch,
     /// The dGPU came back on the bus.
     DgpuArrived,
+    /// The helper gave up its bus name (stopped, restarted or went idle) and
+    /// handed back any fans it guarded.
+    HelperGone,
 }
 
 #[zbus::proxy(interface = "org.freedesktop.login1.Manager", default_service = "org.freedesktop.login1", default_path = "/org/freedesktop/login1")]
@@ -82,6 +86,12 @@ pub fn stream() -> impl Stream<Item = Event> {
                     sources.push(arrivals.boxed());
                     watching.push("dGPU arrivals");
                 }
+            }
+            // The name is released, never handed over: D-Bus starts the next
+            // helper only when something calls it.
+            if let Ok(owners) = async { zbus::fdo::DBusProxy::new(&conn).await?.receive_name_owner_changed_with_args(&[(0, oma_hw::helper::BUS_NAME)]).await }.await {
+                sources.push(owners.filter_map(|s| async move { s.args().ok().filter(|a| a.new_owner().is_none()).map(|_| Event::HelperGone) }).boxed());
+                watching.push("helper restarts");
             }
         }
         tracing::info!(events = %watching.join(", "), "watching system events");
