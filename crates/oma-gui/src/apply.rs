@@ -230,23 +230,32 @@ fn profile_nvidia_control(nv: &oma_hw::nvidia::NvidiaControl) -> oma_hw::nvidia:
     nv
 }
 
-/// Power modes without a model: power-profiles-daemon if it answers, else the
-/// ACPI platform profile in sysfs, else nothing.
+/// Power modes without a model, in the order the model gives power modes an
+/// owner: asusd if it answers, then power-profiles-daemon, then the ACPI
+/// platform profile in sysfs, else nothing. Going through power-profiles-daemon
+/// on a machine asusd owns would switch modes behind asusd's back.
 async fn fallback_power_modes() -> (Option<Owner>, Vec<String>) {
-    let ppd = match zbus::Connection::system().await {
-        Ok(c) => oma_hw::ppd::state(&c).await.ok().map(|s| s.profiles.into_iter().map(|p| p.name).collect::<Vec<_>>()),
-        Err(_) => None,
+    let conn = zbus::Connection::system().await.ok();
+    let asusd = match &conn {
+        Some(c) => match PlatformProxy::new(c).await {
+            Ok(p) => p.platform_profile_choices().await.ok().map(|v| v.into_iter().map(|m| PlatformProfile::from_u32(m).label().to_string()).collect::<Vec<_>>()),
+            Err(_) => None,
+        },
+        None => None,
+    };
+    let ppd = match &conn {
+        Some(c) => oma_hw::ppd::state(c).await.ok().map(|s| s.profiles.into_iter().map(|p| p.name).collect::<Vec<_>>()),
+        None => None,
     };
     let sysfs = oma_hw::sysfs::read_string("/sys/firmware/acpi/platform_profile_choices").map(|s| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>());
-    pick_fallback(ppd, sysfs)
+    pick_fallback(asusd, ppd, sysfs)
 }
 
-fn pick_fallback(ppd: Option<Vec<String>>, sysfs: Option<Vec<String>>) -> (Option<Owner>, Vec<String>) {
-    match (ppd, sysfs) {
-        (Some(modes), _) if !modes.is_empty() => (Some(Owner::PowerProfilesDaemon), modes),
-        (_, Some(choices)) if !choices.is_empty() => (Some(Owner::Sysfs), choices),
-        _ => (None, Vec::new()),
-    }
+fn pick_fallback(asusd: Option<Vec<String>>, ppd: Option<Vec<String>>, sysfs: Option<Vec<String>>) -> (Option<Owner>, Vec<String>) {
+    [(Owner::Asusd, asusd), (Owner::PowerProfilesDaemon, ppd), (Owner::Sysfs, sysfs)]
+        .into_iter()
+        .find_map(|(owner, modes)| modes.filter(|m| !m.is_empty()).map(|m| (Some(owner), m)))
+        .unwrap_or((None, Vec::new()))
 }
 
 /// Select `mode` through its owner. `Ok(false)` when it was already selected.
@@ -297,11 +306,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fallback_prefers_ppd_then_sysfs() {
+    fn fallback_follows_the_models_owner_order() {
         let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(pick_fallback(Some(v(&["power-saver", "balanced"])), Some(v(&["quiet"]))), (Some(Owner::PowerProfilesDaemon), v(&["power-saver", "balanced"])));
-        assert_eq!(pick_fallback(Some(vec![]), Some(v(&["quiet", "performance"]))), (Some(Owner::Sysfs), v(&["quiet", "performance"])));
-        assert_eq!(pick_fallback(None, None), (None, vec![]));
+        // A laptop with asusd and power-profiles-daemon both running: asusd owns modes.
+        assert_eq!(pick_fallback(Some(v(&["Quiet", "Balanced", "Performance"])), Some(v(&["power-saver", "balanced"])), Some(v(&["quiet"]))), (Some(Owner::Asusd), v(&["Quiet", "Balanced", "Performance"])));
+        assert_eq!(pick_fallback(None, Some(v(&["power-saver", "balanced"])), Some(v(&["quiet"]))), (Some(Owner::PowerProfilesDaemon), v(&["power-saver", "balanced"])));
+        assert_eq!(pick_fallback(Some(vec![]), Some(vec![]), Some(v(&["quiet", "performance"]))), (Some(Owner::Sysfs), v(&["quiet", "performance"])));
+        assert_eq!(pick_fallback(None, None, None), (None, vec![]));
     }
 
     #[test]
