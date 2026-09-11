@@ -281,9 +281,13 @@ impl Helper {
 /// Whether writing `value` to a `pwmN_enable` hands the output back: anything
 /// but manual (hwmon ABI: 1 manual, 0 full speed, 2 and up automatic), or the
 /// mode the client found it in. Not the recorded original alone: a helper
-/// started after another died records the manual state it found.
+/// started after another died records the manual state it found. Compared as
+/// numbers, the way the kernel reads them ("+1" and "01" are 1).
+/// asus_custom_fan_curve differs: its 1 is the custom curve, which this
+/// treats as a claim.
 fn hands_back(value: &str, original: Option<&str>) -> bool {
-    value != "1" || original == Some(value)
+    let n = |s: &str| s.trim().parse::<u64>().ok();
+    n(value) != Some(1) || original.and_then(n) == n(value)
 }
 
 /// The writes that put a client's fan settings back: duties first, then the
@@ -480,7 +484,8 @@ impl Helper {
         dev.send_feature_report(&report).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
-    /// Emitted after any successful write so clients can refresh.
+    /// Emitted as the helper stops having handed the fans back
+    /// (`oma_hw::helper::HANDED_BACK`): clients still running send theirs again.
     #[zbus(signal)]
     async fn changed(emitter: &SignalEmitter<'_>, what: String) -> zbus::Result<()>;
 }
@@ -543,13 +548,20 @@ async fn main() -> anyhow::Result<()> {
     // records the state they were handed back in rather than a manual duty.
     closing.store(true, Ordering::SeqCst);
     // All at once: each may wait out a graphics switch.
-    let clients: Vec<String> = claims.lock().unwrap().keys().cloned().collect();
+    let clients: Vec<String> = claims.lock().unwrap().iter().filter(|(_, c)| !c.sysfs.is_empty() || !c.nvidia_fans.is_empty()).map(|(client, _)| client.clone()).collect();
+    let handed_back = !clients.is_empty();
     futures_util::future::join_all(clients.into_iter().map(|client| restore(conn.clone(), claims.clone(), client, "helper stopping", &closing))).await;
     // And any restore the watchdog had already started (its bound has shrunk too).
     while restoring.load(Ordering::SeqCst) > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     let _ = conn.release_name(BUS_NAME).await;
+    // Clients still running send their fans again, which starts a fresh helper
+    // once this one has exited. Said after the name is gone, so their calls
+    // don't reach this one.
+    if handed_back && let Ok(emitter) = SignalEmitter::new(&conn, OBJ_PATH) {
+        let _ = Helper::changed(&emitter, oma_hw::helper::HANDED_BACK.into()).await;
+    }
     info!("stopped");
     Ok(())
 }
@@ -565,6 +577,8 @@ mod tests {
         assert!(hands_back("0", None), "full speed belongs to the driver");
         assert!(hands_back("1", Some("1")), "the manual mode it was found in");
         assert!(!hands_back("1", Some("2")), "manual is a claim");
+        assert!(!hands_back("+1", Some("2")), "read as the kernel reads it");
+        assert!(!hands_back("01", None), "read as the kernel reads it");
     }
 
     #[test]

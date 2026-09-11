@@ -1,8 +1,8 @@
 //! System events: resume from sleep (logind) and the charger connecting or
 //! disconnecting (limits differ on battery) call for re-applying the active
 //! profile; a graphics switch starting and the dGPU coming back on the bus
-//! (supergfxd) call for staying off the dGPU first; the helper giving up its
-//! bus name calls for sending the fans again.
+//! (supergfxd) call for staying off the dGPU first; the helper handing back
+//! the fans it guarded as it stops calls for sending them again.
 
 use iced::futures::stream::{self, BoxStream, Stream, StreamExt};
 use iced::futures::SinkExt;
@@ -20,9 +20,9 @@ pub enum Event {
     GraphicsSwitch,
     /// The dGPU came back on the bus.
     DgpuArrived,
-    /// The helper gave up its bus name (stopped, restarted or went idle) and
-    /// handed back any fans it guarded.
-    HelperGone,
+    /// The helper stopped (a package upgrade, Settings → Reinstall helper,
+    /// `systemctl stop`) and handed back the fans it guarded.
+    FansHandedBack,
 }
 
 #[zbus::proxy(interface = "org.freedesktop.login1.Manager", default_service = "org.freedesktop.login1", default_path = "/org/freedesktop/login1")]
@@ -87,11 +87,14 @@ pub fn stream() -> impl Stream<Item = Event> {
                     watching.push("dGPU arrivals");
                 }
             }
-            // The name is released, never handed over: D-Bus starts the next
-            // helper only when something calls it.
-            if let Ok(owners) = async { zbus::fdo::DBusProxy::new(&conn).await?.receive_name_owner_changed_with_args(&[(0, oma_hw::helper::BUS_NAME)]).await }.await {
-                sources.push(owners.filter_map(|s| async move { s.args().ok().filter(|a| a.new_owner().is_none()).map(|_| Event::HelperGone) }).boxed());
-                watching.push("helper restarts");
+            // The helper says so once it has handed the fans back and let go of its
+            // name. Matched without a sender: it's usually not running when this starts.
+            let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).interface(oma_hw::helper::INTERFACE).and_then(|b| b.member("Changed")).map(|b| b.build());
+            if let Ok(rule) = rule
+                && let Ok(messages) = zbus::MessageStream::for_match_rule(rule, &conn, None).await
+            {
+                sources.push(messages.filter_map(|m| async move { m.ok()?.body().deserialize::<String>().ok().filter(|what| what == oma_hw::helper::HANDED_BACK).map(|_| Event::FansHandedBack) }).boxed());
+                watching.push("helper hand-backs");
             }
         }
         tracing::info!(events = %watching.join(", "), "watching system events");

@@ -11,8 +11,12 @@ use std::time::Duration;
 /// or claimed, and D-Bus starts a fresh helper for the next call.
 pub const RESTARTING: &str = "oma-helper is restarting; try again";
 
-/// The helper's name on the system bus.
-pub const BUS_NAME: &str = "com.omaasus.Helper1";
+/// The helper's D-Bus interface.
+pub const INTERFACE: &str = "com.omaasus.Helper1";
+
+/// What the helper's `Changed` signal says as it stops having handed the fans
+/// back: clients still running send theirs again.
+pub const HANDED_BACK: &str = "fans handed back";
 
 /// A call, tried once more when an exiting helper refused it.
 async fn again<T, F, Fut>(call: F) -> zbus::Result<T>

@@ -13,7 +13,9 @@ EOF
 }
 
 post_upgrade() {
-    # The next call starts the new binary.
+    # Restart under the new unit: pacman's own daemon-reload runs after the
+    # transaction, and this runs inside it.
+    systemctl daemon-reload 2>/dev/null || :
     systemctl try-restart oma-helper.service 2>/dev/null || :
 }
 
