@@ -1695,7 +1695,11 @@ impl App {
             }
             Message::FanResult(cmd, r) => {
                 self.fan_engine.report(&cmd, r.is_ok(), std::time::Instant::now());
-                if let Err(e) = r {
+                // A stopping helper (an upgrade, a reinstall) refuses for a moment:
+                // expected, and the engine sends the write again shortly.
+                if let Err(e) = r
+                    && !e.contains(oma_hw::helper::RESTARTING)
+                {
                     self.fan_errors += 1;
                     if self.fan_errors <= 3 || self.fan_errors.is_multiple_of(60) {
                         self.toast = Some((format!("Fan control: {e}"), false));
@@ -1746,7 +1750,7 @@ impl App {
                     // they were handed back in.
                     Event::FansHandedBack => {
                         // Not after a package removal: there's no helper left to start.
-                        if std::path::Path::new(oma_hw::helper::ACTIVATION_FILE).exists() {
+                        if oma_hw::helper::activatable() {
                             self.fan_engine.resend_all();
                         }
                         Task::none()

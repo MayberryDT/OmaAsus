@@ -88,19 +88,11 @@ pub fn stream() -> impl Stream<Item = Event> {
                 }
             }
             // The helper says so as it stops, having handed the fans back. Anyone may
-            // send a signal on the system bus: the bus delivers only those sent by the
-            // owner of the helper's name, which only root can be (zbus leaves a
-            // well-known sender for the bus to check).
-            let rule = zbus::MatchRule::builder()
-                .msg_type(zbus::message::Type::Signal)
-                .sender(oma_hw::helper::BUS_NAME)
-                .and_then(|b| b.interface(oma_hw::helper::INTERFACE))
-                .and_then(|b| b.member("Changed"))
-                .map(|b| b.build());
-            if let Ok(rule) = rule
-                && let Ok(messages) = zbus::MessageStream::for_match_rule(rule, &conn, None).await
-            {
-                sources.push(messages.filter_map(|m| async move { m.ok()?.body().deserialize::<String>().ok().filter(|what| what == oma_hw::helper::HANDED_BACK).map(|_| Event::FansHandedBack) }).boxed());
+            // send a signal on the system bus, even straight to us, so it's taken
+            // only from the owner of the helper's name, which only root can be: a
+            // proxy's signal stream follows that owner and drops everyone else's.
+            if let Ok(changes) = async { oma_hw::helper::HelperProxy::builder(&conn).cache_properties(zbus::proxy::CacheProperties::No).build().await?.receive_changed().await }.await {
+                sources.push(changes.filter_map(|s| async move { s.args().ok().filter(|a| a.what().as_str() == oma_hw::helper::HANDED_BACK).map(|_| Event::FansHandedBack) }).boxed());
                 watching.push("helper hand-backs");
             }
         }
