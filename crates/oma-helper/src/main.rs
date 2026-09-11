@@ -32,6 +32,9 @@ const BUS_NAME: &str = "com.omaasus.Helper1";
 const OBJ_PATH: &str = "/com/omaasus/Helper1";
 const ACTION_CONTROL: &str = "com.omaasus.helper.control";
 const ACTION_ADVANCED: &str = "com.omaasus.helper.advanced";
+/// Idle this long, with no client's fans to guard, and the helper exits.
+const IDLE_EXIT: std::time::Duration = std::time::Duration::from_secs(300);
+const IDLE_CHECK: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Classify a canonical (symlink-resolved) sysfs path into the polkit action
 /// guarding writes to it, or `None` if it may not be written at all.
@@ -184,10 +187,13 @@ fn sender(hdr: &Header<'_>) -> String {
 struct Helper {
     conn: zbus::Connection,
     claims: ClaimMap,
+    /// When a client last asked for anything, for the idle exit.
+    last_active: Arc<Mutex<std::time::Instant>>,
 }
 
 impl Helper {
     async fn authorize(&self, hdr: &Header<'_>, action: &str) -> zbus::fdo::Result<()> {
+        *self.last_active.lock().unwrap() = std::time::Instant::now();
         match polkit::check(&self.conn, &sender(hdr), action, true).await {
             Ok(true) => Ok(()),
             Ok(false) => Err(zbus::fdo::Error::AccessDenied(format!("polkit denied {action}"))),
@@ -225,7 +231,8 @@ impl Helper {
 
 /// Put back every fan setting a vanished client changed, so a crashed GUI
 /// never leaves fans at a fixed manual duty.
-fn restore(claims: &ClaimMap, client: &str) {
+async fn restore(conn: zbus::Connection, claims: ClaimMap, client: String) {
+    let client = client.as_str();
     let Some(c) = claims.lock().unwrap().remove(client) else { return };
     if c.sysfs.is_empty() && c.nvidia_fans.is_empty() {
         return;
@@ -237,6 +244,22 @@ fn restore(claims: &ClaimMap, client: &str) {
         match oma_hw::sysfs::write(&p, &v) {
             Ok(()) => info!(path = %p.display(), value = %v, "restored"),
             Err(e) => warn!(path = %p.display(), error = %e, "restore failed"),
+        }
+    }
+    if !c.nvidia_fans.is_empty() {
+        // supergfxd kills whatever holds the dGPU while it switches: wait for a
+        // running switch to finish (bounded: a refused one leaves its mode set).
+        for _ in 0..180 {
+            match oma_hw::supergfx::pending_mode(&conn).await {
+                Ok(oma_hw::supergfx::GfxMode::None) | Err(_) => break,
+                Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+            }
+        }
+        // NVML would wake a sleeping GPU; one that is off has had its driver
+        // unloaded, and the driver starts with its fans on automatic.
+        if !oma_hw::nvidia::awake() {
+            info!("NVIDIA fans left to the driver: the GPU is asleep or off");
+            return;
         }
     }
     for index in c.nvidia_fans {
@@ -261,7 +284,8 @@ async fn watch_clients(conn: zbus::Connection, claims: ClaimMap) -> anyhow::Resu
     while let Some(signal) = changes.next().await {
         let Ok(args) = signal.args() else { continue };
         if args.new_owner().is_none() {
-            restore(&claims, args.name().as_str());
+            // Its own task: restoring NVIDIA fans may wait for a graphics switch.
+            tokio::spawn(restore(conn.clone(), claims.clone(), args.name().to_string()));
         }
     }
     Ok(())
@@ -379,12 +403,29 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?)).init();
     let conn = zbus::Connection::system().await?;
     let claims = ClaimMap::default();
-    conn.object_server().at(OBJ_PATH, Helper { conn: conn.clone(), claims: claims.clone() }).await?;
+    let last_active = Arc::new(Mutex::new(std::time::Instant::now()));
+    conn.object_server().at(OBJ_PATH, Helper { conn: conn.clone(), claims: claims.clone(), last_active: last_active.clone() }).await?;
     conn.request_name(BUS_NAME).await?;
     let watch_conn = conn.clone();
+    let watch_claims = claims.clone();
     tokio::spawn(async move {
-        if let Err(e) = watch_clients(watch_conn, claims).await {
+        if let Err(e) = watch_clients(watch_conn, watch_claims).await {
             warn!(error = %e, "client watchdog stopped; crashed clients' fans will not be restored");
+        }
+    });
+    // Exit when idle, so D-Bus starts a fresh helper next time: systemd works
+    // out device access (the NVIDIA device groups) when the helper starts, and
+    // one started before the NVIDIA driver loaded would never get it. Never
+    // while a client holds fans: the watchdog has to outlive that client.
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(IDLE_CHECK).await;
+            let idle = last_active.lock().unwrap().elapsed();
+            let guarding = claims.lock().unwrap().values().any(|c| !c.sysfs.is_empty() || !c.nvidia_fans.is_empty());
+            if idle >= IDLE_EXIT && !guarding {
+                info!(idle_s = idle.as_secs(), "idle; exiting (D-Bus starts the helper again when needed)");
+                std::process::exit(0);
+            }
         }
     });
     info!("oma-helper {} ready on {BUS_NAME}", env!("CARGO_PKG_VERSION"));

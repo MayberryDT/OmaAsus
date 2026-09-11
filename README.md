@@ -99,7 +99,7 @@ sudo scripts/install-helper.sh target/release/oma-helper crates/oma-helper/data
 
 That installs the binary, D-Bus policy, polkit actions, the systemd unit, and udev rules giving your user access to Aura, Ryujin, Lian Li and LiveDash devices.
 
-The service is started on demand by D-Bus the first time OmaAsus asks for it, not at boot. Its device allow-list names driver groups (`char-nvidia`, `char-hidraw`, …) rather than `/dev` paths, because a path that does not exist yet when the unit starts is silently dropped, and the NVIDIA nodes can appear seconds after the driver loads. If a profile ever reports `cannot open the GPU through NVML`, `systemctl restart oma-helper` is the fix.
+The service is started on demand by D-Bus the first time OmaAsus asks for it, not at boot. Its device allow-list names driver groups (`char-nvidia`, `char-hidraw`, …) rather than `/dev` paths, because a path that does not exist yet when the unit starts is silently dropped, and the NVIDIA nodes can appear seconds after the driver loads. systemd resolves those groups when the helper starts, so the helper exits after five idle minutes (never while it guards a client's fans) and D-Bus starts a fresh one when OmaAsus next needs it; that is how it gains the NVIDIA driver after a switch to Hybrid. If a profile ever reports `cannot open the GPU through NVML`, `systemctl restart oma-helper` is the fix.
 
 ### Hyprland
 

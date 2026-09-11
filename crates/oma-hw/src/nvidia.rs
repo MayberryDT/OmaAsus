@@ -235,8 +235,11 @@ impl NvidiaGpu {
             out.push(("persistence".into(), d.set_persistent(p).map_err(|e| e.to_string())));
         }
         if ctl.reset_power_limit {
-            if let Ok(def) = d.power_management_limit_default() {
-                out.push(("power_limit_reset".into(), d.set_power_management_limit(def).map_err(|e| e.to_string())));
+            // Only when it isn't at stock already: laptop GPUs report a default
+            // but refuse to set any limit, and the write would fail every apply.
+            match d.power_management_limit_default() {
+                Ok(def) if d.power_management_limit().ok() != Some(def) => out.push(("power_limit_reset".into(), d.set_power_management_limit(def).map_err(|e| e.to_string()))),
+                _ => {}
             }
         } else if let Some(w) = ctl.power_limit_w {
             out.push(("power_limit".into(), d.set_power_management_limit(w * 1000).map_err(|e| e.to_string())));

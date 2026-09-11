@@ -69,6 +69,36 @@ pub enum GfxPower {
     Unknown = 5,
 }
 
+impl GfxPower {
+    pub fn from_u32(v: u32) -> Self {
+        match v {
+            0 => Self::Active,
+            1 => Self::Suspended,
+            2 => Self::Off,
+            3 => Self::AsusDisabled,
+            4 => Self::AsusMuxDiscreet,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Whether the dGPU is on the bus in this state (awake or runtime-suspended);
+    /// `None` when supergfxd couldn't tell.
+    pub fn on_bus(self) -> Option<bool> {
+        match self {
+            Self::Active | Self::Suspended | Self::AsusMuxDiscreet => Some(true),
+            Self::Off | Self::AsusDisabled => Some(false),
+            Self::Unknown => None,
+        }
+    }
+}
+
+/// Whether a `NotifyGfxStatus` change means the dGPU came back on the bus
+/// (resume, a switch by something else). supergfxd reports every runtime-PM
+/// wake and sleep the same way; those don't count.
+pub fn dgpu_arrived(last: Option<GfxPower>, now: GfxPower) -> bool {
+    last.and_then(GfxPower::on_bus) == Some(false) && now.on_bus() == Some(true)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[repr(u32)]
 pub enum UserActionRequired {
@@ -135,14 +165,7 @@ where
 
 pub async fn state(conn: &zbus::Connection) -> zbus::Result<GfxState> {
     let p = SuperGfxProxy::builder(conn).cache_properties(zbus::proxy::CacheProperties::No).build().await?;
-    let power = timed(p.power()).await.ok().map(|v| match v {
-        0 => GfxPower::Active,
-        1 => GfxPower::Suspended,
-        2 => GfxPower::Off,
-        3 => GfxPower::AsusDisabled,
-        4 => GfxPower::AsusMuxDiscreet,
-        _ => GfxPower::Unknown,
-    });
+    let power = timed(p.power()).await.ok().map(GfxPower::from_u32);
     Ok(GfxState {
         version: timed(p.version()).await?,
         mode: GfxMode::from_u32(timed(p.mode()).await?),
@@ -158,6 +181,14 @@ pub async fn state(conn: &zbus::Connection) -> zbus::Result<GfxState> {
             _ => UserActionRequired::Nothing,
         },
     })
+}
+
+/// The mode supergfxd is switching to, `None` when no switch is running. It
+/// stays set after a switch refused with a user action ("log out first"), so
+/// on its own it doesn't mean a switch is running.
+pub async fn pending_mode(conn: &zbus::Connection) -> zbus::Result<GfxMode> {
+    let p = SuperGfxProxy::builder(conn).cache_properties(zbus::proxy::CacheProperties::No).build().await?;
+    Ok(GfxMode::from_u32(timed(p.pending_mode()).await?))
 }
 
 /// Request a mode switch. This can take a long time (the daemon waits for the
@@ -237,8 +268,18 @@ mod tests {
 
     #[test]
     fn the_dgpu_is_in_use_only_in_modes_that_power_it() {
-        assert!(GfxMode::Hybrid.uses_dgpu() && GfxMode::AsusMuxDgpu.uses_dgpu());
+        assert!(GfxMode::Hybrid.uses_dgpu() && GfxMode::AsusMuxDgpu.uses_dgpu() && GfxMode::NvidiaNoModeset.uses_dgpu() && GfxMode::AsusEgpu.uses_dgpu());
         assert!(!GfxMode::Integrated.uses_dgpu() && !GfxMode::Vfio.uses_dgpu() && !GfxMode::None.uses_dgpu());
+    }
+
+    #[test]
+    fn only_coming_back_on_the_bus_counts_as_arriving() {
+        use GfxPower::*;
+        assert!(dgpu_arrived(Some(Off), Active) && dgpu_arrived(Some(AsusDisabled), Suspended));
+        assert!(!dgpu_arrived(Some(Suspended), Active), "a runtime-PM wake");
+        assert!(!dgpu_arrived(Some(Active), Suspended), "a runtime-PM sleep");
+        assert!(!dgpu_arrived(None, Active), "the first reading");
+        assert!(!dgpu_arrived(Some(Unknown), Active), "supergfxd couldn't tell before");
     }
 
     #[test]

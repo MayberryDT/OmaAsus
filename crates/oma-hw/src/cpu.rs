@@ -109,10 +109,9 @@ fn online_cpus() -> Vec<u32> {
 /// rest of the session. That forced single entry means "unknown": fall back to
 /// the fixed set the EPP drivers define.
 pub fn epp_choices(reported: Vec<String>, governor: Option<&str>) -> Vec<String> {
-    const STANDARD: [&str; 5] = ["default", "performance", "balance_performance", "balance_power", "power"];
-    let forced = governor == Some("performance") && reported.len() == 1 && reported[0] == "performance";
+    let forced = governor.is_some_and(crate::knowledge::epp_pinned_by_governor) && reported.len() == 1 && reported[0] == "performance";
     if forced {
-        STANDARD.iter().map(|s| s.to_string()).collect()
+        crate::knowledge::EPP_STANDARD.iter().map(|s| s.to_string()).collect()
     } else {
         reported
     }

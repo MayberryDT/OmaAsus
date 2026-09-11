@@ -115,12 +115,16 @@ pub struct SlashSnapshot {
 /// Gather everything detection reads. Blocking sysfs/HID/NVML work runs on a
 /// blocking thread; D-Bus services that aren't running are simply absent.
 pub async fn gather() -> RawInventory {
-    let (system, sysfs, pci_display, drm_connectors, nvidia) =
-        tokio::task::spawn_blocking(|| (detect::inventory(), snapshot_sysfs(), pci_display(), drm_connectors(), nvidia_infos())).await.expect("capture thread");
     let (asusd, supergfx, ppd) = match zbus::Connection::system().await {
         Ok(c) => (asusd_snapshot(&c).await, supergfx::state(&c).await.ok(), ppd::state(&c).await.ok()),
         Err(_) => (None, None, None),
     };
+    // supergfxd kills whatever holds the dGPU while it switches: only look where
+    // its mode uses the dGPU and no switch is pending (a stale pending switch
+    // only costs these details; the GPU page fetches them later).
+    let look = supergfx.as_ref().is_none_or(|g| g.mode.uses_dgpu() && g.pending_mode == supergfx::GfxMode::None);
+    let (system, sysfs, pci_display, drm_connectors, nvidia) =
+        tokio::task::spawn_blocking(move || (detect::inventory(), snapshot_sysfs(), pci_display(), drm_connectors(), if look { nvidia_infos() } else { Vec::new() })).await.expect("capture thread");
     RawInventory { format: FORMAT, captured_at: chrono::Local::now().to_rfc3339(), system, asusd, supergfx, ppd, nvidia, pci_display, drm_connectors, sysfs }
 }
 

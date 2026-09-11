@@ -109,6 +109,20 @@ impl Snapshot {
     pub fn package_w(&self) -> Option<f64> {
         self.cpu.package_w.or_else(|| if self.amd_integrated { self.amd.as_ref().and_then(|a| a.power_w) } else { None })
     }
+
+    /// The GPU temperature fan curves follow: the dGPU's while it is read.
+    /// Unknown while it is awake but not read (settling, a switch running,
+    /// resting after idle), so curves hold their duty rather than follow
+    /// another GPU's temperature; otherwise the GPU `gpu()` shows.
+    pub fn curve_gpu_temp(&self) -> Option<f64> {
+        if let Some(n) = &self.nvidia {
+            return n.temp_c.map(f64::from);
+        }
+        match self.dgpu {
+            Some(DgpuState::Active) => None,
+            _ => self.gpu().and_then(|g| g.temp_c),
+        }
+    }
 }
 
 /// What to do with NVML this sample.
@@ -129,29 +143,41 @@ fn nvml_action(state: DgpuState, keep_away: bool) -> NvmlAction {
 }
 
 /// When the NVIDIA GPU may be opened at all. supergfxd kills any process
-/// holding it while it switches modes or re-applies one (after resume the
-/// dGPU comes back on the bus and supergfxd switches it off again), so it is
-/// opened only where the graphics mode means it to be in use, and not while
-/// things settle.
+/// holding it while it switches modes (it killed OmaAsus when a sleep hook
+/// switched modes right after a resume), so it is opened only where the
+/// graphics mode means it to be in use, not while a switch runs, and not in
+/// the first seconds after it comes onto the bus.
+#[derive(Debug, Clone, Copy, Default)]
 struct DgpuGate {
-    allowed: bool,
+    /// What the graphics mode says. `None` until known: where supergfxd runs,
+    /// nothing opens the dGPU before its state has been read.
+    mode_ok: Option<bool>,
     hold_until: Option<std::time::Instant>,
+    /// When the dGPU came back on the bus while OmaAsus ran.
+    arrived: Option<std::time::Instant>,
 }
 
-static GATE: std::sync::Mutex<DgpuGate> = std::sync::Mutex::new(DgpuGate { allowed: true, hold_until: None });
-
-/// Whether the graphics mode means the dGPU to be in use (always, without supergfxd).
-pub fn allow_dgpu(on: bool) {
-    if let Ok(mut g) = GATE.lock() {
-        if g.allowed != on {
-            tracing::info!(allowed = on, "dGPU readings {}", if on { "allowed" } else { "off: the graphics mode doesn't use the dGPU" });
-        }
-        g.allowed = on;
+impl DgpuGate {
+    fn open(&self, now: std::time::Instant) -> bool {
+        self.mode_ok == Some(true) && self.hold_until.is_none_or(|u| now >= u) && self.arrived.is_none_or(|t| now.duration_since(t) >= NVML_SETTLE)
     }
 }
 
-/// Keep away from the dGPU for a while: after resume or a graphics event, and
-/// before switching modes.
+static GATE: std::sync::Mutex<DgpuGate> = std::sync::Mutex::new(DgpuGate { mode_ok: None, hold_until: None, arrived: None });
+
+/// Whether the graphics mode means the dGPU to be in use (always, without a
+/// graphics manager).
+pub fn allow_dgpu(on: bool) {
+    if let Ok(mut g) = GATE.lock() {
+        if g.mode_ok != Some(on) {
+            tracing::info!(allowed = on, "dGPU readings {}", if on { "allowed" } else { "off: the graphics mode doesn't use the dGPU" });
+        }
+        g.mode_ok = Some(on);
+    }
+}
+
+/// Keep away from the dGPU for a while: while a graphics switch runs, and
+/// before OmaAsus asks for one.
 pub fn hold_off_dgpu(d: Duration) {
     if let Ok(mut g) = GATE.lock() {
         let until = std::time::Instant::now() + d;
@@ -161,13 +187,23 @@ pub fn hold_off_dgpu(d: Duration) {
 
 /// Whether anything in OmaAsus may open the dGPU now.
 pub fn dgpu_open_ok() -> bool {
-    GATE.lock().is_ok_and(|g| g.allowed && g.hold_until.is_none_or(|u| std::time::Instant::now() >= u))
+    GATE.lock().is_ok_and(|g| g.open(std::time::Instant::now()))
+}
+
+/// When the dGPU counts as newly arrived: it came onto the bus after OmaAsus
+/// started. One there from the start (a desktop card) doesn't wait.
+fn next_arrival(was_present: Option<bool>, present: bool, arrived: Option<std::time::Instant>, now: std::time::Instant) -> Option<std::time::Instant> {
+    match (was_present, present) {
+        (Some(false), true) => Some(now),
+        (_, false) => None,
+        _ => arrived,
+    }
 }
 
 /// Idle this long with a handle open, and the handle is let go.
 const NVML_IDLE: Duration = Duration::from_secs(5);
-/// A dGPU that appears while OmaAsus runs is left alone this long first.
-const NVML_SETTLE: Duration = Duration::from_secs(15);
+/// A dGPU that comes onto the bus while OmaAsus runs is left alone this long first.
+pub const NVML_SETTLE: Duration = Duration::from_secs(15);
 /// After letting go, stay away this long so runtime PM can suspend the GPU.
 const NVML_REST: Duration = Duration::from_secs(20);
 /// How often to look for an NVIDIA GPU that isn't on the bus.
@@ -185,10 +221,8 @@ struct NvidiaSource {
     next_scan: Option<std::time::Instant>,
     /// What the last sample found.
     state: Option<DgpuState>,
-    /// Since when the dGPU has been on the bus.
-    present_since: Option<std::time::Instant>,
-    /// A sample has been taken (a dGPU there from the start doesn't settle).
-    observed: bool,
+    /// Whether the last sample found the dGPU on the bus (`None` before the first).
+    was_present: Option<bool>,
 }
 
 impl NvidiaSource {
@@ -199,16 +233,14 @@ impl NvidiaSource {
         }
         let state = oma_hw::nvidia::power_state(self.device.as_deref());
         self.state = Some(state);
-        // A dGPU that appears while running (resume, a mode switch) is often
-        // about to be switched off again by supergfxd: give it time first.
-        if matches!(state, DgpuState::Absent) {
-            self.present_since = None;
-        } else if self.present_since.is_none() {
-            self.present_since = Some(if self.observed { now } else { now.checked_sub(NVML_SETTLE).unwrap_or(now) });
+        // A dGPU that comes onto the bus while running (resume, a mode switch) is
+        // often about to be switched off again: everything waits it out (the gate).
+        let present = !matches!(state, DgpuState::Absent);
+        if let Ok(mut g) = GATE.lock() {
+            g.arrived = next_arrival(self.was_present, present, g.arrived, now);
         }
-        self.observed = true;
-        let settling = self.present_since.is_some_and(|t| now.duration_since(t) < NVML_SETTLE);
-        let keep_away = settling || self.rest_until.is_some_and(|t| now < t) || !dgpu_open_ok();
+        self.was_present = Some(present);
+        let keep_away = self.rest_until.is_some_and(|t| now < t) || !dgpu_open_ok();
         if nvml_action(state, keep_away) == NvmlAction::Release {
             self.gpu = None;
             self.idle_since = None;
@@ -510,16 +542,26 @@ mod tests {
     }
 
     #[test]
-    fn the_dgpu_is_left_alone_when_the_gate_is_closed() {
-        allow_dgpu(false);
-        assert!(!dgpu_open_ok(), "graphics mode doesn't use it");
-        allow_dgpu(true);
-        hold_off_dgpu(Duration::from_secs(60));
-        assert!(!dgpu_open_ok(), "held off after resume or a graphics event");
-        hold_off_dgpu(Duration::from_secs(1));
-        assert!(!dgpu_open_ok(), "a shorter hold doesn't cut a longer one short");
-        GATE.lock().expect("gate").hold_until = None;
-        assert!(dgpu_open_ok());
+    fn the_dgpu_gate_opens_only_when_everything_agrees() {
+        let now = std::time::Instant::now();
+        let ago = |s| now.checked_sub(Duration::from_secs(s)).expect("uptime");
+        let known = DgpuGate { mode_ok: Some(true), ..Default::default() };
+        assert!(known.open(now));
+        assert!(!DgpuGate::default().open(now), "supergfxd's state not read yet");
+        assert!(!DgpuGate { mode_ok: Some(false), ..known }.open(now), "the graphics mode doesn't use it");
+        assert!(!DgpuGate { hold_until: Some(now + Duration::from_secs(5)), ..known }.open(now), "a switch is running");
+        assert!(DgpuGate { hold_until: Some(ago(1)), ..known }.open(now), "the switch is over");
+        assert!(!DgpuGate { arrived: Some(ago(3)), ..known }.open(now), "just came onto the bus");
+        assert!(DgpuGate { arrived: Some(ago(20)), ..known }.open(now), "settled");
+    }
+
+    #[test]
+    fn only_a_dgpu_that_comes_back_waits() {
+        let now = std::time::Instant::now();
+        assert_eq!(next_arrival(None, true, None, now), None, "there from the start");
+        assert_eq!(next_arrival(Some(false), true, None, now), Some(now), "came back on the bus");
+        assert_eq!(next_arrival(Some(true), true, Some(now), now), Some(now), "still settling");
+        assert_eq!(next_arrival(Some(true), false, Some(now), now), None, "gone again");
     }
 
     #[test]

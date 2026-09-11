@@ -59,12 +59,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .collect();
         column![widgets::eyebrow(p, label), Row::with_children(buttons).spacing(space::SM).wrap()].spacing(space::SM).into()
     };
-    let epp_options: Vec<String> = if info.available_epp.len() > 1 {
-        info.available_epp.clone()
-    } else {
-        // amd-pstate-epp collapses the list to `performance` under the performance governor.
-        vec!["default".into(), "performance".into(), "balance_performance".into(), "balance_power".into(), "power".into()]
-    };
+    // Detection already fills in the list where the governor pins it
+    // (oma_hw::cpu::epp_choices); a CPU without EPP has none to offer.
+    let epp_options: Vec<String> = info.available_epp.clone();
     let toggles = row![
         toggle(p, "Core boost", edit.boost.unwrap_or(true), info.has_boost, |b| Message::Cpu(CpuMsg::Boost(b))),
         toggle(p, "SMT (threads)", edit.smt.unwrap_or(true), info.has_smt_control, |b| Message::Cpu(CpuMsg::Smt(b))),
@@ -90,7 +87,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .spacing(space::SM)
     .align_y(iced::Alignment::Center);
     let note: Element<Message> = if app.controller_ready || oma_hw::helper::Controller::is_root() { iced::widget::Space::new().height(0.0).into() } else { widgets::pill(p, "Helper not installed — changes will fail. See Settings.", p.warn) };
-    let epp_row: Element<Message> = if info.has_epp { chips("Energy performance preference", &epp_options, edit.epp.as_deref().unwrap_or(""), CpuMsg::Epp) } else { iced::widget::Space::new().height(0.0).into() };
+    let epp_row: Element<Message> = if info.has_epp {
+        let row = chips("Energy performance preference", &epp_options, edit.epp.as_deref().unwrap_or(""), CpuMsg::Epp);
+        if oma_hw::knowledge::epp_pinned_by_governor(&edit.governor) {
+            column![row, widgets::dim(p, "The performance governor holds EPP at performance; the others take effect under powersave.")].spacing(space::XS).into()
+        } else {
+            row
+        }
+    } else {
+        iced::widget::Space::new().height(0.0).into()
+    };
     let control = widgets::card(
         p,
         Column::new()
