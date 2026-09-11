@@ -154,7 +154,8 @@ fn wait_for_switch() -> Task<Message> {
             let conn = zbus::Connection::system().await.ok();
             // A logout wait (30 s in supergfxd) plus the switch itself.
             while started.elapsed() < std::time::Duration::from_secs(90) {
-                telemetry::hold_off_dgpu(std::time::Duration::from_secs(3));
+                // Longer than a slow pass (two calls, 3 s timeout each), so the hold never lapses.
+                telemetry::hold_off_dgpu(std::time::Duration::from_secs(8));
                 if let Some(c) = &conn
                     && let Ok((mode, pending)) = oma_hw::supergfx::switch_state(c).await
                     && oma_hw::supergfx::switch_done(mode, pending)
@@ -1778,7 +1779,16 @@ impl App {
             }
             Message::DgpuReady(ready) => {
                 self.dgpu_wait = false;
-                let Some(p) = self.active_profile().filter(|p| ready && p.gpu.nvidia.is_some()).cloned() else { return Task::none() };
+                if !ready {
+                    // Where the mode stopped using the dGPU there is nothing to apply; otherwise say so.
+                    if telemetry::dgpu_gate() != telemetry::DgpuGateState::ModeOff {
+                        tracing::warn!("deferred NVIDIA settings not applied: the dGPU didn't become ready");
+                        self.toast = Some(("NVIDIA settings weren't applied: the dGPU didn't become ready. Apply the profile again once it is".into(), false));
+                        self.toast_at = Some(std::time::Instant::now());
+                    }
+                    return Task::none();
+                }
+                let Some(p) = self.active_profile().filter(|p| p.gpu.nvidia.is_some()).cloned() else { return Task::none() };
                 let name = p.name.clone();
                 Task::perform(crate::apply::apply_nvidia(p), move |r| Message::NvidiaApplied(name.clone(), r))
             }
@@ -1788,7 +1798,8 @@ impl App {
                     self.toast = Some((e, false));
                     self.toast_at = Some(std::time::Instant::now());
                 }
-                Task::none()
+                // The gate closed again before it ran (another switch): wait once more.
+                if report.nvidia_deferred { self.nvidia_when_ready() } else { Task::none() }
             }
             Message::Applied(r) => {
                 self.toast = Some(match r {

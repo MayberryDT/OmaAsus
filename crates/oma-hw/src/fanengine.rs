@@ -165,15 +165,22 @@ impl FanEngine {
                         if let Some(st) = self.state.get_mut(&fa.target) {
                             let blind = now.saturating_duration_since(*st.blind_since.get_or_insert(now));
                             let top = curve.points.iter().map(|p| p.1).fold(curve.min_duty, f64::max).clamp(floor, 100.0);
-                            if blind >= BLIND_LIMIT && (st.last_duty - top).abs() >= 0.5 {
+                            // Sent again after a failed write too (`resend`), or a fan that
+                            // couldn't be set would stay where it was for the whole blind spell.
+                            if blind >= BLIND_LIMIT && (st.resend || (st.last_duty - top).abs() >= 0.5) {
                                 st.last_duty = top;
+                                st.resend = false;
                                 out.push(Command { target: fa.target.clone(), duty: Some(top), hw_curve: None });
                             }
                         }
                         continue;
                     };
-                    if let Some(st) = self.state.get_mut(&fa.target) {
-                        st.blind_since = None;
+                    // Back from a hold that went to the top: drive from this reading,
+                    // not the one before the hold (hysteresis would pin the top).
+                    if let Some(st) = self.state.get_mut(&fa.target)
+                        && st.blind_since.take().is_some_and(|since| now.saturating_duration_since(since) >= BLIND_LIMIT)
+                    {
+                        st.resend = true;
                     }
                     let want = curve.duty_at(t).max(floor);
                     let st = self.state.entry(fa.target.clone()).or_insert(ChannelState::new(-1.0, t));
@@ -302,6 +309,26 @@ mod tests {
         assert!(e.evaluate(&cooling, &blind, now + Duration::from_secs(20)).is_empty(), "still holds");
         let c = e.evaluate(&cooling, &blind, now + Duration::from_secs(32));
         assert_eq!(c.first().and_then(|c| c.duty), Some(90.0), "the curve's top");
+        // 30.5 °C on (30, 20)→(80, 90) is 20.7 %.
+        let c = e.evaluate(&cooling, &Temps { gpu: Some(30.5), ..Default::default() }, now + Duration::from_secs(33));
+        assert!(c.first().and_then(|c| c.duty).is_some_and(|d| (d - 20.7).abs() < 1e-6), "back on the curve at once, not held at the top by hysteresis: {c:?}");
+    }
+
+    #[test]
+    fn a_failed_top_write_while_blind_is_retried() {
+        let mut e = FanEngine::new(Duration::from_secs(1));
+        let mut cooling = CoolingSettings::default();
+        cooling.set(FanTarget::new("superio:pwm2"), FanMode::Curve(FanCurve { points: vec![(30.0, 20.0), (80.0, 90.0)], ramp_s: 0.0, hysteresis_c: 0.0, min_duty: 0.0, source: TempSource::Gpu }));
+        let now = Instant::now();
+        let c = e.evaluate(&cooling, &Temps { gpu: Some(30.0), ..Default::default() }, now);
+        e.report(&c[0], true, now);
+        let blind = Temps { gpu_unread: true, ..Default::default() };
+        let _ = e.evaluate(&cooling, &blind, now + Duration::from_secs(1));
+        let c = e.evaluate(&cooling, &blind, now + Duration::from_secs(32));
+        assert_eq!(c.first().and_then(|c| c.duty), Some(90.0));
+        e.report(&c[0], false, now + Duration::from_secs(32));
+        let c = e.evaluate(&cooling, &blind, now + Duration::from_secs(32) + RETRY + Duration::from_secs(1));
+        assert_eq!(c.first().and_then(|c| c.duty), Some(90.0), "sent again after the backoff");
     }
 
     #[test]

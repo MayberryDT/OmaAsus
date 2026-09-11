@@ -280,12 +280,14 @@ async fn restore(conn: zbus::Connection, claims: ClaimMap, client: String) {
     if !c.nvidia_fans.is_empty() {
         // supergfxd kills whatever holds the dGPU while it switches: wait for a
         // running switch to finish (bounded: a refused one leaves its mode set).
-        for _ in 0..180 {
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(90) {
             match oma_hw::supergfx::switch_state(&conn).await {
-                // No supergfxd, or nothing (left) to wait for.
-                Err(_) => break,
                 Ok((mode, pending)) if oma_hw::supergfx::switch_done(mode, pending) => break,
-                Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+                // Not there at all: nothing to wait for.
+                Err(_) if !oma_hw::supergfx::present(&conn).await => break,
+                // Switching, or there but not answering (blocked mid-switch): wait.
+                _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
             }
         }
         // NVML would wake a sleeping GPU; one that is off has had its driver
@@ -460,15 +462,27 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(IDLE_CHECK).await;
-            let idle = last_active.lock().unwrap().elapsed();
-            let guarding = claims.lock().unwrap().values().any(|c| !c.sysfs.is_empty() || !c.nvidia_fans.is_empty());
-            if may_exit(idle, guarding, in_flight.load(Ordering::SeqCst) + restoring.load(Ordering::SeqCst)) {
-                info!(idle_s = idle.as_secs(), "idle; exiting (D-Bus starts the helper again when needed)");
+            let quiet = || {
+                let idle = last_active.lock().unwrap().elapsed();
+                let guarding = claims.lock().unwrap().values().any(|c| !c.sysfs.is_empty() || !c.nvidia_fans.is_empty());
+                (idle, may_exit(idle, guarding, in_flight.load(Ordering::SeqCst) + restoring.load(Ordering::SeqCst)))
+            };
+            let (idle, go) = quiet();
+            if go {
                 // Hand the name back first, so a new call starts a fresh helper
                 // rather than reaching this one as it goes.
                 let _ = conn.release_name(BUS_NAME).await;
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                std::process::exit(0);
+                // A call that got in meanwhile keeps it running, so its claims
+                // aren't lost; it takes the name back unless a fresh helper has it.
+                if quiet().1 {
+                    info!(idle_s = idle.as_secs(), "idle; exiting (D-Bus starts the helper again when needed)");
+                    std::process::exit(0);
+                }
+                if conn.request_name(BUS_NAME).await.is_err() {
+                    std::process::exit(0);
+                }
+                info!("a call arrived while going idle; staying");
             }
         }
     });
