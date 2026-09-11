@@ -1,0 +1,19 @@
+# pacman's own hooks reload systemd, udev (re-triggering devices) and the
+# system bus when the package's files change.
+
+post_install() {
+    cat <<'EOF'
+==> The OmaAsus helper starts on demand over D-Bus; there is nothing to enable.
+==> To start the overlay and automation at login:
+      systemctl --user enable --now omaasus.service
+EOF
+}
+
+post_upgrade() {
+    # A running helper keeps the old binary until it idles out.
+    systemctl try-restart oma-helper.service 2>/dev/null || :
+}
+
+pre_remove() {
+    systemctl stop oma-helper.service 2>/dev/null || :
+}
