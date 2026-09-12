@@ -152,19 +152,19 @@ fn layout(app: &App, size: iced::Size) -> Element<'_, Message> {
         (None, Some(d)) => rgb_editor(app, d),
         (None, None) => widgets::dim(p, if any { "Select a device." } else { "Lighting devices appear here when asusd or OpenRGB reports them." }),
     };
-    let summary = profile_summary(app, profile);
 
     if size.width >= 900.0 && size.height >= 620.0 {
-        let device_list: Element<Message> = if list.is_empty() { widgets::dim(p, "Nothing to control yet.") } else { scrollable(Column::with_children(list).spacing(space::XS)).height(Length::Fill).into() };
+        let device_list: Element<Message> = if list.is_empty() { widgets::dim(p, "Nothing to control yet.") } else { scrollable(container(Column::with_children(list).spacing(space::XS)).padding(iced::Padding { right: 14.0, ..iced::Padding::ZERO })).height(Length::Fill).into() };
         let device_card = widgets::card(p, column![widgets::eyebrow(p, "Devices"), device_list].spacing(space::MD).height(Length::Fill)).width(Length::Fixed(320.0)).height(Length::FillPortion(3));
         let editor = widgets::card(p, scrollable(editor).height(Length::Fill)).width(Length::Fill).height(Length::Fill);
+        let summary = container(profile_summary(app, profile, true)).height(Length::FillPortion(2));
         let left = column![device_card, summary].spacing(space::LG).width(Length::Fixed(320.0)).height(Length::Fill);
         column![header, row![left, editor].spacing(space::LG).height(Length::Fill)].spacing(space::LG).height(Length::Fill).into()
     } else {
         // A narrow tile: one scrolling column, every card at its natural height.
         let device_list: Element<Message> = if list.is_empty() { widgets::dim(p, "Nothing to control yet.") } else { Column::with_children(list).spacing(space::XS).into() };
         let devices = widgets::card(p, column![widgets::eyebrow(p, "Devices"), device_list].spacing(space::MD)).width(Length::Fill);
-        scrollable(column![header, devices, widgets::card(p, editor).width(Length::Fill), summary].spacing(space::LG)).height(Length::Fill).into()
+        scrollable(column![header, devices, widgets::card(p, editor).width(Length::Fill), profile_summary(app, profile, false)].spacing(space::LG)).height(Length::Fill).into()
     }
 }
 
@@ -344,7 +344,9 @@ fn rgb_editor<'a>(app: &'a App, d: &'a RgbDevice) -> Element<'a, Message> {
 }
 
 /// What the active profile shows on each device.
-fn profile_summary<'a>(app: &'a App, profile: &str) -> Element<'a, Message> {
+/// `fill`: take the height given and scroll the list inside (the wide
+/// layout); otherwise the natural height (inside the narrow tile's scroll).
+fn profile_summary<'a>(app: &'a App, profile: &str, fill: bool) -> Element<'a, Message> {
     let p = app.palette;
     let devices = model_lights(app);
     let rows: Vec<Element<Message>> = app
@@ -374,17 +376,33 @@ fn profile_summary<'a>(app: &'a App, profile: &str) -> Element<'a, Message> {
                         LightingMode::Thermal { .. } => p.warn,
                         _ => p.accent,
                     };
-                    let mut who = Column::new().spacing(2.0).push(widgets::body(p, name));
-                    if let Some(why) = absent {
-                        who = who.push(widgets::dim(p, why));
-                    }
-                    row![who, widgets::hfill(), widgets::pill(p, label, tint), widgets::btn(p, "Forget", ButtonKind::Ghost, Some(msg(LightingMsg::Forget(key.clone()))))].spacing(space::SM).align_y(iced::Alignment::Center).into()
+                    // The card is narrow and device names are long: the name takes the
+                    // width and wraps, the pill keeps its size, and the second line
+                    // carries the note and a small "forget" so nothing can run past
+                    // the card's edge.
+                    let name = iced::widget::text(name).size(size::BODY).font(theme::font::SANS).color(p.text).width(Length::Fill);
+                    let forget = iced::widget::button(iced::widget::text("forget").size(size::CAPTION).font(theme::font::MONO).color(p.text_secondary)).padding([2, 6]).style(widgets::button_style(p, ButtonKind::Ghost)).on_press(msg(LightingMsg::Forget(key.clone())));
+                    let note: Element<Message> = match absent {
+                        Some(why) => widgets::dim(p, why),
+                        None => iced::widget::Space::new().width(Length::Fill).into(),
+                    };
+                    column![
+                        row![name, widgets::pill(p, label, tint)].spacing(space::SM).align_y(iced::Alignment::Center),
+                        row![container(note).width(Length::Fill), forget].spacing(space::SM).align_y(iced::Alignment::Center),
+                    ]
+                    .spacing(2.0)
+                    .into()
                 })
                 .collect()
         })
         .unwrap_or_default();
     let blurb = if rows.is_empty() { format!("“{profile}” leaves lighting as it is. Pick a colour or effect and it's kept here.") } else { format!("Shown whenever “{profile}” is activated.") };
-    widgets::card(p, column![widgets::eyebrow(p, "Profile lighting"), widgets::dim(p, blurb), Column::with_children(rows).spacing(space::XS)].spacing(space::MD)).width(Length::Fill).into()
+    let list = Column::with_children(rows).spacing(space::SM);
+    // Room on the right for the scrollbar, so it never sits on a pill.
+    let list: Element<Message> = if fill { scrollable(container(list).padding(iced::Padding { right: 14.0, ..iced::Padding::ZERO })).height(Length::Fill).into() } else { list.into() };
+    let body = column![widgets::eyebrow(p, "Profile lighting"), widgets::dim(p, blurb), list].spacing(space::MD);
+    let card = if fill { widgets::card(p, body.height(Length::Fill)).height(Length::Fill) } else { widgets::card(p, body) };
+    card.width(Length::Fill).into()
 }
 
 pub fn swatch<'a, M: 'a>(c: iced::Color, size: f32) -> Element<'a, M> {
