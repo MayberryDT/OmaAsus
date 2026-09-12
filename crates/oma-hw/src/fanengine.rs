@@ -58,11 +58,16 @@ pub struct Command {
     pub duty: Option<f64>,
     /// Hardware curve to program (nct6775 Smart Fan IV), if the mode asks for it.
     pub hw_curve: Option<FanCurve>,
+    /// Issue order per engine: a backend drops a command an older number
+    /// than the newest it has seen for the target, and the engine ignores
+    /// the result of one, so a slow write can never land after a newer one.
+    #[serde(default)]
+    pub seq: u64,
 }
 
 impl Command {
     fn release(target: &FanTarget) -> Self {
-        Self { target: target.clone(), duty: None, hw_curve: None }
+        Self { target: target.clone(), duty: None, hw_curve: None, seq: 0 }
     }
 
     /// Hands the output back to firmware/driver rather than setting it.
@@ -106,6 +111,9 @@ pub struct FanEngine {
     /// When the last evaluation ran: ramps use the real elapsed time, so they
     /// hold at any telemetry rate.
     last_eval: Option<Instant>,
+    /// Issue counter for [`Command::seq`], and the newest number per target.
+    next_seq: u64,
+    latest: BTreeMap<FanTarget, u64>,
 }
 
 impl FanEngine {
@@ -148,14 +156,14 @@ impl FanEngine {
                     let changed = self.state.get(&fa.target).is_none_or(|s| s.resend || (s.last_duty - d).abs() > 0.01);
                     if changed {
                         self.state.insert(fa.target.clone(), ChannelState::new(d, 0.0));
-                        out.push(Command { target: fa.target.clone(), duty: Some(d), hw_curve: None });
+                        out.push(Command { target: fa.target.clone(), duty: Some(d), hw_curve: None, seq: 0 });
                     }
                 }
                 FanMode::HardwareCurve(curve) => {
                     // Programmed once, and again when re-applied or edited.
                     if self.state.get(&fa.target).is_none_or(|s| s.resend || s.curve.as_ref() != Some(curve)) {
                         self.state.insert(fa.target.clone(), ChannelState { curve: Some(curve.clone()), ..ChannelState::new(-1.0, 0.0) });
-                        out.push(Command { target: fa.target.clone(), duty: None, hw_curve: Some(curve.clone()) });
+                        out.push(Command { target: fa.target.clone(), duty: None, hw_curve: Some(curve.clone()), seq: 0 });
                     }
                 }
                 FanMode::Curve(curve) => {
@@ -170,7 +178,7 @@ impl FanEngine {
                             if blind >= BLIND_LIMIT && (st.resend || (st.last_duty - top).abs() >= 0.5) {
                                 st.last_duty = top;
                                 st.resend = false;
-                                out.push(Command { target: fa.target.clone(), duty: Some(top), hw_curve: None });
+                                out.push(Command { target: fa.target.clone(), duty: Some(top), hw_curve: None, seq: 0 });
                             }
                         }
                         continue;
@@ -187,7 +195,7 @@ impl FanEngine {
                     let st = self.state.entry(fa.target.clone()).or_insert(ChannelState::new(-1.0, t));
                     if st.resend || st.last_duty < 0.0 {
                         *st = ChannelState::new(want, t);
-                        out.push(Command { target: fa.target.clone(), duty: Some(want), hw_curve: None });
+                        out.push(Command { target: fa.target.clone(), duty: Some(want), hw_curve: None, seq: 0 });
                         continue;
                     }
                     // Hysteresis: ignore small temperature wiggles when cooling down.
@@ -202,7 +210,7 @@ impl FanEngine {
                     if (next - st.last_duty).abs() >= 0.5 {
                         st.last_duty = next;
                         st.last_temp = t;
-                        out.push(Command { target: fa.target.clone(), duty: Some(next), hw_curve: None });
+                        out.push(Command { target: fa.target.clone(), duty: Some(next), hw_curve: None, seq: 0 });
                     }
                 }
             }
@@ -224,11 +232,32 @@ impl FanEngine {
                 out.push(Command::release(t));
             }
         }
-        out
+        self.number(out)
     }
 
-    /// Feed back the outcome of writing `cmd`.
+    /// Stamp every command with its issue number.
+    fn number(&mut self, cmds: Vec<Command>) -> Vec<Command> {
+        cmds.into_iter()
+            .map(|mut c| {
+                self.next_seq += 1;
+                c.seq = self.next_seq;
+                self.latest.insert(c.target.clone(), c.seq);
+                c
+            })
+            .collect()
+    }
+
+    /// Whether `cmd` is the newest the engine issued for its target.
+    pub fn is_current(&self, cmd: &Command) -> bool {
+        self.latest.get(&cmd.target).is_none_or(|&n| cmd.seq >= n)
+    }
+
+    /// Feed back the outcome of writing `cmd`. The result of a command a
+    /// newer one has replaced says nothing about the output now.
     pub fn report(&mut self, cmd: &Command, ok: bool, now: Instant) {
+        if !self.is_current(cmd) {
+            return;
+        }
         if cmd.is_release() {
             // A failed release stays pending and is retried.
             if ok {
@@ -251,13 +280,14 @@ impl FanEngine {
         let targets: BTreeSet<FanTarget> = self.state.keys().chain(self.pending_release.keys()).cloned().collect();
         self.state.clear();
         self.backoff.clear();
-        targets
+        let cmds = targets
             .into_iter()
             .map(|t| {
                 self.pending_release.insert(t.clone(), now + RETRY);
                 Command::release(&t)
             })
-            .collect()
+            .collect();
+        self.number(cmds)
     }
 
     /// Send every driven output again on the next tick (profile re-applied).
@@ -289,6 +319,25 @@ impl FanEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_replaced_commands_result_is_ignored_and_numbers_climb() {
+        let t = FanTarget::new("hwmon:nct6775:pwm2");
+        let mut e = FanEngine::new(Duration::from_millis(500));
+        let now = Instant::now();
+        let first = e.evaluate(&fixed(t.clone(), 40.0), &Temps::default(), now);
+        let second = e.evaluate(&fixed(t.clone(), 60.0), &Temps::default(), now + Duration::from_secs(1));
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert!(second[0].seq > first[0].seq);
+        assert!(!e.is_current(&first[0]), "replaced");
+        assert!(e.is_current(&second[0]));
+        // A late failure of the replaced write must not put the output into backoff.
+        e.report(&first[0], false, now + Duration::from_secs(2));
+        assert!(e.backoff.is_empty());
+        e.report(&second[0], false, now + Duration::from_secs(2));
+        assert!(e.backoff.contains_key(&t), "the current write's failure counts");
+    }
 
     fn fixed(target: FanTarget, d: f64) -> CoolingSettings {
         let mut c = CoolingSettings::default();
@@ -390,13 +439,15 @@ mod tests {
 
         // The next profile no longer drives the output.
         let cmds = e.evaluate(&CoolingSettings::default(), &Temps::default(), now);
-        assert_eq!(cmds, vec![Command::release(&FanTarget::new("superio:pwm2"))]);
+        let releases = |cmds: &[Command]| cmds.iter().map(|c| (c.target.clone(), c.is_release())).collect::<Vec<_>>();
+        assert_eq!(releases(&cmds), vec![(FanTarget::new("superio:pwm2"), true)]);
         assert!(!e.is_idle());
 
         // Unconfirmed: retried after the pause, not before.
         assert!(e.evaluate(&CoolingSettings::default(), &Temps::default(), now + Duration::from_secs(1)).is_empty());
         let retry = e.evaluate(&CoolingSettings::default(), &Temps::default(), now + RETRY);
-        assert_eq!(retry, vec![Command::release(&FanTarget::new("superio:pwm2"))]);
+        assert_eq!(releases(&retry), vec![(FanTarget::new("superio:pwm2"), true)]);
+        assert!(retry[0].seq > cmds[0].seq, "the retry is a newer command");
         e.report(&retry[0], true, now + RETRY);
         assert!(e.is_idle());
     }

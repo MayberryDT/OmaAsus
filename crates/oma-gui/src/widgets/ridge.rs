@@ -35,8 +35,13 @@ impl<M> canvas::Program<M> for Ridge<'_> {
             let dx = w / (n as f32 - 1.0);
             let x0 = 0.0;
             let y = |v: f32| base - ((v - lo) / (hi - lo)).clamp(0.0, 1.0) * band;
-            let pts: Vec<Point> = data.iter().enumerate().map(|(i, &v)| Point::new(x0 + dx * i as f32, y(v))).collect();
-            let curve = |b: &mut canvas::path::Builder| {
+            // A missing reading is a gap, not a dip to the baseline.
+            let raw: Vec<(f32, f32)> = data.iter().enumerate().map(|(i, &v)| (x0 + dx * i as f32, if v.is_finite() { y(v) } else { f32::NAN })).collect();
+            let runs: Vec<Vec<Point>> = crate::widgets::finite_runs(&raw).into_iter().map(|run| run.into_iter().map(|(x, y)| Point::new(x, y)).collect()).collect();
+            if runs.is_empty() {
+                continue;
+            }
+            let curve = |b: &mut canvas::path::Builder, pts: &[Point]| {
                 for wnd in pts.windows(2) {
                     let (a, c) = (wnd[0], wnd[1]);
                     let mid = Point::new((a.x + c.x) / 2.0, (a.y + c.y) / 2.0);
@@ -45,15 +50,19 @@ impl<M> canvas::Program<M> for Ridge<'_> {
                 b.line_to(*pts.last().unwrap());
             };
             let area = Path::new(|b| {
-                b.move_to(Point::new(pts[0].x, base));
-                b.line_to(pts[0]);
-                curve(b);
-                b.line_to(Point::new(pts.last().unwrap().x, base));
-                b.close();
+                for pts in &runs {
+                    b.move_to(Point::new(pts[0].x, base));
+                    b.line_to(pts[0]);
+                    curve(b, pts);
+                    b.line_to(Point::new(pts.last().unwrap().x, base));
+                    b.close();
+                }
             });
             let line = Path::new(|b| {
-                b.move_to(pts[0]);
-                curve(b);
+                for pts in &runs {
+                    b.move_to(pts[0]);
+                    curve(b, pts);
+                }
             });
             // Fill knocks out what is behind it (dark), then tints.
             f.fill(&area, theme::alpha(self.palette.bg, 0.85));

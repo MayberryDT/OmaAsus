@@ -69,6 +69,7 @@ fn view_inner(app: &App, compact: bool, size_avail: iced::Size) -> Element<'_, M
             widgets::pill(p, if app.controller_ready { "helper connected" } else { "read-only" }, if app.controller_ready { p.ok } else { p.warn }),
         ]
         .spacing(space::XS),
+        apply_status(app),
         widgets::dim(p, &app.inventory_title),
     ]
     .spacing(space::SM);
@@ -171,7 +172,7 @@ fn view_inner(app: &App, compact: bool, size_avail: iced::Size) -> Element<'_, M
             (true, None) => "discrete GPU".into(),
             (false, _) => "package".into(),
         };
-        tiles.push(spark(power_name, if nvidia { &app.hist.gpu_power } else { &app.hist.power }, 0.0, power_max.max(1.0), p.power, format!("{:.0}", sm.power_w), "W", caption).into());
+        tiles.push(spark(power_name, if nvidia { &app.hist.gpu_power } else { &app.hist.power }, 0.0, power_max.max(1.0), p.power, widgets::fmt0(sm.power_w), "W", caption).into());
     }
     let sparks: Element<Message> = if compact { Column::with_children(tiles).spacing(space::MD).height(Length::Fill).into() } else { Row::with_children(tiles).spacing(space::LG).height(Length::Fill).into() };
 
@@ -238,4 +239,35 @@ fn view_inner(app: &App, compact: bool, size_avail: iced::Size) -> Element<'_, M
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
+}
+
+/// What the last profile apply did, or what is applying now: the requested
+/// profile is the name above; this is whether the hardware followed.
+fn apply_status(app: &App) -> Element<'_, Message> {
+    use crate::coordinator::Status;
+    let p = app.palette;
+    let Some(status) = app.coord.status(app.now) else { return iced::widget::Space::new().height(0.0).into() };
+    let age = |d: std::time::Duration| if d.as_secs() < 60 { format!("{}s ago", d.as_secs()) } else { format!("{}m ago", d.as_secs() / 60) };
+    match status {
+        Status::Applying { name, then } => {
+            let text = match then {
+                Some(next) => format!("applying {name}, then {next}"),
+                None => format!("applying {name}…"),
+            };
+            row![widgets::pill(p, text, p.accent)].into()
+        }
+        Status::Ok { applied, skipped, age: a, .. } => {
+            let mut line = format!("{applied} settings in place · {}", age(a));
+            if !skipped.is_empty() {
+                line.push_str(&format!(" · skipped {}", skipped.join(", ")));
+            }
+            widgets::dim(p, line)
+        }
+        Status::Failed { id, failed, applied, age: a, .. } => column![
+            row![widgets::pill(p, format!("{} failed", failed.len()), p.danger), widgets::dim(p, format!("{applied} in place · {}", age(a))), widgets::btn(p, "Retry", widgets::ButtonKind::Ghost, Some(Message::ApplyProfile(id)))].spacing(space::XS).align_y(iced::Alignment::Center),
+            widgets::dim(p, failed.join(" · ")),
+        ]
+        .spacing(space::XS)
+        .into(),
+    }
 }

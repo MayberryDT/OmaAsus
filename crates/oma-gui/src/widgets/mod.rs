@@ -234,3 +234,42 @@ pub fn temp_row<'a, M: 'a>(p: Palette, r: &crate::telemetry::Reading) -> Element
     let value = if r.freshness == Freshness::Offline && r.value == 0.0 { "—".to_string() } else { format!("{:.0}°", r.value) };
     row![dim(p, r.label.clone()), hfill(), text(value).size(size::BODY).font(theme::font::MONO).color(col)].align_y(iced::Alignment::Center).into()
 }
+
+/// A number for a label: a missing reading is a dash, never a zero.
+pub fn fmt0(v: f32) -> String {
+    if v.is_finite() { format!("{v:.0}") } else { "—".into() }
+}
+
+/// Split a series into runs of consecutive finite points, so a chart draws a
+/// gap where a reading was missing instead of a line through zero.
+pub fn finite_runs(pts: &[(f32, f32)]) -> Vec<Vec<(f32, f32)>> {
+    let mut runs: Vec<Vec<(f32, f32)>> = Vec::new();
+    let mut open = false;
+    for &(x, y) in pts {
+        if y.is_finite() {
+            if !open {
+                runs.push(Vec::new());
+                open = true;
+            }
+            runs.last_mut().expect("opened").push((x, y));
+        } else {
+            open = false;
+        }
+    }
+    runs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gaps_split_a_series_into_runs() {
+        let nan = f32::NAN;
+        let runs = finite_runs(&[(0.0, 1.0), (1.0, 2.0), (2.0, nan), (3.0, nan), (4.0, 5.0), (5.0, nan)]);
+        assert_eq!(runs, vec![vec![(0.0, 1.0), (1.0, 2.0)], vec![(4.0, 5.0)]]);
+        assert!(finite_runs(&[(0.0, nan)]).is_empty());
+        assert_eq!(fmt0(nan), "—");
+        assert_eq!(fmt0(41.6), "42");
+    }
+}

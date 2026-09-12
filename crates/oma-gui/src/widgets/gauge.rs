@@ -21,6 +21,9 @@ pub struct Gauge {
 
 impl Gauge {
     fn frac(&self) -> f32 {
+        if !self.value.is_finite() {
+            return 0.0;
+        }
         ((self.value - self.min) / (self.max - self.min)).clamp(0.0, 1.0)
     }
 }
@@ -66,9 +69,9 @@ impl<M> canvas::Program<M> for Gauge {
             frame.stroke(&arc(ri, start, start + span * fi.clamp(0.001, 1.0)), Stroke::default().with_width(w * 0.5).with_color(col));
         }
         frame.fill_text(Text {
-            content: format!("{:.*}", self.decimals, self.value),
+            content: if self.value.is_finite() { format!("{:.*}", self.decimals, self.value) } else { "—".into() },
             position: Point::new(c.x, c.y - r * 0.05),
-            color: p.text,
+            color: if self.value.is_finite() { p.text } else { p.text_muted },
             size: (r * 0.5).into(),
             font: theme::font::MONO_MEDIUM,
             align_x: iced::alignment::Horizontal::Center.into(),

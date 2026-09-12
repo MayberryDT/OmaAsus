@@ -11,6 +11,8 @@
 mod app;
 mod apply;
 mod automation;
+mod coordinator;
+mod device_worker;
 mod config_store;
 mod events;
 mod fans;

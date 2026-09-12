@@ -65,27 +65,47 @@ fn glob_match(pattern: &str, s: &str) -> bool {
     }
 }
 
+/// The temperatures rules may act on: the CPU's, and the GPU the machine is
+/// using (an awake discrete card, else the integrated one), so AMD-only
+/// machines have GPU rules too. Missing is missing: a rule on a temperature
+/// nobody read does not fire.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Readings {
+    pub cpu_c: Option<f64>,
+    pub gpu_c: Option<f64>,
+}
+
+impl Readings {
+    pub fn from_snapshot(snap: Option<&crate::telemetry::Snapshot>) -> Self {
+        Self { cpu_c: snap.and_then(|s| s.cpu.tctl_c), gpu_c: snap.and_then(|s| s.gpu()).and_then(|g| g.temp_c) }
+    }
+}
+
 /// Pick the profile that should be active, or `None` for "no change".
 pub fn decide(cfg: &Config, st: &mut AutoState, snap: Option<&crate::telemetry::Snapshot>, now: Instant) -> Option<uuid::Uuid> {
-    let cpu_t = snap.and_then(|s| s.cpu.tctl_c).unwrap_or(0.0);
-    let gpu_t = snap.and_then(|s| s.nvidia.as_ref().and_then(|n| n.temp_c)).unwrap_or(0) as f64;
     let local = chrono::Local::now();
     use chrono::Timelike;
-    let minutes_now = local.hour() * 60 + local.minute();
+    decide_at(cfg, st, Readings::from_snapshot(snap), now, local.hour() * 60 + local.minute())
+}
+
+/// `decide` with the clock passed in: `minutes_now` is the local time of day.
+pub fn decide_at(cfg: &Config, st: &mut AutoState, temps: Readings, now: Instant, minutes_now: u32) -> Option<uuid::Uuid> {
     let mut best: Option<(&oma_hw::profile::Rule, i32)> = None;
-    for r in cfg.rules.iter().filter(|r| r.enabled) {
+    // A rule that names a profile that no longer exists can't be honoured.
+    for r in cfg.rules.iter().filter(|r| r.enabled && cfg.profile(r.profile).is_some()) {
         let raw = match &r.trigger {
             Trigger::GameMode => st.gamemode_clients.unwrap_or(0) > 0,
             Trigger::FullscreenGame => st.fullscreen && st.looks_like_game,
             Trigger::WindowClass(pat) => glob_match(pat, &st.window_class),
             Trigger::Process(name) => st.processes.iter().any(|p| glob_match(name, p)),
-            Trigger::CpuHot { above_c, .. } => cpu_t >= *above_c,
-            Trigger::GpuHot { above_c, .. } => gpu_t >= *above_c,
+            Trigger::CpuHot { above_c, .. } => temps.cpu_c.is_some_and(|t| t >= *above_c),
+            Trigger::GpuHot { above_c, .. } => temps.gpu_c.is_some_and(|t| t >= *above_c),
             Trigger::Time { from, to } => {
                 let a = from.0 as u32 * 60 + from.1 as u32;
                 let b = to.0 as u32 * 60 + to.1 as u32;
                 if a <= b { (a..b).contains(&minutes_now) } else { minutes_now >= a || minutes_now < b }
             }
+            // No idle source exists yet: the rule is shown as unavailable and never fires.
             Trigger::Idle { .. } => false,
         };
         let needs = match &r.trigger {
@@ -198,4 +218,93 @@ pub fn stream() -> impl Stream<Item = AutoEvent> {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oma_hw::profile::{Profile, Rule};
+
+    fn cfg_with(rules: Vec<Rule>) -> (Config, uuid::Uuid, uuid::Uuid) {
+        let mut cfg = Config::empty();
+        let quiet = Profile::new("Quiet");
+        let hot = Profile::new("Cool down");
+        let (q, h) = (quiet.id, hot.id);
+        cfg.profiles = vec![quiet, hot];
+        cfg.active_profile = q;
+        cfg.default_profile = q;
+        cfg.rules = rules;
+        (cfg, q, h)
+    }
+
+    fn rule(name: &str, trigger: Trigger, profile: uuid::Uuid, priority: i32) -> Rule {
+        Rule { id: uuid::Uuid::new_v4(), name: name.into(), enabled: true, trigger, profile, priority, hold_s: 0 }
+    }
+
+    #[test]
+    fn a_gpu_rule_fires_on_an_amd_only_machine_and_not_without_a_reading() {
+        let (mut cfg, _q, hot) = cfg_with(vec![]);
+        cfg.rules = vec![rule("gpu", Trigger::GpuHot { above_c: 80.0, for_s: 0 }, hot, 10)];
+        let mut st = AutoState::default();
+        let now = Instant::now();
+        // The integrated AMD GPU is the machine's GPU: its temperature counts.
+        let amd = crate::telemetry::Snapshot { amd: Some(oma_hw::amdgpu::AmdGpuTelemetry { edge_c: Some(85.0), ..Default::default() }), amd_integrated: true, ..Default::default() };
+        assert_eq!(Readings::from_snapshot(Some(&amd)).gpu_c, Some(85.0));
+        assert_eq!(decide_at(&cfg, &mut st, Readings::from_snapshot(Some(&amd)), now, 600), Some(hot));
+        // No GPU reading at all: the rule stops firing (the default comes back).
+        assert_ne!(decide_at(&cfg, &mut st, Readings::default(), now, 600), Some(hot), "missing is not 0 °C, and not a trigger");
+        assert_eq!(st.matched_rule, None);
+    }
+
+    #[test]
+    fn rules_for_deleted_profiles_and_idle_never_fire() {
+        let (mut cfg, _q, hot) = cfg_with(vec![]);
+        cfg.rules = vec![rule("gone", Trigger::GameMode, uuid::Uuid::new_v4(), 100), rule("idle", Trigger::Idle { for_s: 0 }, hot, 50)];
+        let mut st = AutoState { gamemode_clients: Some(1), ..Default::default() };
+        assert_eq!(decide_at(&cfg, &mut st, Readings::default(), Instant::now(), 600), None);
+        assert_eq!(st.matched_rule, None);
+    }
+
+    #[test]
+    fn priority_then_hold_then_default() {
+        let (mut cfg, quiet, hot) = cfg_with(vec![]);
+        cfg.rules = vec![rule("game", Trigger::GameMode, hot, 10), rule("cpu", Trigger::CpuHot { above_c: 90.0, for_s: 0 }, quiet, 5)];
+        let mut hold = cfg.rules[0].clone();
+        hold.hold_s = 20;
+        cfg.rules[0] = hold;
+        let mut st = AutoState { gamemode_clients: Some(1), ..Default::default() };
+        let t0 = Instant::now();
+        let both = Readings { cpu_c: Some(95.0), gpu_c: None };
+        assert_eq!(decide_at(&cfg, &mut st, both, t0, 600), Some(hot), "higher priority wins");
+        assert_eq!(st.matched_rule.as_deref(), Some("game"));
+        // Game over, CPU cool: held for hold_s, then back to the default.
+        st.gamemode_clients = Some(0);
+        assert_eq!(decide_at(&cfg, &mut st, Readings::default(), t0 + Duration::from_secs(5), 600), None, "within the hold");
+        assert_eq!(decide_at(&cfg, &mut st, Readings::default(), t0 + Duration::from_secs(25), 600), Some(quiet), "hold over: default");
+    }
+
+    #[test]
+    fn a_window_across_midnight_matches_late_and_early() {
+        let (mut cfg, quiet, hot) = cfg_with(vec![]);
+        cfg.rules = vec![rule("night", Trigger::Time { from: (22, 0), to: (6, 0) }, hot, 1)];
+        let mut st = AutoState::default();
+        let now = Instant::now();
+        assert_eq!(decide_at(&cfg, &mut st, Readings::default(), now, 23 * 60), Some(hot));
+        assert_eq!(decide_at(&cfg, &mut st, Readings::default(), now, 3 * 60), Some(hot));
+        assert_eq!(decide_at(&cfg, &mut st, Readings::default(), now, 12 * 60), Some(quiet), "midday: back to the default");
+    }
+
+    #[test]
+    fn a_for_s_trigger_needs_the_condition_to_last() {
+        let (mut cfg, _q, hot) = cfg_with(vec![]);
+        cfg.rules = vec![rule("cpu", Trigger::CpuHot { above_c: 90.0, for_s: 10 }, hot, 1)];
+        let mut st = AutoState::default();
+        let t0 = Instant::now();
+        let hotc = Readings { cpu_c: Some(95.0), gpu_c: None };
+        assert_eq!(decide_at(&cfg, &mut st, hotc, t0, 600), None);
+        assert_eq!(decide_at(&cfg, &mut st, hotc, t0 + Duration::from_secs(11), 600), Some(hot));
+        // A missing reading resets the timer (and ends the match: the default comes back).
+        assert_ne!(decide_at(&cfg, &mut st, Readings::default(), t0 + Duration::from_secs(12), 600), Some(hot));
+        assert_ne!(decide_at(&cfg, &mut st, hotc, t0 + Duration::from_secs(13), 600), Some(hot), "timer restarted");
+    }
 }

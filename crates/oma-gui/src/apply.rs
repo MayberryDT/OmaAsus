@@ -145,7 +145,15 @@ pub async fn apply_profile(p: Profile, cx: Context) -> Report {
         }
         let plan = oma_hw::cpu::plan_writes(&info, &target);
         match ctl.write_batch(&plan).await {
-            Ok(errs) if errs.is_empty() => r.applied.push(format!("CPU {}{}", target.governor, target.epp.as_ref().map(|e| format!("/{e}")).unwrap_or_default())),
+            Ok(errs) if errs.is_empty() => {
+                // Read back what the kernel now reports, so the summary says what
+                // is in place rather than what was sent.
+                let live = tokio::task::spawn_blocking(oma_hw::cpu::control_state).await.ok();
+                match live.and_then(|l| cpu_readback_mismatch(&target, &l)) {
+                    None => r.applied.push(format!("CPU {}{}", target.governor, target.epp.as_ref().map(|e| format!("/{e}")).unwrap_or_default())),
+                    Some(why) => r.failed.push(format!("CPU: written, but the kernel reports {why}")),
+                }
+            }
             Ok(errs) => r.failed.push(format!("CPU: {}", errs.first().map(|(_, e)| e.clone()).unwrap_or_default())),
             Err(e) => r.failed.push(format!("CPU: {e}")),
         }
@@ -246,6 +254,26 @@ pub async fn apply_nvidia(p: Profile) -> Report {
     r
 }
 
+/// What differs between the CPU state a profile asked for and what the
+/// kernel reports afterwards, if anything. Only what was asked for is
+/// compared: an EPP the profile leaves alone is not a mismatch.
+fn cpu_readback_mismatch(wanted: &oma_hw::cpu::CpuControlState, live: &oma_hw::cpu::CpuControlState) -> Option<String> {
+    if !wanted.governor.is_empty() && live.governor != wanted.governor {
+        return Some(format!("governor {}", live.governor));
+    }
+    if let (Some(w), Some(l)) = (&wanted.epp, &live.epp)
+        && w != l
+    {
+        return Some(format!("EPP {l}"));
+    }
+    if let (Some(w), Some(l)) = (wanted.boost, live.boost)
+        && w != l
+    {
+        return Some(format!("boost {}", if l { "on" } else { "off" }));
+    }
+    None
+}
+
 /// A profile describes a complete GPU state: when it names no power limit it
 /// means the card's stock limit, not "whatever the previous profile left".
 /// Otherwise Quiet's 300 W would follow you into Gaming.
@@ -327,6 +355,20 @@ async fn write_attr(name: &str, value: i64, via_asusd: bool, ctl: &Controller) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readback_compares_only_what_was_asked() {
+        use oma_hw::cpu::CpuControlState;
+        let wanted = CpuControlState { governor: "powersave".into(), epp: Some("balance_performance".into()), boost: Some(true), ..Default::default() };
+        let same = CpuControlState { governor: "powersave".into(), epp: Some("balance_performance".into()), boost: Some(true), ..Default::default() };
+        assert_eq!(cpu_readback_mismatch(&wanted, &same), None);
+        let epp_off = CpuControlState { epp: Some("power".into()), ..same.clone() };
+        assert_eq!(cpu_readback_mismatch(&wanted, &epp_off).as_deref(), Some("EPP power"));
+        let no_epp_asked = CpuControlState { epp: None, ..wanted.clone() };
+        assert_eq!(cpu_readback_mismatch(&no_epp_asked, &epp_off), None, "an EPP the profile leaves alone is not a mismatch");
+        let boost_off = CpuControlState { boost: Some(false), ..same.clone() };
+        assert_eq!(cpu_readback_mismatch(&wanted, &boost_off).as_deref(), Some("boost off"));
+    }
 
     #[test]
     fn profile_without_limit_means_stock_limit() {

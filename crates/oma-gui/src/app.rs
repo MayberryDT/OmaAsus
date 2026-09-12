@@ -48,11 +48,12 @@ pub struct History {
     pub power: VecDeque<f32>,
 }
 
-fn push(v: &mut VecDeque<f32>, x: f32) {
+/// A missing reading is stored as NaN: charts draw a gap there, never zero.
+fn push(v: &mut VecDeque<f32>, x: Option<f32>) {
     if v.len() >= HISTORY {
         v.pop_front();
     }
-    v.push_back(x);
+    v.push_back(x.unwrap_or(f32::NAN));
 }
 
 pub struct App {
@@ -61,6 +62,8 @@ pub struct App {
     pub page: Page,
     pub config: Config,
     pub snapshot: Option<Arc<telemetry::Snapshot>>,
+    /// When the last frame arrived: fan control only trusts a fresh one.
+    pub snapshot_at: Option<std::time::Instant>,
     pub hist: History,
     pub inventory: Option<Arc<oma_hw::SystemInventory>>,
     /// What this machine has: detection plus knowledge.
@@ -124,6 +127,8 @@ pub struct App {
     overlay_anchor: Anchor,
     /// Number of the latest profile apply; older ones stop when they see it change.
     apply_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Which apply runs, which waits, and what the last one did.
+    pub coord: crate::coordinator::Coordinator,
     last_reapply: Option<std::time::Instant>,
     /// Deferred NVIDIA settings are waiting for the dGPU to be ready.
     dgpu_wait: bool,
@@ -206,8 +211,24 @@ pub struct Smooth {
     pub load: f32,
 }
 
-fn ease(cur: &mut f32, target: f32, k: f32) {
-    *cur += (target - *cur) * k;
+/// Ease `cur` towards a reading. No reading (None) means unavailable, shown
+/// as such at once; the first reading after a gap is taken as is.
+fn ease(cur: &mut f32, target: Option<f32>, k: f32) {
+    match target {
+        None => *cur = f32::NAN,
+        Some(t) if !cur.is_finite() => *cur = t,
+        Some(t) => *cur += (t - *cur) * k,
+    }
+}
+
+/// The larger of two readings, ignoring ones that are missing.
+fn finite_max(a: f32, b: f32) -> Option<f32> {
+    match (a.is_finite(), b.is_finite()) {
+        (true, true) => Some(a.max(b)),
+        (true, false) => Some(a),
+        (false, true) => Some(b),
+        (false, false) => None,
+    }
 }
 
 /// The curve temperature source matching what an output cools.
@@ -265,6 +286,8 @@ pub enum Message {
     CcReady(bool, Vec<oma_hw::coolercontrol::CcMode>),
     FanBackend(Arc<crate::fans::FanBackend>),
     FanResult(oma_hw::fanengine::Command, Result<(), String>),
+    /// The fan engine's own clock, independent of telemetry frames.
+    FanSafety(std::time::Instant),
     Lighting(LightingMsg),
     Profiles(ProfilesMsg),
     Automation(AutomationMsg),
@@ -294,7 +317,8 @@ pub enum Message {
     /// Whether the dGPU became ready for NVIDIA settings an apply deferred.
     DgpuReady(bool),
     NvidiaApplied(String, crate::apply::Report),
-    ProfileApplied(String, crate::apply::Origin, crate::apply::Report),
+    /// An apply reported back: its generation, so a replaced one is discarded.
+    ProfileApplied(u64, String, crate::apply::Origin, crate::apply::Report),
     System(crate::events::Event),
     ToggleOverlay,
     OpenWindow,
@@ -343,6 +367,7 @@ impl App {
             page: Page::Dashboard,
             config,
             snapshot: None,
+            snapshot_at: None,
             hist: History::default(),
             inventory: None,
             model: None,
@@ -392,6 +417,7 @@ impl App {
             overlay_h: 0,
             overlay_anchor: Anchor::Right | Anchor::Top,
             apply_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            coord: crate::coordinator::Coordinator::default(),
             last_reapply: None,
             dgpu_wait: false,
         };
@@ -452,6 +478,9 @@ impl App {
             Subscription::run(ipc::stream).map(Message::Ipc),
             Subscription::run(crate::automation::stream).map(Message::Auto),
             Subscription::run(crate::events::stream).map(Message::System),
+            // Cooling safety runs on its own clock: a sampler that stops
+            // delivering frames must not stop the engine's fallbacks.
+            iced::time::every(std::time::Duration::from_millis(500)).map(Message::FanSafety),
             tray,
             iced::window::close_events().map(Message::SurfaceClosed),
             anim,
@@ -491,28 +520,49 @@ impl App {
     /// Apply a profile through the pipeline; a newer apply supersedes this one.
     fn start_apply(&mut self, id: uuid::Uuid, origin: crate::apply::Origin) -> Task<Message> {
         let Some(pr) = self.config.profile(id).cloned() else { return Task::none() };
-        self.config.active_profile = id;
+        let request = crate::coordinator::Request { id, name: pr.name.clone(), origin };
+        match self.coord.request(request.clone(), std::time::Instant::now()) {
+            crate::coordinator::Action::Start(generation) => self.launch_apply(generation, request),
+            crate::coordinator::Action::Queued => {
+                // The running apply sees the newer generation and stops at its
+                // next checkpoint; this one starts when it reports back.
+                self.apply_generation.store(self.coord.latest_generation(), std::sync::atomic::Ordering::SeqCst);
+                Task::none()
+            }
+        }
+    }
+
+    /// Run one apply under `generation`: the saved preference changes now, the
+    /// hardware result comes back as `ProfileApplied`.
+    fn launch_apply(&mut self, generation: u64, request: crate::coordinator::Request) -> Task<Message> {
+        let Some(pr) = self.config.profile(request.id).cloned() else { return Task::none() };
+        self.config.active_profile = request.id;
         crate::config_store::save(&self.config);
         // Re-send the new profile's outputs; ones it drops are released by the engine.
         self.fan_engine.invalidate();
         if let Some(be) = &self.fan_backend {
             be.set_power_mode(pr.cpu.power_mode.clone());
         }
-        let this = self.apply_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        let cx = crate::apply::Context { inv: self.inventory.clone(), model: self.model.clone(), generation: self.apply_generation.clone(), this };
+        self.apply_generation.store(generation, std::sync::atomic::Ordering::SeqCst);
+        let cx = crate::apply::Context { inv: self.inventory.clone(), model: self.model.clone(), generation: self.apply_generation.clone(), this: generation };
+        let latest = self.apply_generation.clone();
         let cc = (self.effective_fan_owner() == FanOwner::CoolerControl).then(|| (self.cc_client(), pr.cc_mode.clone()));
-        let name = pr.name.clone();
+        let (name, origin) = (request.name.clone(), request.origin);
         Task::perform(
             async move {
                 let mut report = crate::apply::apply_profile(pr, cx).await;
-                if let Some((cc, Some(mode))) = cc
+                // Never activate a CoolerControl mode for a profile a newer request
+                // has replaced: the newer apply activates its own.
+                let current = !report.superseded && latest.load(std::sync::atomic::Ordering::SeqCst) == generation;
+                if current
+                    && let Some((cc, Some(mode))) = cc
                     && let Err(e) = cc.activate_mode(&mode).await
                 {
                     report.failed.push(format!("CoolerControl: {e}"));
                 }
                 report
             },
-            move |report| Message::ProfileApplied(name.clone(), origin, report),
+            move |report| Message::ProfileApplied(generation, name.clone(), origin, report),
         )
     }
 
@@ -891,10 +941,12 @@ impl App {
                     async move {
                         let path = oma_hw::livedash::hid_path().ok_or("LiveDash OLED not found")?;
                         let ctl = oma_hw::helper::Controller::connect().await;
-                        let cpu = snap.as_ref().and_then(|s| s.cpu.tctl_c).unwrap_or(0.0);
-                        let gpu = snap.as_ref().and_then(|s| s.nvidia.as_ref().and_then(|n| n.temp_c)).unwrap_or(0);
+                        // A reading nobody has is shown as such on the OLED, not as 0.
+                        let show = |t: Option<f64>| t.map(|t| format!("{t:.0}C")).unwrap_or_else(|| "--".into());
+                        let cpu = show(snap.as_ref().and_then(|s| s.cpu.tctl_c));
+                        let gpu = show(snap.as_ref().and_then(|s| s.gpu()).and_then(|g| g.temp_c));
                         ctl.hid_write(&path, &oma_hw::livedash::mode_text()).await.map_err(|e| e.to_string())?;
-                        ctl.hid_write(&path, &oma_hw::livedash::text("CPU / GPU", &format!("{cpu:.0}C  {gpu}C"))).await.map_err(|e| e.to_string())?;
+                        ctl.hid_write(&path, &oma_hw::livedash::text("CPU / GPU", &format!("{cpu}  {gpu}"))).await.map_err(|e| e.to_string())?;
                         Ok("OLED text sent".to_string())
                     },
                     Message::Applied,
@@ -1279,7 +1331,8 @@ impl App {
         if !self.rgb_thermal || !self.rgb_server || !snap.seq.is_multiple_of(4) {
             return Task::none();
         }
-        let t = snap.cpu.tctl_c.unwrap_or(0.0).max(snap.nvidia.as_ref().and_then(|n| n.temp_c).unwrap_or(0) as f64);
+        // Without any temperature there is nothing to tint by: leave the lights alone.
+        let Some(t) = [snap.cpu.tctl_c, snap.gpu().and_then(|g| g.temp_c)].into_iter().flatten().reduce(f64::max) else { return Task::none() };
         let c = theme::thermal(&self.palette, t, 40.0, 90.0);
         let rgb = ((c.r * 255.0) as u8, (c.g * 255.0) as u8, (c.b * 255.0) as u8);
         let idxs: Vec<usize> = self.rgb_devices.iter().map(|d| d.index).collect();
@@ -1287,11 +1340,10 @@ impl App {
     }
 
     /// Run the software fan engine for one telemetry frame.
-    fn fan_tick(&mut self, snap: &telemetry::Snapshot) -> Task<Message> {
+    fn fan_tick(&mut self, now: std::time::Instant) -> Task<Message> {
         // Commands can only be written once the backend exists; until then the
         // engine must not advance, or it would record duties that never landed.
         let Some(be) = self.fan_backend.clone() else { return Task::none() };
-        let now = std::time::Instant::now();
         if self.effective_fan_owner() != FanOwner::OmaAsus {
             if self.fan_engine.is_idle() {
                 return Task::none();
@@ -1301,7 +1353,7 @@ impl App {
             return self.dispatch_fan_cmds(cmds);
         }
         let Some(pr) = self.active_profile().cloned() else { return Task::none() };
-        let temps = crate::fans::temps_from(snap);
+        let temps = crate::fans::control_temps(self.snapshot.as_deref(), self.snapshot_at, now);
         // Drive only outputs this machine has; assignments for absent devices stay in the profile.
         let mut cooling = pr.cooling;
         cooling.fans.retain(|f| be.has(&f.target));
@@ -1498,15 +1550,15 @@ impl App {
     fn update_inner(&mut self, msg: Message) -> Task<Message> {
         match msg {
             Message::Telemetry(telemetry::Event::Frame(snap)) => {
-                push(&mut self.hist.cpu_load, snap.cpu.util_total as f32);
-                push(&mut self.hist.cpu_temp, snap.cpu.tctl_c.unwrap_or(0.0) as f32);
+                push(&mut self.hist.cpu_load, Some(snap.cpu.util_total as f32));
+                push(&mut self.hist.cpu_temp, snap.cpu.tctl_c.map(|t| t as f32));
                 // The GPU worth showing: an awake discrete card, else the integrated one.
                 let gpu = snap.gpu().unwrap_or_default();
-                push(&mut self.hist.gpu_load, gpu.load.unwrap_or(0.0) as f32);
-                push(&mut self.hist.gpu_temp, gpu.temp_c.unwrap_or(0.0) as f32);
-                push(&mut self.hist.gpu_power, snap.nvidia.as_ref().and_then(|n| n.power_w).unwrap_or(0.0) as f32);
-                push(&mut self.hist.coolant, snap.coolant_c.unwrap_or(0.0) as f32);
-                push(&mut self.hist.power, snap.package_w().unwrap_or(0.0) as f32);
+                push(&mut self.hist.gpu_load, gpu.load.map(|l| l as f32));
+                push(&mut self.hist.gpu_temp, gpu.temp_c.map(|t| t as f32));
+                push(&mut self.hist.gpu_power, snap.nvidia.as_ref().and_then(|n| n.power_w).map(|w| w as f32));
+                push(&mut self.hist.coolant, snap.coolant_c.map(|t| t as f32));
+                push(&mut self.hist.power, snap.package_w().map(|w| w as f32));
                 if !self.cpu_synced {
                     self.cpu_edit = snap.cpu_control.clone();
                     self.cpu_synced = true;
@@ -1528,8 +1580,9 @@ impl App {
                 } else {
                     Task::none()
                 };
-                let task = Task::batch([self.fan_tick(&snap), self.rgb_thermal_tick(&snap), rgb_probe, nvidia_info]);
+                let task = Task::batch([self.rgb_thermal_tick(&snap), rgb_probe, nvidia_info]);
                 self.snapshot = Some(snap);
+                self.snapshot_at = Some(std::time::Instant::now());
                 let auto = if self.snapshot.as_ref().map(|s| s.seq % 2 == 0).unwrap_or(false) { self.auto_evaluate() } else { Task::none() };
                 Task::batch([task, auto])
             }
@@ -1612,22 +1665,28 @@ impl App {
                 widgets::set_thermal(self.smooth.heat, self.smooth.load);
                 if let Some(s) = &self.snapshot {
                     let k = 0.12;
-                    ease(&mut self.smooth.cpu_t, s.cpu.tctl_c.unwrap_or(0.0) as f32, k);
-                    ease(&mut self.smooth.gpu_t, s.gpu().and_then(|g| g.temp_c).unwrap_or(0.0) as f32, k);
-                    ease(&mut self.smooth.coolant, s.coolant_c.unwrap_or(0.0) as f32, k);
-                    ease(&mut self.smooth.gpu_w, s.nvidia.as_ref().and_then(|n| n.power_w).unwrap_or(0.0) as f32, k);
-                    let power = s.nvidia.as_ref().and_then(|n| n.power_w).or_else(|| s.package_w()).unwrap_or(0.0) as f32;
+                    // Missing readings stay missing (NaN): gauges show a dash, not 0.
+                    ease(&mut self.smooth.cpu_t, s.cpu.tctl_c.map(|t| t as f32), k);
+                    ease(&mut self.smooth.gpu_t, s.gpu().and_then(|g| g.temp_c).map(|t| t as f32), k);
+                    ease(&mut self.smooth.coolant, s.coolant_c.map(|t| t as f32), k);
+                    ease(&mut self.smooth.gpu_w, s.nvidia.as_ref().and_then(|n| n.power_w).map(|w| w as f32), k);
+                    let power = s.nvidia.as_ref().and_then(|n| n.power_w).or_else(|| s.package_w()).map(|w| w as f32);
                     ease(&mut self.smooth.power_w, power, k);
-                    if s.nvidia.is_none() {
-                        self.smooth.power_peak = self.smooth.power_peak.max(power);
+                    if s.nvidia.is_none()
+                        && let Some(w) = power
+                    {
+                        self.smooth.power_peak = self.smooth.power_peak.max(w);
                     }
-                    let fastest = s.fans.iter().filter(|f| f.freshness == telemetry::Freshness::Live).map(|f| f.rpm).max().unwrap_or(0);
-                    ease(&mut self.smooth.fan_rpm, fastest as f32, k);
-                    ease(&mut self.smooth.cpu_load, s.cpu.util_total as f32, k);
-                    ease(&mut self.smooth.gpu_load, s.gpu().and_then(|g| g.load).unwrap_or(0.0) as f32, k);
-                    let heat = ((self.smooth.cpu_t.max(self.smooth.gpu_t) - 40.0) / 50.0).clamp(0.0, 1.0);
-                    ease(&mut self.smooth.heat, heat, 0.05);
-                    ease(&mut self.smooth.load, (self.smooth.cpu_load.max(self.smooth.gpu_load) / 100.0).clamp(0.0, 1.0), 0.05);
+                    // Fans: no live tach at all is unknown, not 0 rpm.
+                    let fastest = s.fans.iter().filter(|f| f.freshness == telemetry::Freshness::Live).map(|f| f.rpm).max();
+                    ease(&mut self.smooth.fan_rpm, fastest.map(|r| r as f32), k);
+                    ease(&mut self.smooth.cpu_load, Some(s.cpu.util_total as f32), k);
+                    ease(&mut self.smooth.gpu_load, s.gpu().and_then(|g| g.load).map(|l| l as f32), k);
+                    // The ambient field follows whatever temperature is known; none known, it rests.
+                    let heat = finite_max(self.smooth.cpu_t, self.smooth.gpu_t).map(|t| ((t - 40.0) / 50.0).clamp(0.0, 1.0)).unwrap_or(0.0);
+                    ease(&mut self.smooth.heat, Some(heat), 0.05);
+                    let load = finite_max(self.smooth.cpu_load, self.smooth.gpu_load).map(|l| (l / 100.0).clamp(0.0, 1.0)).unwrap_or(0.0);
+                    ease(&mut self.smooth.load, Some(load), 0.05);
                 }
                 Task::none()
             }
@@ -1693,12 +1752,15 @@ impl App {
                 self.fan_backend = Some(b);
                 Task::none()
             }
+            Message::FanSafety(now) => self.fan_tick(now),
             Message::FanResult(cmd, r) => {
                 self.fan_engine.report(&cmd, r.is_ok(), std::time::Instant::now());
                 // A stopping helper (an upgrade, a reinstall) refuses for a moment:
-                // expected, and the engine sends the write again shortly.
+                // expected, and the engine sends the write again shortly. A command
+                // overtaken by a newer one was never written and says nothing.
                 if let Err(e) = r
                     && !e.contains(oma_hw::helper::RESTARTING)
+                    && !e.contains(crate::fans::SUPERSEDED)
                 {
                     self.fan_errors += 1;
                     if self.fan_errors <= 3 || self.fan_errors.is_multiple_of(60) {
@@ -1719,9 +1781,17 @@ impl App {
                 tracing::info!(reason, "re-applying the active profile");
                 self.start_apply(self.config.active_profile, crate::apply::Origin::Reapply)
             }
-            Message::ProfileApplied(name, origin, report) => {
-                if report.superseded {
-                    return Task::none();
+            Message::ProfileApplied(generation, name, origin, report) => {
+                use crate::coordinator::Finish;
+                let next = match self.coord.finished(generation, report.clone(), std::time::Instant::now()) {
+                    // Replaced by a newer request: nothing here describes the machine now.
+                    Finish::Superseded => return Task::none(),
+                    Finish::Accepted => None,
+                    Finish::StartNext(generation, request) => Some((generation, request)),
+                };
+                if let Some((generation, request)) = next {
+                    // What it did stopped early; the queued request runs now.
+                    return self.launch_apply(generation, request);
                 }
                 // Firmware can reset fan curves when the power mode changes: send them again now it has.
                 self.fan_engine.invalidate();
@@ -1748,6 +1818,12 @@ impl App {
                     // The helper handed back the fans it guarded as it stopped. Send
                     // them again: that starts a fresh helper, which records the state
                     // they were handed back in.
+                    Event::RecoveryAbandoned(outputs) => {
+                        // Persistent: the user must know a fan is on nobody's control.
+                        self.toast = Some((format!("Fan recovery abandoned by the helper: {outputs}. Check these outputs in Cooling or restart oma-helper"), false));
+                        self.toast_at = None;
+                        Task::none()
+                    }
                     Event::FansHandedBack => {
                         // Not after a package removal: there's no helper left to start.
                         if oma_hw::helper::activatable() {

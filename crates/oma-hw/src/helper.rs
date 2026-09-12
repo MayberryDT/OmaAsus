@@ -17,6 +17,10 @@ pub const RESTARTING: &str = "oma-helper is restarting; try again";
 /// back: clients still running send theirs again.
 pub const HANDED_BACK: &str = "fans handed back";
 
+/// What the helper's `Changed` signal starts with when it has run out of
+/// attempts to hand a fan back: nothing drives that output now.
+pub const RECOVERY_ABANDONED: &str = "fan recovery abandoned";
+
 /// Whether D-Bus can start the helper: its activation file is in one of the
 /// standard system-service directories (a package removal takes it away).
 pub fn activatable() -> bool {
@@ -52,6 +56,8 @@ pub trait Helper {
     fn nvidia_apply(&self, index: u32, control_json: &str) -> zbus::Result<String>;
     fn hid_write(&self, path: &str, report: Vec<u8>) -> zbus::Result<u32>;
     fn hid_send_feature(&self, path: &str, report: Vec<u8>) -> zbus::Result<()>;
+    /// JSON: clients guarded, restores pending or given up, busy devices.
+    fn recovery_report(&self) -> zbus::Result<String>;
     #[zbus(signal)]
     fn changed(&self, what: String) -> zbus::Result<()>;
 }

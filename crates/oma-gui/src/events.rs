@@ -23,6 +23,9 @@ pub enum Event {
     /// The helper stopped (a package upgrade, Settings → Reinstall helper,
     /// `systemctl stop`) and handed back the fans it guarded.
     FansHandedBack,
+    /// The helper ran out of attempts to hand these outputs back: nothing
+    /// drives them now.
+    RecoveryAbandoned(String),
 }
 
 #[zbus::proxy(interface = "org.freedesktop.login1.Manager", default_service = "org.freedesktop.login1", default_path = "/org/freedesktop/login1")]
@@ -95,7 +98,18 @@ pub fn stream() -> impl Stream<Item = Event> {
             // (never starting the helper) and follows NameOwnerChanged. Check it
             // still does when bumping zbus.
             if let Ok(changes) = async { oma_hw::helper::HelperProxy::builder(&conn).cache_properties(zbus::proxy::CacheProperties::No).build().await?.receive_changed().await }.await {
-                sources.push(changes.filter_map(|s| async move { s.args().ok().filter(|a| a.what().as_str() == oma_hw::helper::HANDED_BACK).map(|_| Event::FansHandedBack) }).boxed());
+                sources.push(
+                    changes
+                        .filter_map(|s| async move {
+                            let what = s.args().ok()?.what().to_string();
+                            if what == oma_hw::helper::HANDED_BACK {
+                                Some(Event::FansHandedBack)
+                            } else {
+                                what.strip_prefix(oma_hw::helper::RECOVERY_ABANDONED).map(|rest| Event::RecoveryAbandoned(rest.trim_start_matches(':').trim().to_string()))
+                            }
+                        })
+                        .boxed(),
+                );
                 watching.push("helper hand-backs");
             }
         }

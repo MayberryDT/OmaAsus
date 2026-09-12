@@ -14,12 +14,24 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// What `apply` answers for a command a newer one for the same output has
+/// overtaken: nothing was written, and the engine ignores the result.
+pub const SUPERSEDED: &str = "superseded by a newer command";
+
+/// A reading older than this is no longer a temperature to control fans by;
+/// curves then follow the missing-source policy instead of a stale number.
+pub const CONTROL_FRESH: std::time::Duration = std::time::Duration::from_secs(4);
+
 #[derive(Clone)]
 pub struct FanBackend {
     ctl: Controller,
     model: Arc<HardwareModel>,
     /// Outputs whose last write stalled; skipped until the instant.
     quarantine: Arc<Mutex<HashMap<FanTarget, std::time::Instant>>>,
+    /// One ordered write stream per output, and the newest command number
+    /// asked for it: an older command waiting behind a slow write is dropped.
+    lanes: Arc<Mutex<HashMap<FanTarget, Arc<tokio::sync::Mutex<()>>>>>,
+    newest: Arc<Mutex<HashMap<FanTarget, u64>>>,
     /// hwmon PWM channels, by output id.
     channels: HashMap<FanTarget, PwmChannel>,
     /// `pwmN_enable` modes saved before taking an output over, by output id.
@@ -57,7 +69,7 @@ impl FanBackend {
             }
         }
         let lianli = if model.fans.iter().any(|f| matches!(f.backend, Via::LianLi { .. })) { tokio::task::spawn_blocking(LianLiHub::enumerate).await.unwrap_or_default() } else { Vec::new() };
-        Self { ctl, model, quarantine: Arc::new(Mutex::new(HashMap::new())), channels, saved_enable: Arc::new(Mutex::new(HashMap::new())), lianli, cc, power_mode: Arc::new(Mutex::new(None)) }
+        Self { ctl, model, quarantine: Arc::new(Mutex::new(HashMap::new())), lanes: Arc::new(Mutex::new(HashMap::new())), newest: Arc::new(Mutex::new(HashMap::new())), channels, saved_enable: Arc::new(Mutex::new(HashMap::new())), lianli, cc, power_mode: Arc::new(Mutex::new(None)) }
     }
 
     /// Tell the backend which power mode the active profile selects.
@@ -106,11 +118,23 @@ impl FanBackend {
     }
 
     pub async fn apply(&self, cmd: Command) -> Result<(), String> {
-        let now = std::time::Instant::now();
         if cmd.is_release() && !self.has(&cmd.target) {
             // Nothing is attached, so there is nothing to hand back.
             return Ok(());
         }
+        // Note the newest number before waiting for the lane, so whichever
+        // command gets the lane next knows whether it has been overtaken.
+        {
+            let mut n = self.newest.lock().unwrap();
+            let e = n.entry(cmd.target.clone()).or_insert(0);
+            *e = (*e).max(cmd.seq);
+        }
+        let lane = self.lanes.lock().unwrap().entry(cmd.target.clone()).or_default().clone();
+        let _ordered = lane.lock().await;
+        if self.newest.lock().unwrap().get(&cmd.target).copied().unwrap_or(0) > cmd.seq {
+            return Err(format!("{}: {SUPERSEDED}", cmd.target));
+        }
+        let now = std::time::Instant::now();
         if self.quarantine.lock().unwrap().get(&cmd.target).is_some_and(|until| *until > now) {
             return Err(format!("{}: device stalled recently; retrying shortly", cmd.target));
         }
@@ -265,6 +289,17 @@ fn firmware_points(out: &FanOutput) -> usize {
     out.caps.firmware_curve.as_ref().map(|c| c.points as usize).unwrap_or(8)
 }
 
+/// The temperatures fan control may act on right now: the last frame's, if
+/// it is fresh; otherwise none, so a sampler that has stopped delivering
+/// cannot leave curves acting on old numbers. The engine's missing-source
+/// policy (hold, then a safe duty) takes over from there.
+pub fn control_temps(snap: Option<&crate::telemetry::Snapshot>, taken: Option<std::time::Instant>, now: std::time::Instant) -> oma_hw::fanengine::Temps {
+    match (snap, taken) {
+        (Some(s), Some(t)) if now.saturating_duration_since(t) <= CONTROL_FRESH => temps_from(s),
+        _ => oma_hw::fanengine::Temps::default(),
+    }
+}
+
 /// Build the engine's temperature view purely from the sampled snapshot
 /// (never touches sysfs on the UI thread).
 pub fn temps_from(snap: &crate::telemetry::Snapshot) -> oma_hw::fanengine::Temps {
@@ -277,5 +312,21 @@ pub fn temps_from(snap: &crate::telemetry::Snapshot) -> oma_hw::fanengine::Temps
         board: snap.board_c,
         hwmon: snap.hwmon_temps.iter().map(|((d, l), v)| ((d.clone(), l.clone()), *v)).collect(),
         gpu_unread: snap.gpu_unread(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_frames_give_fan_control_no_temperatures() {
+        let now = std::time::Instant::now();
+        let snap = crate::telemetry::Snapshot { cpu: oma_hw::cpu::CpuTelemetry { tctl_c: Some(70.0), ..Default::default() }, coolant_c: Some(31.0), ..Default::default() };
+        let fresh = control_temps(Some(&snap), Some(now), now + std::time::Duration::from_secs(1));
+        assert_eq!((fresh.cpu_tctl, fresh.coolant), (Some(70.0), Some(31.0)));
+        let stale = control_temps(Some(&snap), Some(now), now + CONTROL_FRESH + std::time::Duration::from_secs(1));
+        assert_eq!((stale.cpu_tctl, stale.coolant), (None, None), "an old frame is not a temperature");
+        assert!(control_temps(None, None, now).cpu_tctl.is_none(), "no frame yet");
     }
 }

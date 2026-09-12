@@ -19,9 +19,21 @@ if [[ ${1:-} == --uninstall ]]; then
     # A hand install leaves files pacman does not own, and the package then
     # refuses to install over them ("exists in filesystem"). Take them out
     # first; the helper hands its fans back as it stops.
-    if command -v pacman >/dev/null && pacman -Qo /usr/bin/oma-helper >/dev/null 2>&1; then
-        echo "oma-helper is owned by a package; remove it with pacman instead" >&2
-        exit 1
+    # Every file, not just the binary: a mixed state (some owned by a
+    # package, some by hand) must stop with a clear message rather than leave
+    # the package half-removed.
+    if command -v pacman >/dev/null; then
+        owned=()
+        for f in "${FILES[@]}"; do
+            if [[ -e $f ]] && pacman -Qo "$f" >/dev/null 2>&1; then
+                owned+=("$f")
+            fi
+        done
+        if (( ${#owned[@]} )); then
+            echo "these files belong to a package; remove it with pacman instead:" >&2
+            printf '  %s\n' "${owned[@]}" >&2
+            exit 1
+        fi
     fi
     systemctl stop oma-helper.service 2>/dev/null || true
     systemctl disable oma-helper.service 2>/dev/null || true

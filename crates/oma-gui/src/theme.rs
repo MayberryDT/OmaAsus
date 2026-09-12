@@ -132,6 +132,9 @@ pub fn mix(a: Color, b: Color, t: f32) -> Color {
 
 /// Thermal ramp on the theme's own semantic colours.
 pub fn thermal(p: &Palette, t: f64, lo: f64, hi: f64) -> Color {
+    if !t.is_finite() {
+        return p.text_muted;
+    }
     let f = (((t - lo) / (hi - lo)).clamp(0.0, 1.0)) as f32;
     if f < 0.5 { mix(p.brand, p.yellow, f * 2.0) } else { mix(p.yellow, p.red, (f - 0.5) * 2.0) }
 }

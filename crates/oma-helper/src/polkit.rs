@@ -3,21 +3,10 @@
 use std::collections::HashMap;
 use zbus::zvariant::Value;
 
-#[zbus::proxy(
-    interface = "org.freedesktop.PolicyKit1.Authority",
-    default_service = "org.freedesktop.PolicyKit1",
-    default_path = "/org/freedesktop/PolicyKit1/Authority"
-)]
+#[zbus::proxy(interface = "org.freedesktop.PolicyKit1.Authority", default_service = "org.freedesktop.PolicyKit1", default_path = "/org/freedesktop/PolicyKit1/Authority")]
 trait Authority {
     #[allow(clippy::type_complexity)]
-    fn check_authorization(
-        &self,
-        subject: &(&str, HashMap<&str, Value<'_>>),
-        action_id: &str,
-        details: HashMap<&str, &str>,
-        flags: u32,
-        cancellation_id: &str,
-    ) -> zbus::Result<(bool, bool, HashMap<String, String>)>;
+    fn check_authorization(&self, subject: &(&str, HashMap<&str, Value<'_>>), action_id: &str, details: HashMap<&str, &str>, flags: u32, cancellation_id: &str) -> zbus::Result<(bool, bool, HashMap<String, String>)>;
 }
 
 /// Ask polkit whether the D-Bus `sender` may perform `action_id`.

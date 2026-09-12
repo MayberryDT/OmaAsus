@@ -15,12 +15,19 @@
 //!
 //! Fan outputs a client puts under manual control are remembered; if that
 //! client disappears from the bus without handing them back (crash, kill),
-//! their original modes are restored.
+//! their original modes are restored. A restore that fails is kept and
+//! retried (`claims`), and every device operation runs in its device's lane
+//! on a blocking thread (`lanes`), so one wedged device blocks neither the
+//! bus nor other devices.
 
+mod claims;
+mod lanes;
 mod polkit;
 
+use claims::{Claims, Ledger, Writer};
+use std::sync::MutexGuard;
+use lanes::Lanes;
 use oma_hw::nvidia::{NvidiaControl, NvidiaGpu};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -41,6 +48,16 @@ const IDLE_CHECK: std::time::Duration = std::time::Duration::from_secs(30);
 const SWITCH_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
 /// The same while the helper stops, which has to fit the unit's TimeoutStopSec.
 const STOP_SWITCH_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long a call waits for its device's lane before it is refused as busy.
+const LANE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// A restore waits longer: it is what hands a fan back.
+const RESTORE_LANE_WAIT: std::time::Duration = std::time::Duration::from_secs(8);
+/// How often restores that failed are looked at again.
+const RETRY_CHECK: std::time::Duration = std::time::Duration::from_secs(2);
+/// The whole stop path (hand-backs, retries, in-flight work) fits in this,
+/// inside the unit's TimeoutStopSec so systemd never has to SIGKILL a
+/// helper mid-restore.
+const STOP_BUDGET: std::time::Duration = std::time::Duration::from_secs(12);
 
 /// Classify a canonical (symlink-resolved) sysfs path into the polkit action
 /// guarding writes to it, or `None` if it may not be written at all.
@@ -62,7 +79,9 @@ fn classify_canonical(path: &Path) -> Option<&'static str> {
     }
     match s {
         "/sys/devices/system/cpu/smt/control" => return Some(ACTION_ADVANCED),
-        "/sys/devices/system/cpu/cpufreq/boost" | "/sys/firmware/acpi/platform_profile" => return Some(ACTION_CONTROL),
+        "/sys/devices/system/cpu/cpufreq/boost" | "/sys/firmware/acpi/platform_profile" => {
+            return Some(ACTION_CONTROL);
+        }
         _ => {}
     }
     if parent.parent() == Some(Path::new("/sys/devices/system/cpu/cpufreq")) && parent_name.starts_with("policy") {
@@ -85,7 +104,19 @@ fn classify_canonical(path: &Path) -> Option<&'static str> {
     if parent == Path::new("/sys/devices/platform/asus-nb-wmi") || parent == Path::new("/sys/devices/platform/eeepc-wmi") {
         return match name {
             n if is_gpu_switch(n) => Some(ACTION_ADVANCED),
-            "throttle_thermal_policy" | "panel_od" | "boot_sound" | "mcu_powersave" | "mini_led_mode" | "cpufv" | "ppt_pl1_spl" | "ppt_pl2_sppt" | "ppt_fppt" | "ppt_apu_sppt" | "ppt_platform_sppt" | "nv_dynamic_boost" | "nv_temp_target" => Some(ACTION_CONTROL),
+            "throttle_thermal_policy"
+            | "panel_od"
+            | "boot_sound"
+            | "mcu_powersave"
+            | "mini_led_mode"
+            | "cpufv"
+            | "ppt_pl1_spl"
+            | "ppt_pl2_sppt"
+            | "ppt_fppt"
+            | "ppt_apu_sppt"
+            | "ppt_platform_sppt"
+            | "nv_dynamic_boost"
+            | "nv_temp_target" => Some(ACTION_CONTROL),
             _ => None,
         };
     }
@@ -116,7 +147,9 @@ fn is_fan_attr(name: &str) -> bool {
         let (n, tail) = split_digits(rest);
         return !n.is_empty() && tail == "_min";
     }
-    let Some(rest) = name.strip_prefix("pwm") else { return false };
+    let Some(rest) = name.strip_prefix("pwm") else {
+        return false;
+    };
     let (n, tail) = split_digits(rest);
     if n.is_empty() {
         return false;
@@ -134,7 +167,9 @@ fn is_fan_attr(name: &str) -> bool {
 /// watchdog restores when a client vanishes.
 fn is_fan_output(path: &Path) -> bool {
     let in_hwmon = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).is_some_and(is_hwmon_dir);
-    let Some(rest) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("pwm")) else { return false };
+    let Some(rest) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("pwm")) else {
+        return false;
+    };
     let (n, tail) = split_digits(rest);
     in_hwmon && !n.is_empty() && (tail.is_empty() || tail == "_enable")
 }
@@ -156,11 +191,19 @@ fn resolve_read(path: &str) -> Option<PathBuf> {
     let canon = std::fs::canonicalize(path).ok()?;
     let s = canon.to_str()?;
     let in_hwmon = canon.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).is_some_and(is_hwmon_dir);
-    let ok = s.starts_with("/sys/devices/virtual/powercap/")
-        || s.starts_with("/sys/devices/system/cpu/")
-        || s.starts_with("/sys/devices/virtual/firmware-attributes/")
-        || (s.starts_with("/sys/devices/") && in_hwmon);
+    let ok = s.starts_with("/sys/devices/virtual/powercap/") || s.starts_with("/sys/devices/system/cpu/") || s.starts_with("/sys/devices/virtual/firmware-attributes/") || (s.starts_with("/sys/devices/") && in_hwmon);
     ok.then_some(canon)
+}
+
+/// A client's HID path, canonical and under /dev/hidraw, before it names a
+/// lane: the lane map must not grow with arbitrary strings.
+fn hidraw_path(path: &str) -> zbus::fdo::Result<String> {
+    let canon = std::fs::canonicalize(path).map_err(|e| zbus::fdo::Error::FileNotFound(format!("{path}: {e}")))?;
+    let s = canon.to_string_lossy();
+    if !s.starts_with("/dev/hidraw") {
+        return Err(zbus::fdo::Error::AccessDenied(format!("{path} is not a hidraw device")));
+    }
+    Ok(s.into_owned())
 }
 
 /// Open a HID device only if it belongs to a vendor OmaAsus drives.
@@ -175,16 +218,25 @@ fn open_vendor_hid(path: &str) -> zbus::fdo::Result<hidapi::HidDevice> {
     api.open_path(&cpath).map_err(|e| zbus::fdo::Error::Failed(format!("open {path}: {e}")))
 }
 
-/// Fan state a client changed, kept so it can be restored if the client dies.
-#[derive(Debug, Default)]
-struct Claims {
-    /// Canonical PWM attribute → its value before this client first wrote it.
-    sysfs: BTreeMap<PathBuf, String>,
-    /// NVIDIA GPUs whose fans this client switched to manual.
-    nvidia_fans: BTreeSet<u32>,
+/// sysfs as the ledger sees it.
+struct Sysfs;
+
+impl Writer for Sysfs {
+    fn write(&self, path: &Path, value: &str) -> Result<(), String> {
+        oma_hw::sysfs::write(path, value).map_err(|e| e.to_string())
+    }
+    fn read(&self, path: &Path) -> Option<String> {
+        oma_hw::sysfs::read_string(path)
+    }
 }
 
-type ClaimMap = Arc<Mutex<HashMap<String, Claims>>>;
+type LedgerRef = Arc<Mutex<Ledger>>;
+
+/// The ledger, poisoned or not: a panic inside one lane must not take the
+/// stop path's hand-back down with it.
+fn lock_ledger(l: &LedgerRef) -> MutexGuard<'_, Ledger> {
+    l.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Work in progress (a call, a password prompt, a restore), counted while it
 /// lives so the idle exit waits for it.
@@ -215,7 +267,8 @@ fn sender(hdr: &Header<'_>) -> String {
 
 struct Helper {
     conn: zbus::Connection,
-    claims: ClaimMap,
+    ledger: LedgerRef,
+    lanes: Arc<Lanes>,
     /// When a client last asked for anything, for the idle exit.
     last_active: Arc<Mutex<std::time::Instant>>,
     /// Calls in progress (polkit may be asking for a password).
@@ -249,122 +302,174 @@ impl Helper {
             Err(e) => Err(zbus::fdo::Error::Failed(format!("polkit check failed: {e}"))),
         }
     }
+}
 
-    /// Remember the pre-write state of a fan output this client is about to change.
-    fn claim_before_write(&self, client: &str, path: &Path, value: &str) {
-        if !is_fan_output(path) {
+/// One attribute write on a blocking thread: the originals of a fan output
+/// are read first (no lock held: a blocking device must not freeze the
+/// helper), the write goes in, and only a write that *succeeded* is recorded.
+/// Refused once the helper is stopping, so nothing is taken over after the
+/// hand-back.
+fn write_recorded(ledger: &LedgerRef, closing: &AtomicBool, client: &str, path: &Path, value: &str) -> Result<(), String> {
+    if closing.load(Ordering::SeqCst) {
+        return Err(oma_hw::helper::RESTARTING.into());
+    }
+    let fan = is_fan_output(path);
+    let originals = fan.then(|| claims::read_originals(&Sysfs, path));
+    let r = oma_hw::sysfs::write(path, value).map_err(|e| e.to_string());
+    if let (Ok(()), Some(originals)) = (&r, originals) {
+        lock_ledger(ledger).record_write(client, path, value, &originals);
+    }
+    if let Err(e) = &r {
+        warn!(path = %path.display(), %value, error = %e, "write failed");
+    }
+    r
+}
+
+/// Write one attribute in its device's lane.
+async fn write_in_lane(lanes: &Lanes, ledger: &LedgerRef, closing: &Arc<AtomicBool>, client: String, path: PathBuf, value: String) -> Result<(), String> {
+    let (ledger, closing) = (ledger.clone(), closing.clone());
+    lanes.run(&lanes::sysfs_lane(&path), LANE_WAIT, move || write_recorded(&ledger, &closing, &client, &path, &value)).await.map_err(|b| b.to_string())?
+}
+
+/// What a restore needs: the bus (to wait out a graphics switch), the ledger
+/// (to keep what fails), the lanes, and whether the helper is stopping.
+#[derive(Clone)]
+struct Restorer {
+    conn: zbus::Connection,
+    ledger: LedgerRef,
+    lanes: Arc<Lanes>,
+    closing: Arc<AtomicBool>,
+}
+
+/// Per-step results of an NVML apply.
+type NvidiaSteps = Vec<(String, Result<(), String>)>;
+
+impl Restorer {
+    /// A client's claims, taken out of the ledger and put back.
+    async fn restore_client(&self, client: String, reason: &str) {
+        let Some(c) = lock_ledger(&self.ledger).take(&client) else {
             return;
-        }
-        let path_str = path.to_string_lossy();
-        let (duty, enable) = match path_str.strip_suffix("_enable") {
-            Some(base) => (PathBuf::from(base), path.to_path_buf()),
-            None => (path.to_path_buf(), PathBuf::from(format!("{path_str}_enable"))),
         };
-        let mut all = self.claims.lock().unwrap();
-        let c = all.entry(client.to_string()).or_default();
-        // Handing the output back leaves nothing to restore.
-        if path == enable && hands_back(value.trim(), c.sysfs.get(&enable).map(String::as_str)) {
-            c.sysfs.remove(&enable);
-            c.sysfs.remove(&duty);
+        self.restore(client, c, 1, reason).await;
+    }
+
+    /// Restores whose next attempt is due (`all`: everything waiting, for a
+    /// stop). Side by side: each waits on its own devices.
+    async fn retry_due(&self, all: bool) {
+        let due = {
+            let mut l = lock_ledger(&self.ledger);
+            if all { l.drain_pending() } else { l.due(std::time::Instant::now()) }
+        };
+        futures_util::future::join_all(due.into_iter().map(|p| self.restore(p.client, p.claims, p.attempts + 1, "retrying an incomplete restore"))).await;
+    }
+
+    async fn restore(&self, client: String, c: Claims, attempts: u32, reason: &str) {
+        let (conn, ledger, lanes, closing) = (&self.conn, &self.ledger, &self.lanes, &self.closing);
+        if c.is_empty() {
             return;
         }
-        for p in [duty, enable] {
-            if !c.sysfs.contains_key(&p)
-                && let Some(v) = oma_hw::sysfs::read_string(&p)
-            {
-                c.sysfs.insert(p, v);
+        warn!(client, reason, attempts, "restoring the fans this client left under manual control");
+        let mut failed = Claims::default();
+        let mut errors = Vec::new();
+        // Group by device so each lane's writes keep their duty-before-mode order.
+        let mut by_lane: std::collections::BTreeMap<String, std::collections::BTreeMap<PathBuf, String>> = Default::default();
+        for (p, v) in c.sysfs {
+            by_lane.entry(lanes::sysfs_lane(&p)).or_default().insert(p, v);
+        }
+        // Devices side by side: a stuck one delays only its own outputs.
+        let per_lane = by_lane.into_iter().map(|(lane, sysfs)| async move {
+            let snapshot = sysfs.clone();
+            let r = lanes.run(&lane, RESTORE_LANE_WAIT, move || claims::restore_sysfs(&Sysfs, &snapshot)).await;
+            (sysfs, r)
+        });
+        for (sysfs, r) in futures_util::future::join_all(per_lane).await {
+            match r {
+                Ok(out) => {
+                    for p in &out.restored {
+                        info!(path = %p.display(), "restored");
+                    }
+                    errors.extend(out.errors);
+                    failed.sysfs.extend(out.failed);
+                }
+                Err(busy) => {
+                    warn!(%busy, "restore deferred: device busy");
+                    errors.push(busy.to_string());
+                    failed.sysfs.extend(sysfs);
+                }
             }
         }
-    }
-}
-
-/// Whether writing `value` to a `pwmN_enable` hands the output back: anything
-/// but manual (hwmon ABI: 1 manual, 0 full speed, 2 and up automatic), or the
-/// mode the client found it in. Not the recorded original alone: a helper
-/// started after another died records the manual state it found. Compared as
-/// numbers, the way the kernel reads them ("+1" and "01" are 1).
-/// asus_custom_fan_curve differs: its 1 is the custom curve, which this
-/// treats as a claim.
-fn hands_back(value: &str, original: Option<&str>) -> bool {
-    let n = |s: &str| s.trim().parse::<u64>().ok();
-    n(value) != Some(1) || original.and_then(n) == n(value)
-}
-
-/// The writes that put a client's fan settings back: duties first, then the
-/// modes that hand control back to firmware.
-fn restore_order(sysfs: BTreeMap<PathBuf, String>) -> Vec<(PathBuf, String)> {
-    let (modes, duties): (Vec<_>, Vec<_>) = sysfs.into_iter().partition(|(p, _)| p.to_string_lossy().ends_with("_enable"));
-    duties.into_iter().chain(modes).collect()
-}
-
-/// Put back every fan setting a client changed: when the client vanishes, so
-/// a crashed GUI never leaves fans at a fixed manual duty, and when the
-/// helper stops.
-async fn restore(conn: zbus::Connection, claims: ClaimMap, client: String, reason: &str, closing: &AtomicBool) {
-    let client = client.as_str();
-    let Some(c) = claims.lock().unwrap().remove(client) else { return };
-    if c.sysfs.is_empty() && c.nvidia_fans.is_empty() {
-        return;
-    }
-    warn!(client, reason, "restoring the fans this client left under manual control");
-    for (p, v) in restore_order(c.sysfs) {
-        match oma_hw::sysfs::write(&p, &v) {
-            Ok(()) => info!(path = %p.display(), value = %v, "restored"),
-            Err(e) => warn!(path = %p.display(), error = %e, "restore failed"),
-        }
-    }
-    if !c.nvidia_fans.is_empty() {
-        // supergfxd kills whatever holds the dGPU while it switches: wait for a
-        // running switch to finish (bounded: a refused one leaves its mode set).
-        // The bound shrinks once the helper is stopping.
-        let started = std::time::Instant::now();
-        let mut settled = false;
-        while started.elapsed() < if closing.load(Ordering::SeqCst) { STOP_SWITCH_WAIT } else { SWITCH_WAIT } {
-            match oma_hw::supergfx::switch_state(&conn).await {
-                Ok((mode, pending)) if oma_hw::supergfx::switch_done(mode, pending) => {
-                    settled = true;
-                    break;
+        if !c.nvidia_fans.is_empty() {
+            // supergfxd kills whatever holds the dGPU while it switches: wait for a
+            // running switch to finish (bounded: a refused one leaves its mode set).
+            // The bound shrinks once the helper is stopping.
+            let started = std::time::Instant::now();
+            let mut settled = false;
+            while started.elapsed() < if closing.load(Ordering::SeqCst) { STOP_SWITCH_WAIT } else { SWITCH_WAIT } {
+                match oma_hw::supergfx::switch_state(conn).await {
+                    Ok((mode, pending)) if oma_hw::supergfx::switch_done(mode, pending) => {
+                        settled = true;
+                        break;
+                    }
+                    // Not there at all: nothing to wait for.
+                    Err(_) if !oma_hw::supergfx::present(conn).await => {
+                        settled = true;
+                        break;
+                    }
+                    // Switching, or there but not answering (blocked mid-switch): wait.
+                    _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
                 }
-                // Not there at all: nothing to wait for.
-                Err(_) if !oma_hw::supergfx::present(&conn).await => {
-                    settled = true;
-                    break;
-                }
-                // Switching, or there but not answering (blocked mid-switch): wait.
-                _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
             }
-        }
-        // Stopping mid-switch: stay off NVML. A switch that goes ahead reloads
-        // the driver, which starts with its fans on automatic.
-        if !settled && closing.load(Ordering::SeqCst) {
-            info!("NVIDIA fans left to the driver: a graphics switch is still running");
-            return;
-        }
-        // NVML would wake a sleeping GPU; one that is off has had its driver
-        // unloaded, and the driver starts with its fans on automatic.
-        if !oma_hw::nvidia::awake() {
-            info!("NVIDIA fans left to the driver: the GPU is asleep or off");
-            return;
-        }
-    }
-    for index in c.nvidia_fans {
-        match NvidiaGpu::open(index) {
-            Ok(gpu) => {
-                for (step, r) in gpu.apply(&NvidiaControl::fans_only(None)) {
-                    if let Err(e) = r {
-                        warn!(%step, error = %e, "NVIDIA fan restore failed");
+            // Stopping mid-switch: stay off NVML. A switch that goes ahead reloads
+            // the driver, which starts with its fans on automatic. Likewise a GPU
+            // that is asleep or off: NVML would wake it, and an unloaded driver
+            // starts with its fans on automatic.
+            let leave_to_driver = (!settled && closing.load(Ordering::SeqCst)) || !oma_hw::nvidia::awake();
+            if leave_to_driver {
+                info!("NVIDIA fans left to the driver (switch running, or the GPU asleep or off)");
+            } else {
+                for index in c.nvidia_fans {
+                    let r = lanes
+                        .run(&lanes::nvidia_lane(index), RESTORE_LANE_WAIT, move || {
+                            let gpu = NvidiaGpu::open(index).map_err(|e| format!("cannot open GPU {index}: {e}"))?;
+                            let errs: Vec<String> = gpu.apply(&NvidiaControl::fans_only(None)).into_iter().filter_map(|(step, r)| r.err().map(|e| format!("{step}: {e}"))).collect();
+                            if errs.is_empty() { Ok(()) } else { Err(errs.join(", ")) }
+                        })
+                        .await
+                        .map_err(|b| b.to_string())
+                        .and_then(|r| r);
+                    match r {
+                        Ok(()) => info!(index, "NVIDIA fans restored to automatic"),
+                        Err(e) => {
+                            warn!(index, error = %e, "NVIDIA fan restore failed");
+                            errors.push(e);
+                            failed.nvidia_fans.insert(index);
+                        }
                     }
                 }
             }
-            Err(e) => warn!(index, error = %e, "cannot open GPU to restore fans"),
+        }
+        if !failed.is_empty() {
+            let error = errors.join("; ");
+            let outputs: Vec<String> = failed.sysfs.keys().map(|p| p.to_string_lossy().into_owned()).chain(failed.nvidia_fans.iter().map(|i| format!("nvidia:{i}"))).collect();
+            let gave_up = lock_ledger(ledger).retain_failed(&client, failed, attempts, error.clone(), std::time::Instant::now());
+            if gave_up {
+                // Nothing drives these fans now and the helper has run out of
+                // attempts: say so where it will be seen, and tell clients.
+                tracing::error!(client, attempts, outputs = ?outputs, error = %error, "fan recovery abandoned: these outputs could not be handed back");
+                if let Ok(emitter) = SignalEmitter::new(conn, OBJ_PATH) {
+                    let _ = Helper::changed(&emitter, format!("{}: {}", oma_hw::helper::RECOVERY_ABANDONED, outputs.join(", "))).await;
+                }
+            } else {
+                warn!(client, attempts, error = %error, "restore incomplete; will retry");
+            }
         }
     }
 }
 
 /// Restore claims of any client that drops off the bus.
-async fn watch_clients(conn: zbus::Connection, claims: ClaimMap, restoring: Arc<AtomicUsize>, closing: Arc<AtomicBool>) -> anyhow::Result<()> {
+async fn watch_clients(restorer: Restorer, restoring: Arc<AtomicUsize>) -> anyhow::Result<()> {
     use futures_util::StreamExt;
-    let dbus = zbus::fdo::DBusProxy::new(&conn).await?;
+    let dbus = zbus::fdo::DBusProxy::new(&restorer.conn).await?;
     let mut changes = dbus.receive_name_owner_changed().await?;
     while let Some(signal) = changes.next().await {
         let Ok(args) = signal.args() else { continue };
@@ -372,9 +477,9 @@ async fn watch_clients(conn: zbus::Connection, claims: ClaimMap, restoring: Arc<
             // Its own task (restoring NVIDIA fans may wait for a graphics switch),
             // counted from now so the idle exit waits for it.
             let busy = Busy::enter(&restoring);
-            let (conn, claims, closing, client) = (conn.clone(), claims.clone(), closing.clone(), args.name().to_string());
+            let (restorer, client) = (restorer.clone(), args.name().to_string());
             tokio::spawn(async move {
-                restore(conn, claims, client, "client vanished", &closing).await;
+                restorer.restore_client(client, "client vanished").await;
                 drop(busy);
             });
         }
@@ -396,11 +501,12 @@ impl Helper {
             return Err(zbus::fdo::Error::AccessDenied(format!("{path} is not an allowed control attribute")));
         };
         self.authorize(&hdr, action).await?;
+        // Counted until the device work is done, so a stop waits for it.
+        let _work = Busy::enter(&self.in_flight);
         info!(path = %canon.display(), %value, "write");
-        self.claim_before_write(&sender(&hdr), &canon, &value);
-        Ok(match oma_hw::sysfs::write(&canon, &value) {
+        Ok(match write_in_lane(&self.lanes, &self.ledger, &self.closing, sender(&hdr), canon, value).await {
             Ok(()) => String::new(),
-            Err(e) => e.to_string(),
+            Err(e) => e,
         })
     }
 
@@ -418,15 +524,45 @@ impl Helper {
             resolved.push((canon, value));
         }
         self.authorize(&hdr, needed).await?;
+        let _work = Busy::enter(&self.in_flight);
         let client = sender(&hdr);
-        let mut out = Vec::with_capacity(resolved.len());
-        for (path, value) in &resolved {
-            self.claim_before_write(&client, path, value);
-            let r = oma_hw::sysfs::write(path, value);
-            if let Err(e) = &r {
-                warn!(path = %path.display(), %value, error = %e, "write failed");
+        // In the caller's order throughout: a batch is built so earlier entries
+        // make later ones valid (the global boost knob before per-policy boost,
+        // curve points before the mode that enables them). Consecutive entries
+        // for one device share a lane run; a stuck device fails its own entries
+        // and the ones after it, which must not go in without them.
+        let mut out = vec![String::new(); resolved.len()];
+        let mut i = 0;
+        let mut stuck: Option<String> = None;
+        while i < resolved.len() {
+            let lane = lanes::sysfs_lane(&resolved[i].0);
+            let mut j = i;
+            while j < resolved.len() && lanes::sysfs_lane(&resolved[j].0) == lane {
+                j += 1;
             }
-            out.push(r.err().map(|e| e.to_string()).unwrap_or_default());
+            if let Some(why) = &stuck {
+                for slot in out.iter_mut().take(j).skip(i) {
+                    *slot = format!("not written: an earlier entry failed ({why})");
+                }
+                i = j;
+                continue;
+            }
+            let entries: Vec<(PathBuf, String)> = resolved[i..j].to_vec();
+            let (ledger, closing, client) = (self.ledger.clone(), self.closing.clone(), client.clone());
+            match self.lanes.run(&lane, LANE_WAIT, move || entries.iter().map(|(path, value)| write_recorded(&ledger, &closing, &client, path, value).err().unwrap_or_default()).collect::<Vec<_>>()).await {
+                Ok(results) => {
+                    for (k, e) in results.into_iter().enumerate() {
+                        out[i + k] = e;
+                    }
+                }
+                Err(busy) => {
+                    for slot in out.iter_mut().take(j).skip(i) {
+                        *slot = busy.to_string();
+                    }
+                    stuck = Some(busy.to_string());
+                }
+            }
+            i = j;
         }
         Ok(out)
     }
@@ -446,20 +582,29 @@ impl Helper {
         let ctl: NvidiaControl = serde_json::from_str(&control_json).map_err(|e| zbus::fdo::Error::InvalidArgs(e.to_string()))?;
         let advanced = ctl.touches_advanced();
         self.authorize(&hdr, if advanced { ACTION_ADVANCED } else { ACTION_CONTROL }).await?;
-        let gpu = NvidiaGpu::open(index).map_err(|e| {
-            warn!(error = %e, "cannot open the GPU through NVML");
-            zbus::fdo::Error::Failed(format!("cannot open the GPU through NVML: {e} (if the helper started before the NVIDIA driver, `systemctl restart oma-helper`)"))
-        })?;
-        {
-            let mut all = self.claims.lock().unwrap();
-            let c = all.entry(sender(&hdr)).or_default();
-            if ctl.fan_auto {
-                c.nvidia_fans.remove(&index);
-            } else if ctl.fan_percent.is_some() {
-                c.nvidia_fans.insert(index);
-            }
-        }
-        let results = gpu.apply(&ctl);
+        let _work = Busy::enter(&self.in_flight);
+        let (client, ledger, closing) = (sender(&hdr), self.ledger.clone(), self.closing.clone());
+        let results = self
+            .lanes
+            .run(&lanes::nvidia_lane(index), LANE_WAIT, move || -> Result<NvidiaSteps, String> {
+                if closing.load(Ordering::SeqCst) {
+                    return Err(oma_hw::helper::RESTARTING.into());
+                }
+                let gpu = NvidiaGpu::open(index).map_err(|e| {
+                    warn!(error = %e, "cannot open the GPU through NVML");
+                    format!("cannot open the GPU through NVML: {e} (if the helper started before the NVIDIA driver, `systemctl restart oma-helper`)")
+                })?;
+                let results = gpu.apply(&ctl);
+                // The claim follows what actually happened to the fans.
+                let fans_ok = results.iter().any(|(step, r)| step.starts_with("fan") && r.is_ok());
+                if fans_ok {
+                    lock_ledger(&ledger).note_nvidia(&client, index, !ctl.fan_auto && ctl.fan_percent.is_some());
+                }
+                Ok(results)
+            })
+            .await
+            .map_err(|b| zbus::fdo::Error::Failed(b.to_string()))?
+            .map_err(zbus::fdo::Error::Failed)?;
         for (step, r) in &results {
             match r {
                 Ok(()) => info!(step, "nvidia ok"),
@@ -472,16 +617,40 @@ impl Helper {
 
     /// Write a raw HID output report to an ASUS / ENE device (LCD, Aura, Ryujin).
     async fn hid_write(&self, #[zbus(header)] hdr: Header<'_>, path: String, report: Vec<u8>) -> zbus::fdo::Result<u32> {
+        let path = hidraw_path(&path)?;
         self.authorize(&hdr, ACTION_ADVANCED).await?;
-        let dev = open_vendor_hid(&path)?;
-        dev.write(&report).map(|n| n as u32).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+        let _work = Busy::enter(&self.in_flight);
+        self.lanes
+            .run(&lanes::hid_lane(&path), LANE_WAIT, move || {
+                let dev = open_vendor_hid(&path)?;
+                dev.write(&report).map(|n| n as u32).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+            })
+            .await
+            .map_err(|b| zbus::fdo::Error::Failed(b.to_string()))?
     }
 
     /// Send a HID feature report to an ASUS / ENE device.
     async fn hid_send_feature(&self, #[zbus(header)] hdr: Header<'_>, path: String, report: Vec<u8>) -> zbus::fdo::Result<()> {
+        let path = hidraw_path(&path)?;
         self.authorize(&hdr, ACTION_ADVANCED).await?;
-        let dev = open_vendor_hid(&path)?;
-        dev.send_feature_report(&report).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+        let _work = Busy::enter(&self.in_flight);
+        self.lanes
+            .run(&lanes::hid_lane(&path), LANE_WAIT, move || {
+                let dev = open_vendor_hid(&path)?;
+                dev.send_feature_report(&report).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+            })
+            .await
+            .map_err(|b| zbus::fdo::Error::Failed(b.to_string()))?
+    }
+
+    /// What the helper still has to put back: clients guarded, restores
+    /// waiting for another attempt, and ones it gave up on (JSON).
+    async fn recovery_report(&self, #[zbus(header)] hdr: Header<'_>) -> zbus::fdo::Result<String> {
+        // Which clients hold which outputs is the active session's business.
+        self.authorize(&hdr, ACTION_CONTROL).await?;
+        let mut report = lock_ledger(&self.ledger).report();
+        report.busy_devices = self.lanes.held();
+        Ok(serde_json::to_string(&report).unwrap_or_default())
     }
 
     /// Emitted as the helper stops having handed the fans back
@@ -497,24 +666,41 @@ async fn main() -> anyhow::Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
     let (mut term, mut int) = (signal(SignalKind::terminate())?, signal(SignalKind::interrupt())?);
     let conn = zbus::Connection::system().await?;
-    let claims = ClaimMap::default();
+    let ledger = LedgerRef::default();
+    let lanes = Arc::new(Lanes::default());
     let last_active = Arc::new(Mutex::new(std::time::Instant::now()));
     let in_flight = Arc::new(AtomicUsize::new(0));
     let restoring = Arc::new(AtomicUsize::new(0));
     let closing = Arc::new(AtomicBool::new(false));
-    conn.object_server().at(OBJ_PATH, Helper { conn: conn.clone(), claims: claims.clone(), last_active: last_active.clone(), in_flight: in_flight.clone(), closing: closing.clone() }).await?;
+    conn.object_server()
+        .at(OBJ_PATH, Helper { conn: conn.clone(), ledger: ledger.clone(), lanes: lanes.clone(), last_active: last_active.clone(), in_flight: in_flight.clone(), closing: closing.clone() })
+        .await?;
     conn.request_name(BUS_NAME).await?;
-    let (watch_conn, watch_claims, watch_restoring, watch_closing) = (conn.clone(), claims.clone(), restoring.clone(), closing.clone());
+    let restorer = Restorer { conn: conn.clone(), ledger: ledger.clone(), lanes: lanes.clone(), closing: closing.clone() };
+    let (watch_restorer, watch_restoring) = (restorer.clone(), restoring.clone());
     tokio::spawn(async move {
-        if let Err(e) = watch_clients(watch_conn, watch_claims, watch_restoring, watch_closing).await {
+        if let Err(e) = watch_clients(watch_restorer, watch_restoring).await {
             warn!(error = %e, "client watchdog stopped; crashed clients' fans will not be restored");
+        }
+    });
+    // Restores that failed are tried again on a bounded backoff.
+    let (retry_restorer, retry_restoring, retry_closing) = (restorer.clone(), restoring.clone(), closing.clone());
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(RETRY_CHECK).await;
+            if retry_closing.load(Ordering::SeqCst) {
+                return;
+            }
+            let busy = Busy::enter(&retry_restoring);
+            retry_restorer.retry_due(false).await;
+            drop(busy);
         }
     });
     // Exit when idle, so D-Bus starts a fresh helper next time: systemd works
     // out device access (the NVIDIA device groups) when the helper starts, and
     // one started before the NVIDIA driver loaded would never get it. Never
     // while a client holds fans: the watchdog has to outlive that client.
-    let (idle_conn, idle_claims, idle_restoring, idle_closing) = (conn.clone(), claims.clone(), restoring.clone(), closing.clone());
+    let (idle_conn, idle_ledger, idle_restoring, idle_closing, idle_in_flight) = (conn.clone(), ledger.clone(), restoring.clone(), closing.clone(), in_flight.clone());
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(IDLE_CHECK).await;
@@ -524,8 +710,8 @@ async fn main() -> anyhow::Result<()> {
                 return;
             }
             let idle = last_active.lock().unwrap().elapsed();
-            let guarding = idle_claims.lock().unwrap().values().any(|c| !c.sysfs.is_empty() || !c.nvidia_fans.is_empty());
-            if may_exit(idle, guarding, in_flight.load(Ordering::SeqCst) + idle_restoring.load(Ordering::SeqCst)) {
+            let guarding = lock_ledger(&idle_ledger).has_work();
+            if may_exit(idle, guarding, idle_in_flight.load(Ordering::SeqCst) + idle_restoring.load(Ordering::SeqCst)) {
                 // Refuse calls from here on. Nothing awaits between the check and
                 // this, so none has started; a later one is refused before it
                 // writes or claims anything, and the caller's retry starts a
@@ -547,13 +733,25 @@ async fn main() -> anyhow::Result<()> {
     // then hand every client's fans back, so the helper D-Bus starts next
     // records the state they were handed back in rather than a manual duty.
     closing.store(true, Ordering::SeqCst);
-    // All at once: each may wait out a graphics switch.
-    let clients: Vec<String> = claims.lock().unwrap().iter().filter(|(_, c)| !c.sysfs.is_empty() || !c.nvidia_fans.is_empty()).map(|(client, _)| client.clone()).collect();
-    let handed_back = !clients.is_empty();
-    futures_util::future::join_all(clients.into_iter().map(|client| restore(conn.clone(), claims.clone(), client, "helper stopping", &closing))).await;
-    // And any restore the watchdog had already started (its bound has shrunk too).
-    while restoring.load(Ordering::SeqCst) > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Everything within one budget under the unit's TimeoutStopSec: clients'
+    // hand-backs side by side (each may wait out a graphics switch), one more
+    // go at retries, then the work already in flight.
+    let clients: Vec<String> = lock_ledger(&ledger).guarding();
+    let handed_back = !clients.is_empty() || lock_ledger(&ledger).has_work();
+    let stop = async {
+        futures_util::future::join_all(clients.into_iter().map(|client| restorer.restore_client(client, "helper stopping"))).await;
+        restorer.retry_due(true).await;
+        // Restores the watchdog had started, and calls that got past authorize.
+        while restoring.load(Ordering::SeqCst) > 0 || in_flight.load(Ordering::SeqCst) > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    };
+    if tokio::time::timeout(STOP_BUDGET, stop).await.is_err() {
+        warn!(budget_s = STOP_BUDGET.as_secs(), "stop budget spent; leaving what has not returned");
+    }
+    let left = lock_ledger(&ledger).report();
+    if !left.pending.is_empty() || !left.given_up.is_empty() {
+        tracing::error!(report = %serde_json::to_string(&left).unwrap_or_default(), "stopping with fans not put back");
     }
     // Clients still running send their fans again, which starts a fresh helper
     // once this one has exited (a call that lands sooner is refused and tried
@@ -570,25 +768,6 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn anything_but_manual_hands_a_fan_back() {
-        assert!(hands_back("2", Some("2")), "its original mode");
-        assert!(hands_back("5", Some("1")), "automatic, though this helper found it manual");
-        assert!(hands_back("0", None), "full speed belongs to the driver");
-        assert!(hands_back("1", Some("1")), "the manual mode it was found in");
-        assert!(!hands_back("1", Some("2")), "manual is a claim");
-        assert!(!hands_back("+1", Some("2")), "read as the kernel reads it");
-        assert!(!hands_back("01", None), "read as the kernel reads it");
-    }
-
-    #[test]
-    fn a_restore_sets_duties_before_it_hands_modes_back() {
-        let hwmon = Path::new("/sys/class/hwmon/hwmon3");
-        let sysfs = BTreeMap::from([(hwmon.join("pwm1_enable"), "2".to_string()), (hwmon.join("pwm1"), "128".to_string()), (hwmon.join("pwm2"), "90".to_string())]);
-        let order: Vec<String> = restore_order(sysfs).into_iter().map(|(p, v)| format!("{}={v}", p.file_name().unwrap().to_string_lossy())).collect();
-        assert_eq!(order, ["pwm1=128", "pwm2=90", "pwm1_enable=2"]);
-    }
 
     #[test]
     fn the_helper_exits_only_when_nothing_needs_it() {

@@ -33,7 +33,7 @@ pub fn trigger_label(t: &Trigger) -> String {
         Trigger::CpuHot { above_c, for_s } => format!("CPU above {above_c:.0} °C for {for_s}s"),
         Trigger::GpuHot { above_c, for_s } => format!("GPU above {above_c:.0} °C for {for_s}s"),
         Trigger::Time { from, to } => format!("Between {:02}:{:02} and {:02}:{:02}", from.0, from.1, to.0, to.1),
-        Trigger::Idle { for_s } => format!("Idle for {for_s}s"),
+        Trigger::Idle { for_s } => format!("Idle for {for_s}s (not available yet: no idle source, never fires)"),
     }
 }
 

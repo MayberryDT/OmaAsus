@@ -165,7 +165,14 @@ fn profiles(app: &App, width: f32) -> Section<'_> {
     let p = app.palette;
     let rows = chip_rows(app.config.profiles.iter().map(|pr| pr.name.as_str()), width);
     let chips = app.config.profiles.iter().map(|pr| chip(p, &pr.name, pr.id == app.config.active_profile, Some(Message::ApplyProfile(pr.id)))).collect();
-    let auto = (app.config.mode == oma_hw::profile::Mode::Automatic).then(|| widgets::pill(p, "automatic", p.accent));
+    // The pill says what the hardware is doing about the choice: applying,
+    // failed, or (when nothing is pending) that automation picks profiles.
+    let status = app.coord.status(app.now).and_then(|s| match s {
+        crate::coordinator::Status::Applying { .. } => Some(widgets::pill(p, s.short(), p.accent)),
+        crate::coordinator::Status::Failed { .. } => Some(widgets::pill(p, s.short(), p.danger)),
+        crate::coordinator::Status::Ok { .. } => None,
+    });
+    let auto = status.or_else(|| (app.config.mode == oma_hw::profile::Mode::Automatic).then(|| widgets::pill(p, "automatic", p.accent)));
     (column![title(p, "Profile", auto), strip(chips)].spacing(TITLE_GAP).into(), TITLE + TITLE_GAP + strip_height(rows))
 }
 
@@ -200,8 +207,12 @@ fn vitals(app: &App) -> Option<Section<'_>> {
             Some(w) if g.discrete => format!("{name} · {w:.0} W"),
             _ => name,
         };
-        let t = g.temp_c.unwrap_or(0.0);
-        rows.push(vital(p, "GPU", format!("{t:.0}°"), theme::thermal(&p, t, 30.0, 90.0), g.load.map(|l| format!("{l:.0}%")).unwrap_or_default(), &app.hist.gpu_load, 100.0, p.gpu, note));
+        // An awake GPU without a reading (settling, or a driver that gives none) shows a dash, not 0°.
+        let (t_text, t_color) = match g.temp_c {
+            Some(t) => (format!("{t:.0}°"), theme::thermal(&p, t, 30.0, 90.0)),
+            None => ("—".into(), p.text_muted),
+        };
+        rows.push(vital(p, "GPU", t_text, t_color, g.load.map(|l| format!("{l:.0}%")).unwrap_or_default(), &app.hist.gpu_load, 100.0, p.gpu, note));
     }
     if let Some(w) = s.package_w() {
         let peak = app.hist.power.iter().copied().fold(10.0_f32, f32::max);

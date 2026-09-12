@@ -1,5 +1,6 @@
 //! Background telemetry sampler → iced subscription.
 
+use crate::device_worker::{Poll, Worker};
 use iced::futures::SinkExt;
 use iced::futures::Stream;
 use oma_hw::cpu::{CpuMonitor, CpuTelemetry};
@@ -84,6 +85,17 @@ pub struct Snapshot {
     /// Runtime power of the NVIDIA GPU as the bus reports it (`Absent` when
     /// switched off or there is none).
     pub dgpu: Option<DgpuState>,
+    /// Every sampled device and whether it is answering.
+    pub sources: Vec<SourceHealth>,
+}
+
+/// One sampled device's health.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceHealth {
+    pub name: String,
+    pub healthy: bool,
+    /// How long it has been silent, if it is.
+    pub stalled_s: Option<u64>,
 }
 
 /// GPU figures for glance views.
@@ -311,14 +323,40 @@ impl NvidiaSource {
     }
 }
 
+/// What one hwmon device's reader thread returns: indices into the device's
+/// inputs, so labels and roles stay with the metadata on the sampler side.
+struct HwmonSample {
+    temps: Vec<(usize, f64)>,
+    fans: Vec<(usize, u64, Option<f64>)>,
+}
+
+fn read_hwmon(d: &HwmonDevice, temp_idx: &[usize]) -> HwmonSample {
+    let temps = temp_idx.iter().filter_map(|&i| d.temps[i].read().map(|v| (i, v))).collect();
+    let fans = d
+        .fans
+        .iter()
+        .enumerate()
+        .filter_map(|(i, f)| {
+            let rpm = f.read_rpm()?;
+            let duty = d.pwms.iter().find(|p| p.index == f.index && p.has_duty).map(|p| p.read().value as f64 / 2.55);
+            Some((i, rpm, duty))
+        })
+        .collect();
+    HwmonSample { temps, fans }
+}
+
 struct Sampler {
     cpu: CpuMonitor,
     nvidia: NvidiaSource,
     amd: Vec<AmdGpu>,
     hwmon: Vec<HwmonDevice>,
+    /// One bounded reader per hwmon device, same order as `hwmon`.
+    hwmon_workers: Vec<Worker<HwmonSample>>,
     lianli: Vec<LianLiHub>,
-    /// Devices whose sysfs reads stalled (e.g. a wedged USB AIO): skipped until the instant.
-    quarantine: std::collections::HashMap<String, std::time::Instant>,
+    lianli_workers: Vec<Worker<Option<[u16; 4]>>>,
+    /// Devices whose expected channels were registered offline because they
+    /// never answered.
+    registered_offline: std::collections::HashSet<usize>,
     /// Persistent registries: channels never disappear once discovered.
     fans: std::collections::HashMap<String, Tracked<FanReading>>,
     temps: std::collections::HashMap<String, Tracked<Reading>>,
@@ -357,47 +395,57 @@ fn temp_label(d: &HwmonDevice, label: &str) -> String {
     }
 }
 
-/// A sysfs read that takes longer than this is a stalled device, not a sensor.
-const STALL: Duration = Duration::from_millis(250);
-const QUARANTINE: Duration = Duration::from_secs(60);
-
-/// Probe a device's first input on a helper thread; `false` if it does not answer in time.
-fn responsive(d: &HwmonDevice) -> bool {
-    let path = d.temps.first().map(|t| t.input.clone()).or_else(|| d.fans.first().map(|f| f.input.clone()));
-    let Some(path) = path else { return true };
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = std::fs::read_to_string(&path);
-        let _ = tx.send(());
-    });
-    rx.recv_timeout(STALL * 4).is_ok()
-}
+/// How long one sample waits for every device's reading; a device that
+/// misses it keeps its request out and is collected on a later cycle.
+const COLLECT_BUDGET: Duration = Duration::from_millis(500);
 
 impl Sampler {
     fn new() -> Self {
         let hwmon = hwmon::enumerate();
-        let mut quarantine = std::collections::HashMap::new();
-        let mut fans: std::collections::HashMap<String, Tracked<FanReading>> = Default::default();
-        let mut temps: std::collections::HashMap<String, Tracked<Reading>> = Default::default();
+        let hwmon_workers = hwmon
+            .iter()
+            .map(|d| {
+                let dev = d.clone();
+                let temp_idx: Vec<usize> = d.temps.iter().enumerate().filter(|(_, t)| !knowledge::sensor_hidden(&d.name, &t.label)).map(|(i, _)| i).collect();
+                Worker::spawn(d.name.clone(), move || read_hwmon(&dev, &temp_idx))
+            })
+            .collect();
+        let lianli = LianLiHub::enumerate();
+        let lianli_workers = lianli
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                let hub = h.clone();
+                Worker::spawn(format!("lianli{i}"), move || hub.read_rpm().ok())
+            })
+            .collect();
+        let named_tachs = hwmon.iter().any(|d| d.fans.iter().any(|f| knowledge::tach_role(&d.name, &f.label) == TachRole::Fan && f.label != format!("fan{}", f.index)));
+        Self { cpu: CpuMonitor::new(), nvidia: NvidiaSource::default(), amd: AmdGpu::enumerate(), hwmon, hwmon_workers, lianli, lianli_workers, registered_offline: Default::default(), fans: Default::default(), temps: Default::default(), named_tachs, seq: 0 }
+    }
+
+    /// A device that has never answered: register what it *should* expose,
+    /// flagged offline, so it stays visible rather than absent.
+    fn register_offline(&mut self, i: usize) {
+        if !self.registered_offline.insert(i) {
+            return;
+        }
+        let d = &self.hwmon[i];
         let long_ago = std::time::Instant::now() - OFFLINE_AFTER;
-        for d in &hwmon {
-            if !responsive(d) {
-                tracing::warn!(device = %d.name, "hwmon device not answering; quarantined for {}s", QUARANTINE.as_secs());
-                quarantine.insert(d.path.to_string_lossy().into_owned(), std::time::Instant::now() + QUARANTINE);
-                // Register what the device *should* expose, flagged offline, so it stays visible.
-                for f in d.fans.iter().filter(|f| matches!(knowledge::tach_role(&d.name, &f.label), TachRole::Fan | TachRole::Pump)) {
-                    let order = fans.len();
-                    fans.insert(format!("{}:{}", d.name, f.label), Tracked { value: FanReading { label: f.label.clone(), device: d.friendly_name().to_string(), freshness: Freshness::Offline, ..Default::default() }, last_seen: long_ago, order });
-                }
-                // Coolant is what a stalled cooler most needs watching for.
-                for t in d.temps.iter().filter(|t| knowledge::sensor_role(&d.name, &t.label, false) == SensorRole::Coolant) {
-                    let order = temps.len();
-                    temps.insert(format!("{}:{}", d.name, t.label), Tracked { value: Reading { label: temp_label(d, &t.label), value: 0.0, freshness: Freshness::Offline }, last_seen: long_ago, order });
-                }
+        for f in d.fans.iter().filter(|f| matches!(knowledge::tach_role(&d.name, &f.label), TachRole::Fan | TachRole::Pump)) {
+            let key = format!("{}:{}", d.name, f.label);
+            if !self.fans.contains_key(&key) {
+                let order = self.fans.len();
+                self.fans.insert(key, Tracked { value: FanReading { label: f.label.clone(), device: d.friendly_name().to_string(), freshness: Freshness::Offline, ..Default::default() }, last_seen: long_ago, order });
             }
         }
-        let named_tachs = hwmon.iter().any(|d| d.fans.iter().any(|f| knowledge::tach_role(&d.name, &f.label) == TachRole::Fan && f.label != format!("fan{}", f.index)));
-        Self { cpu: CpuMonitor::new(), nvidia: NvidiaSource::default(), amd: AmdGpu::enumerate(), hwmon, lianli: LianLiHub::enumerate(), quarantine, fans, temps, named_tachs, seq: 0 }
+        // Coolant is what a stalled cooler most needs watching for.
+        for t in d.temps.iter().filter(|t| knowledge::sensor_role(&d.name, &t.label, false) == SensorRole::Coolant) {
+            let key = format!("{}:{}", d.name, t.label);
+            if !self.temps.contains_key(&key) {
+                let order = self.temps.len();
+                self.temps.insert(key, Tracked { value: Reading { label: temp_label(d, &t.label), value: 0.0, freshness: Freshness::Offline }, last_seen: long_ago, order });
+            }
+        }
     }
 
     fn track_fan(&mut self, key: String, mut r: FanReading, now: std::time::Instant) {
@@ -428,24 +476,36 @@ impl Sampler {
         s.amd_integrated = amd.is_some_and(|g| g.is_integrated);
         s.cpu_control = oma_hw::cpu::control_state();
         let now = std::time::Instant::now();
-        let mut stalled: Vec<String> = Vec::new();
         let mut pending_temps: Vec<(String, String, f64)> = Vec::new();
         let mut pending_fans: Vec<(String, FanReading)> = Vec::new();
-        for d in &self.hwmon {
-            if self.quarantine.get(&d.path.to_string_lossy().into_owned()).is_some_and(|until| *until > now) {
-                continue;
-            }
-            let t_dev = std::time::Instant::now();
+        // Ask every device at once, then collect within one budget: a device
+        // that does not answer costs the rest nothing beyond that budget.
+        for w in &mut self.hwmon_workers {
+            w.request();
+        }
+        for w in &mut self.lianli_workers {
+            w.request();
+        }
+        let deadline = now + COLLECT_BUDGET;
+        let mut samples: Vec<Option<HwmonSample>> = Vec::with_capacity(self.hwmon.len());
+        for w in &mut self.hwmon_workers {
+            let wait = deadline.saturating_duration_since(std::time::Instant::now());
+            samples.push(match w.collect(wait, now) {
+                Poll::Ready(r) => Some(r),
+                Poll::Stalled | Poll::Dead => None,
+            });
+        }
+        let never_answered: Vec<usize> = self.hwmon_workers.iter().enumerate().filter(|(_, w)| !w.healthy() && w.last_ok().is_none()).map(|(i, _)| i).collect();
+        for i in never_answered {
+            self.register_offline(i);
+        }
+        for (i, sample) in samples.into_iter().enumerate() {
+            let Some(sample) = sample else { continue };
+            let d = &self.hwmon[i];
             let igpu = self.amd.iter().any(|g| g.is_integrated && g.device_path == d.device_path);
             let (mut storage, mut memory) = (false, false);
-            for t in &d.temps {
-                if t_dev.elapsed() > STALL {
-                    break;
-                }
-                if knowledge::sensor_hidden(&d.name, &t.label) {
-                    continue;
-                }
-                let Some(v) = t.read() else { continue };
+            for (ti, v) in sample.temps {
+                let t = &d.temps[ti];
                 s.hwmon_temps.insert((d.name.clone(), t.label.clone()), v);
                 let key = format!("{}:{}", d.name, t.label);
                 match knowledge::sensor_role(&d.name, &t.label, igpu) {
@@ -471,12 +531,8 @@ impl Sampler {
                     _ => pending_temps.push((key, temp_label(d, &t.label), v)),
                 }
             }
-            for f in &d.fans {
-                if t_dev.elapsed() > STALL {
-                    break;
-                }
-                // A failed read is no reading: the fan goes stale, then offline.
-                let Some(rpm) = f.read_rpm() else { continue };
+            for (fi, rpm, duty) in sample.fans {
+                let f = &d.fans[fi];
                 let role = knowledge::tach_role(&d.name, &f.label);
                 if role == TachRole::Duplicate && self.named_tachs {
                     continue;
@@ -492,37 +548,28 @@ impl Sampler {
                 if rpm == 0 && (role == TachRole::WhenSpinning || (!named && !self.fans.contains_key(&key))) {
                     continue;
                 }
-                let duty = d.pwms.iter().find(|p| p.index == f.index && p.has_duty).map(|p| p.read().value as f64 / 2.55);
                 let (label, max_rpm) = fan_identity(model.as_deref(), &format!("hwmon:{}:{}", d.name, f.label), &f.label);
                 pending_fans.push((key, FanReading { label, rpm, duty, device: d.friendly_name().to_string(), freshness: Freshness::Live, max_rpm, peak_rpm: 0 }));
             }
-            if t_dev.elapsed() > STALL {
-                stalled.push(d.path.to_string_lossy().into_owned());
-                tracing::warn!(device = %d.name, ms = t_dev.elapsed().as_millis(), "hwmon reads stalled; quarantining for {}s", QUARANTINE.as_secs());
-            }
-        }
-        for key in stalled {
-            self.quarantine.insert(key, now + QUARANTINE);
         }
         // Lian Li hub tachometers (HID input report).
-        for (i, h) in self.lianli.iter().enumerate() {
-            let key = format!("lianli{i}");
-            if self.quarantine.get(&key).is_some_and(|u| *u > now) {
-                continue;
-            }
-            let t = std::time::Instant::now();
-            if let Ok(rpm) = h.read_rpm() {
-                for (c, r) in rpm.iter().enumerate() {
-                    if *r > 0 {
-                        let (label, max_rpm) = fan_identity(model.as_deref(), &format!("lianli:{i}:ch{}", c + 1), &format!("{} channel {}", h.kind.label(), c + 1));
-                        pending_fans.push((format!("lianli{i}:{}", c + 1), FanReading { label, rpm: *r as u64, duty: None, device: h.kind.label().to_string(), freshness: Freshness::Live, max_rpm, peak_rpm: 0 }));
-                    }
+        for (i, w) in self.lianli_workers.iter_mut().enumerate() {
+            let wait = deadline.saturating_duration_since(std::time::Instant::now());
+            let Poll::Ready(Some(rpm)) = w.collect(wait, now) else { continue };
+            let h = &self.lianli[i];
+            for (c, r) in rpm.iter().enumerate() {
+                if *r > 0 {
+                    let (label, max_rpm) = fan_identity(model.as_deref(), &format!("lianli:{i}:ch{}", c + 1), &format!("{} channel {}", h.kind.label(), c + 1));
+                    pending_fans.push((format!("lianli{i}:{}", c + 1), FanReading { label, rpm: *r as u64, duty: None, device: h.kind.label().to_string(), freshness: Freshness::Live, max_rpm, peak_rpm: 0 }));
                 }
             }
-            if t.elapsed() > STALL {
-                self.quarantine.insert(key, now + QUARANTINE);
-            }
         }
+        s.sources = self
+            .hwmon_workers
+            .iter()
+            .map(|w| SourceHealth { name: w.name().to_string(), healthy: w.healthy(), stalled_s: w.stalled_for(now).map(|d| d.as_secs()) })
+            .chain(self.lianli_workers.iter().map(|w| SourceHealth { name: w.name().to_string(), healthy: w.healthy(), stalled_s: w.stalled_for(now).map(|d| d.as_secs()) }))
+            .collect();
         for (key, label, v) in pending_temps {
             self.track_temp(key, label, v, now);
         }

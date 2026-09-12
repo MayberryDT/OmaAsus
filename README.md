@@ -120,7 +120,7 @@ Arch and Omarchy:
 sudo pacman -U omaasus-<version>-1-x86_64.pkg.tar.zst
 ```
 
-If you installed the helper by hand before, pacman stops on files that already exist; add `--overwrite '*'` the first time.
+If you installed the helper by hand before, pacman stops on the files that already exist. Remove the hand install first with `sudo scripts/install-helper.sh --uninstall` (it refuses to touch files a package owns), then install the package.
 
 Other distributions (systemd, polkit, and the glibc version the release notes give):
 
