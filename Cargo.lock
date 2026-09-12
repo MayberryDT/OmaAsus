@@ -3417,7 +3417,7 @@ dependencies = [
 
 [[package]]
 name = "oma-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "oma-hw",
@@ -3430,7 +3430,7 @@ dependencies = [
 
 [[package]]
 name = "oma-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3458,7 +3458,7 @@ dependencies = [
 
 [[package]]
 name = "oma-helper"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -3475,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "oma-hw"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
