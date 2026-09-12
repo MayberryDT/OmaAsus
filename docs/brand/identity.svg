@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="800" viewBox="0 0 1440 800" role="img" aria-labelledby="title"><title id="title">OmaAsus — precision hardware control</title>
+<rect width="1440" height="800" fill="#101b17"/>
+<path d="M80 80H1360 M80 720H1360" stroke="#334a3f"/>
+<text x="80" y="120" fill="#76c6a4" font-family="monospace" font-size="14" letter-spacing="3">OMAASUS / IDENTITY 01</text>
+<g transform="translate(92 194) scale(.48)"><path fill="#76c6a4" d="M352 96 H192 L64 224 V576 L192 704 H352 V608 H232 L160 536 V264 L232 192 H352 Z"/><path fill="#76c6a4" d="M448 96 H608 L736 224 V576 L608 704 H448 V608 H568 L640 536 V264 L568 192 H448 Z"/><path fill="#f3edce" fill-rule="evenodd" d="M400 232 L552 560 H456 L430 496 H370 L344 560 H248 Z M400 360 L378 424 H422 Z"/></g>
+<text x="550" y="389" fill="#f3edce" font-family="Geist, sans-serif" font-weight="600" font-size="110" letter-spacing="-5">OmaAsus</text>
+<text x="559" y="444" fill="#76c6a4" font-family="monospace" font-size="17" letter-spacing="3">PRECISION HARDWARE CONTROL</text>
+<text x="80" y="678" fill="#99aca1" font-family="monospace" font-size="13" letter-spacing="2">OPEN SYSTEM. PRECISE CONTROL.</text>
+<g transform="translate(1090 614) scale(.07)"><path fill="#ffffff" d="M352 96 H192 L64 224 V576 L192 704 H352 V608 H232 L160 536 V264 L232 192 H352 Z"/><path fill="#ffffff" d="M448 96 H608 L736 224 V576 L608 704 H448 V608 H568 L640 536 V264 L568 192 H448 Z"/><path fill="#ffffff" fill-rule="evenodd" d="M400 232 L552 560 H456 L430 496 H370 L344 560 H248 Z M400 360 L378 424 H422 Z"/></g>
+<g transform="translate(1170 610) scale(.08)"><path fill="#76c6a4" d="M352 96 H192 L64 224 V576 L192 704 H352 V608 H232 L160 536 V264 L232 192 H352 Z"/><path fill="#76c6a4" d="M448 96 H608 L736 224 V576 L608 704 H448 V608 H568 L640 536 V264 L568 192 H448 Z"/><path fill="#f3edce" fill-rule="evenodd" d="M400 232 L552 560 H456 L430 496 H370 L344 560 H248 Z M400 360 L378 424 H422 Z"/></g>
+<g transform="translate(1260 606) scale(.09)"><path fill="#76c6a4" d="M352 96 H192 L64 224 V576 L192 704 H352 V608 H232 L160 536 V264 L232 192 H352 Z"/><path fill="#76c6a4" d="M448 96 H608 L736 224 V576 L608 704 H448 V608 H568 L640 536 V264 L568 192 H448 Z"/><path fill="#f3edce" fill-rule="evenodd" d="M400 232 L552 560 H456 L430 496 H370 L344 560 H248 Z M400 360 L378 424 H422 Z"/></g>
+</svg>

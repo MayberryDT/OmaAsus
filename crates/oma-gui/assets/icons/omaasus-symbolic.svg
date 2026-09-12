@@ -1,9 +1,1 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!-- OmaAsus tray icon (symbolic). Single-colour version of the oma mark; hosts recolour it to the bar foreground. -->
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 800 800">
-  <g fill="#bebebe">
-    <path d="M283 285.21 A149 149 0 1 0 283 514.79 Z"/>
-    <path d="M283 262 H536 V326 L462 400 L536 474 V536 H283 V514.79 A149 149 0 0 0 283 285.21 Z"/>
-    <path d="M536 326 L610.5 251.5 L759 400 L610.5 548.5 L536 474 Z"/>
-  </g>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 800 800" role="img" aria-labelledby="title"><title id="title">OmaAsus OA monogram</title><path fill="#ffffff" d="M352 96 H192 L64 224 V576 L192 704 H352 V608 H232 L160 536 V264 L232 192 H352 Z"/><path fill="#ffffff" d="M448 96 H608 L736 224 V576 L608 704 H448 V608 H568 L640 536 V264 L568 192 H448 Z"/><path fill="#ffffff" fill-rule="evenodd" d="M400 232 L552 560 H456 L430 496 H370 L344 560 H248 Z M400 360 L378 424 H422 Z"/></svg>

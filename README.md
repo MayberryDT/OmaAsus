@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/screenshots/dashboard.png" alt="OmaAsus dashboard" width="900">
+  <img src="docs/brand/identity.png" alt="OmaAsus — precision hardware control" width="900">
 </p>
 
 <h1 align="center">OmaAsus</h1>
@@ -89,13 +89,15 @@ Graphics, Cooling, Lighting and ASUS appear only when there is hardware or a dae
 
 ## Design
 
+The original OA monogram pairs a split, chamfered enclosure with an angular A. [Brand assets and usage](docs/brand/README.md) include scalable artwork and the monochrome tray version. The [reliability implementation plan](docs/RELIABILITY-PLAN.md) describes proposed work; it is not a list of completed features.
+
 The interface is a port of [omarchy-site](https://github.com/omacom/omarchy-site)'s design system:
 
 - **Geist** for headings and controls, **JetBrains Mono** for navigation, labels, values and copy.
 - The site's token roles: `bg-deep`, `bg`, `surface`, `surface-2`, `border-subtle`/`strong`, `text`/`secondary`/`muted`, `brand`, `brand-ink`, and the five field bands. Zero corner radius. Opaque surfaces with a one-pixel elevation ring. Brand-filled primary buttons.
 - **Your Omarchy theme drives the colours.** On start, OmaAsus asks `omarchy-theme-current` and reads that theme's `colors.toml`, mixing intermediate shades the way the site does. Change theme, restart, and the app follows.
 - The background is the site's **pixel field** as a GPU shader: 10 px cells, Bayer-dithered drifting blobs, corner clustering, a cursor halo, and a subtle pulse with system load.
-- The active profile is set in the site's **3×5 pixel glyph font** with the five brand bands, and the header carries the `oma` mark.
+- The active profile is set in the site's **3×5 pixel glyph font** with the five brand bands, and the header carries the original OmaAsus OA monogram.
 - The dashboard fills the window and its type scale follows it. On narrow tiles the navigation folds to icons.
 
 <p align="center">
@@ -183,7 +185,7 @@ systemctl --user enable --now omaasus
 
 ### Tray
 
-OmaAsus registers a StatusNotifierItem, so Omarchy's bar shows the `oma` mark in its tray. Closing the main window then leaves the daemon running: automation rules, the fan engine and the overlay keep working, and the icon is the way back.
+OmaAsus registers a StatusNotifierItem, so Omarchy's bar shows the OmaAsus OA monogram in its tray. Closing the main window then leaves the daemon running: automation rules, the fan engine and the overlay keep working, and the icon is the way back.
 
 | Click | Action |
 | --- | --- |

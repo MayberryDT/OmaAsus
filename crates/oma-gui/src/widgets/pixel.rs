@@ -1,8 +1,8 @@
 //! The site's 3x5 pixel glyph font (`PixelLabel`) with the five brand bands
-//! (crest → hover → lit → mid → dim, top to bottom), and the `oma` mark.
+//! (crest → hover → lit → mid → dim, top to bottom), and the original OmaAsus mark.
 
 use crate::theme::Palette;
-use iced::widget::canvas::{self, Frame, Path};
+use iced::widget::canvas::{self, Frame};
 use iced::{Color, Point, Rectangle, Renderer, Size, Theme, mouse};
 
 fn glyph(c: char) -> Option<&'static str> {
@@ -116,66 +116,13 @@ pub fn pixel_label<'a, M: 'a>(p: Palette, text: impl Into<String>, cell: f32) ->
     canvas::Canvas::new(PixelLabel { palette: p, text, color: None }).width(w).height(cell * 5.0).into()
 }
 
-/// The `oma` brand mark from brand/oma-logo.svg (800x800 viewBox), banded.
-pub struct OmaMark {
-    pub palette: Palette,
-}
-
-impl<M> canvas::Program<M> for OmaMark {
-    type State = ();
-
-    fn draw(&self, _s: &(), renderer: &Renderer, _t: &Theme, bounds: Rectangle, _c: mouse::Cursor) -> Vec<canvas::Geometry> {
-        let mut f = Frame::new(renderer, bounds.size());
-        let s = bounds.width.min(bounds.height);
-        let k = s / 800.0;
-        let ox = (bounds.width - s) / 2.0;
-        let oy = (bounds.height - s) / 2.0;
-        let pt = |x: f32, y: f32| Point::new(ox + x * k, oy + y * k);
-        // Left lobe: the circle centred (188,400) r149, its part left of x=283.
-        let lobe = Path::new(|b| {
-            b.move_to(pt(283.0, 285.21));
-            b.arc(canvas::path::Arc { center: pt(188.0, 400.0), radius: 149.0 * k, start_angle: (-0.878f32).into(), end_angle: (-0.878f32 - 2.0 * std::f32::consts::PI + 1.756).into() });
-            b.close();
-        });
-        // Body with the circular bite on its left.
-        let body = Path::new(|b| {
-            b.move_to(pt(283.0, 262.0));
-            b.line_to(pt(536.0, 262.0));
-            b.line_to(pt(536.0, 326.0));
-            b.line_to(pt(462.0, 400.0));
-            b.line_to(pt(536.0, 474.0));
-            b.line_to(pt(536.0, 536.0));
-            b.line_to(pt(283.0, 536.0));
-            b.line_to(pt(283.0, 514.79));
-            b.arc(canvas::path::Arc { center: pt(188.0, 400.0), radius: 149.0 * k, start_angle: (0.878f32).into(), end_angle: (-0.878f32).into() });
-            b.close();
-        });
-        let diamond = Path::new(|b| {
-            b.move_to(pt(536.0, 326.0));
-            b.line_to(pt(610.5, 251.5));
-            b.line_to(pt(759.0, 400.0));
-            b.line_to(pt(610.5, 548.5));
-            b.line_to(pt(536.0, 474.0));
-            b.close();
-        });
-        // Banded fill: hard-stop vertical gradient from y=250 to 550, as the SVG.
-        let p = self.palette;
-        let y_a = 250.0 * k + oy;
-        let y_b = 550.0 * k + oy;
-        let stops: [(f32, Color); 5] = [(0.0, p.field_crest), (0.26316, p.field_hover), (0.36842, p.field_lit), (0.57895, p.field_mid), (0.73684, p.field_dim)];
-        let mut g = canvas::gradient::Linear::new(Point::new(0.0, y_a), Point::new(0.0, y_b));
-        for (i, (from, col)) in stops.iter().enumerate() {
-            let to = stops.get(i + 1).map(|s| s.0).unwrap_or(1.0);
-            g = g.add_stop(*from, *col).add_stop((to - 0.0005).max(*from), *col);
-        }
-        let fill = canvas::Fill { style: canvas::Style::Gradient(canvas::Gradient::Linear(g)), rule: canvas::fill::Rule::NonZero };
-        f.fill(&lobe, fill);
-        f.fill(&body, fill);
-        f.fill(&diamond, fill);
-        vec![f.into_geometry()]
-    }
-}
-
+/// Original OA monogram, shared with the tray and packaged application icons.
+/// A single SVG source keeps the small panel and main-window branding identical.
 pub fn oma_mark<'a, M: 'a>(p: Palette, size: f32) -> iced::Element<'a, M> {
-    canvas::Canvas::new(OmaMark { palette: p }).width(size).height(size).into()
+    use iced::widget::svg;
+    svg(svg::Handle::from_memory(include_bytes!("../../assets/icons/omaasus-symbolic.svg").as_slice()))
+        .width(size)
+        .height(size)
+        .style(move |_, _| svg::Style { color: Some(p.brand) })
+        .into()
 }

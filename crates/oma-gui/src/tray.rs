@@ -335,7 +335,7 @@ mod tests {
         for svg in [SVG_SYMBOLIC, SVG_APP] {
             assert!(svg.contains("<svg"), "missing root element");
             assert!(svg.contains("viewBox=\"0 0 800 800\""), "mark paths are authored in the 800-unit space");
-            assert_eq!(svg.matches("<path").count(), 3, "lobe, body and diamond");
+            assert_eq!(svg.matches("<path").count(), 3, "two enclosure halves and the A monogram");
         }
         assert!(SVG_SYMBOLIC.contains("width=\"16\""));
         for png in PNG_SYMBOLIC.iter().chain(PNG_APP.iter()) {
