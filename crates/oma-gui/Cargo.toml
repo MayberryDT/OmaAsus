@@ -35,3 +35,4 @@ bytemuck = { version = "1", features = ["derive"] }
 winit-core = "=0.31.0-beta.2"
 winit-common = "=0.31.0-beta.2"
 ksni = "0.3.6"
+inotify = "0.11"

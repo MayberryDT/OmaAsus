@@ -114,6 +114,9 @@ pub struct App {
     overlay_phase: Option<OverlayPhase>,
     /// Shutting down: fans are being handed back, the engine must not retake them.
     quitting: bool,
+    /// A theme change under way: the palette crosses from the first to the
+    /// second over `THEME_FADE`, so the window turns with the desktop.
+    theme_fade: Option<(Palette, Palette, std::time::Instant)>,
     /// power-profiles-daemon, for the panel's power-mode row when asusd isn't the owner.
     pub ppd: Option<oma_hw::ppd::PpdState>,
     /// Charge-limit slider position while it is being dragged in the panel.
@@ -193,6 +196,8 @@ fn probe_graphics() -> Task<Message> {
 
 const OVERLAY_OPEN: std::time::Duration = std::time::Duration::from_millis(280);
 const OVERLAY_CLOSE: std::time::Duration = std::time::Duration::from_millis(170);
+/// How long a theme change takes to cross the window.
+const THEME_FADE: std::time::Duration = std::time::Duration::from_millis(350);
 
 /// Eased display values so gauges glide instead of stepping.
 #[derive(Debug, Default, Clone, Copy)]
@@ -325,6 +330,10 @@ pub enum Message {
     ToggleOverlay,
     OpenWindow,
     Tray(tray::Event),
+    /// Omarchy applied a theme: the desktop's palette and its name.
+    ThemeChanged(Palette, String),
+    /// `omaasus reload-theme`: read the theme again now.
+    ReloadTheme,
     /// The runtime destroyed a surface (compositor close, `RemoveWindow`).
     SurfaceClosed(Id),
     /// Leave for good: close every surface, drop the tray item, exit.
@@ -412,6 +421,7 @@ impl App {
             tray_synced: tray::TrayState::default(),
             overlay_phase: None,
             quitting: false,
+            theme_fade: None,
             ppd: None,
             quick_charge: None,
             attr_drag: None,
@@ -484,6 +494,8 @@ impl App {
             // Cooling safety runs on its own clock: a sampler that stops
             // delivering frames must not stop the engine's fallbacks.
             iced::time::every(std::time::Duration::from_millis(500)).map(Message::FanSafety),
+            // The desktop's theme, as Omarchy applies it.
+            Subscription::run(theme::watch).map(|(p, name)| Message::ThemeChanged(p, name)),
             tray,
             iced::window::close_events().map(Message::SurfaceClosed),
             anim,
@@ -1657,6 +1669,15 @@ impl App {
             }
             Message::Tick(now) => {
                 self.now = now;
+                if let Some((from, to, since)) = self.theme_fade {
+                    let t = now.saturating_duration_since(since).as_secs_f32() / THEME_FADE.as_secs_f32();
+                    if t >= 1.0 {
+                        self.palette = to;
+                        self.theme_fade = None;
+                    } else {
+                        self.palette = from.blend(&to, reveal::ease_out_cubic(t));
+                    }
+                }
                 match self.overlay_phase {
                     Some(OverlayPhase::Opening(at)) if now.saturating_duration_since(at) >= OVERLAY_OPEN => self.overlay_phase = Some(OverlayPhase::Open),
                     Some(OverlayPhase::Closing(at)) if now.saturating_duration_since(at) >= OVERLAY_CLOSE => {
@@ -1929,6 +1950,7 @@ impl App {
                 }
                 ipc::Command::Hide => self.close_overlay(),
                 ipc::Command::Quit => Task::done(Message::Quit),
+                ipc::Command::ReloadTheme => Task::done(Message::ReloadTheme),
                 ipc::Command::Window => Task::done(Message::OpenWindow),
                 ipc::Command::Profile(name) => match self.config.profiles.iter().find(|p| p.name.eq_ignore_ascii_case(&name)) {
                     Some(p) => Task::done(Message::ApplyProfile(p.id)),
@@ -1949,6 +1971,23 @@ impl App {
                 _ if self.overlay_id().is_some() => self.close_overlay(),
                 _ => self.open_overlay(),
             },
+            Message::ThemeChanged(palette, name) => {
+                tracing::info!(theme = %name, "adopting the desktop theme");
+                self.theme_name = name;
+                if self.surfaces.is_empty() {
+                    // Nothing on screen to cross-fade: just take it.
+                    self.palette = palette;
+                    self.theme_fade = None;
+                } else {
+                    let from = self.palette;
+                    self.theme_fade = Some((from, palette, std::time::Instant::now()));
+                }
+                Task::none()
+            }
+            Message::ReloadTheme => {
+                let (palette, name) = theme::load();
+                Task::done(Message::ThemeChanged(palette, name))
+            }
             Message::Tray(tray::Event::Ready(h)) => {
                 self.tray = Some(h);
                 self.tray_synced = tray::TrayState::default();

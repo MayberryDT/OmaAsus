@@ -164,8 +164,26 @@ pub struct OmarchyColors {
     pub magenta: Option<String>,
 }
 
-/// The theme the desktop is running, as `omarchy-theme-current` reports it.
+/// Where Omarchy keeps the theme it has applied: `omarchy-theme-set` stages
+/// the theme into `current/theme/` and writes `current/theme.name`. That is
+/// the theme on screen, whatever the themes directories hold.
+pub fn state_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?;
+    Some(base.join("omarchy/current"))
+}
+
+/// The theme's display name from `theme.name` ("osaka-jade" → "Osaka Jade"),
+/// as `omarchy-theme-current` prints it.
+pub fn display_name(slug: &str) -> String {
+    slug.trim().split('-').filter(|w| !w.is_empty()).map(|w| { let mut c = w.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }).collect::<Vec<_>>().join(" ")
+}
+
+/// The theme the desktop is running: the applied one in Omarchy's state
+/// directory, else what `omarchy-theme-current` reports.
 pub fn current_theme_name() -> Option<String> {
+    if let Some(name) = state_dir().and_then(|d| std::fs::read_to_string(d.join("theme.name")).ok()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        return Some(display_name(&name));
+    }
     let out = std::process::Command::new("omarchy-theme-current").output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if s.is_empty() { None } else { Some(s) }
@@ -185,8 +203,10 @@ pub fn theme_dir(slug: &str) -> Option<PathBuf> {
 }
 
 pub fn load_colors(slug: &str) -> Option<OmarchyColors> {
-    let dir = theme_dir(slug)?;
-    let s = std::fs::read_to_string(dir.join("colors.toml")).ok()?;
+    // The applied copy first: it is what the rest of the desktop shows.
+    let applied = state_dir().map(|d| d.join("theme/colors.toml")).filter(|p| p.exists());
+    let path = applied.or_else(|| theme_dir(slug).map(|d| d.join("colors.toml")))?;
+    let s = std::fs::read_to_string(path).ok()?;
     toml::from_str(&s).ok()
 }
 
@@ -308,6 +328,84 @@ pub fn load() -> (Palette, String) {
     (fallback(), "Osaka Jade".into())
 }
 
+macro_rules! blend_fields {
+    ($a:expr, $b:expr, $t:expr; $($f:ident),* $(,)?) => {
+        Palette { dark: $b.dark, $($f: mix($a.$f, $b.$f, $t)),* }
+    };
+}
+
+impl Palette {
+    /// This palette part way to `to`: what a theme change looks like while it
+    /// crosses over rather than snapping.
+    pub fn blend(&self, to: &Palette, t: f32) -> Palette {
+        let t = t.clamp(0.0, 1.0);
+        blend_fields!(self, to, t;
+            bg_deep, bg, surface, surface_2, border_subtle, border_strong, text, text_secondary, text_muted, brand, brand_soft, brand_ink,
+            field_bg, field_dim, field_mid, field_lit, field_hover, field_crest, selection, red, yellow, green, cyan, blue, magenta, orange,
+            accent, accent_soft, accent_glow, accent_2, ok, warn, danger, cpu, gpu, coolant, fan, power, glass, glass_strong, line, line_strong,
+            text_dim, text_faint, bg_elev,
+        )
+    }
+}
+
+/// Follows the desktop's theme: whenever Omarchy applies one (it replaces
+/// `current/theme` and rewrites `current/theme.name`), the new palette is
+/// sent, so the window changes with the rest of the desktop rather than at
+/// the next start. Nothing is sent where Omarchy's state directory doesn't
+/// exist.
+pub fn watch() -> impl iced::futures::Stream<Item = (Palette, String)> {
+    use iced::futures::{SinkExt, StreamExt};
+    iced::stream::channel(4, async move |mut out| {
+        let Some(dir) = state_dir().filter(|d| d.is_dir()) else {
+            std::future::pending::<()>().await;
+            unreachable!()
+        };
+        let inotify = match inotify::Inotify::init() {
+            Ok(i) => i,
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot watch the Omarchy theme; restart to pick up a new one");
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+        };
+        use inotify::WatchMask;
+        if let Err(e) = inotify.watches().add(&dir, WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO | WatchMask::CREATE | WatchMask::DELETE | WatchMask::MOVE_SELF) {
+            tracing::warn!(error = %e, dir = %dir.display(), "cannot watch the Omarchy theme");
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+        let mut buf = [0u8; 4096];
+        let mut events = match inotify.into_event_stream(&mut buf) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot watch the Omarchy theme");
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+        };
+        let mut last = load();
+        tracing::info!(dir = %dir.display(), "following the Omarchy theme");
+        while let Some(ev) = events.next().await {
+            let Ok(ev) = ev else { continue };
+            // Only the pieces theme-set touches; the background link moves too.
+            let interesting = ev.name.as_ref().is_some_and(|n| n == "theme.name" || n == "theme");
+            if !interesting {
+                continue;
+            }
+            // theme-set moves the directory, then writes the name: settle first.
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let now = tokio::task::spawn_blocking(load).await.unwrap_or_else(|_| load());
+            if now != last {
+                tracing::info!(theme = %now.1, "desktop theme changed");
+                last = now.clone();
+                if out.send(now).await.is_err() {
+                    break;
+                }
+            }
+        }
+    })
+}
+
 pub fn ring(p: &Palette) -> Border {
     Border { color: p.line, width: 1.0, radius: 0.0.into() }
 }
@@ -317,4 +415,31 @@ pub fn iced_theme(p: &Palette) -> iced::Theme {
         String::from("Omarchy"),
         iced::theme::Palette { background: p.bg, text: p.text, primary: p.brand, success: p.green, warning: p.yellow, danger: p.red },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_names_read_as_omarchy_prints_them() {
+        assert_eq!(display_name("osaka-jade"), "Osaka Jade");
+        assert_eq!(display_name("hackerman\n"), "Hackerman");
+        assert_eq!(display_name("tokyo-night"), "Tokyo Night");
+    }
+
+    #[test]
+    fn a_blend_moves_every_colour_and_ends_at_the_target() {
+        let a = fallback();
+        let mut b = fallback();
+        b.brand = Color::from_rgb(1.0, 0.0, 0.0);
+        b.bg = Color::from_rgb(0.0, 0.0, 1.0);
+        b.dark = false;
+        let mid = a.blend(&b, 0.5);
+        assert!((mid.brand.r - (a.brand.r + 1.0) / 2.0).abs() < 1e-5);
+        assert!((mid.bg.b - (a.bg.b + 1.0) / 2.0).abs() < 1e-5);
+        assert_eq!(a.blend(&b, 1.0), b);
+        assert_eq!(a.blend(&b, 0.0).brand, a.brand);
+        assert!(!a.blend(&b, 0.3).dark, "the target's mode from the start");
+    }
 }

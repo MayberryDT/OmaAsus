@@ -5,7 +5,7 @@
 //!   open the main window.
 //! * `omaasus --overlay`  — start in the background; the overlay is toggled
 //!   with `omaasus toggle` (bind it to a Hyprland key).
-//! * `omaasus toggle|show|hide|window|quit` — talk to a running instance.
+//! * `omaasus toggle|show|hide|window|quit|reload-theme` — talk to a running instance.
 //!   `omaasus window` starts the app when nothing is running (desktop entry).
 
 mod app;
@@ -40,7 +40,7 @@ fn main() -> anyhow::Result<()> {
             drop(rt);
             app::run(false).map_err(|e| anyhow::anyhow!("{e}"))
         }
-        Some("toggle") | Some("show") | Some("hide") | Some("profile") | Some("page") | Some("quit") => {
+        Some("toggle") | Some("show") | Some("hide") | Some("profile") | Some("page") | Some("quit") | Some("reload-theme") => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(ipc::send(&args))?;
             Ok(())

@@ -19,6 +19,9 @@ pub enum Command {
     Quit,
     /// Another instance already owns the bus name; this one must exit.
     Duplicate,
+    /// Read the desktop theme again (for an Omarchy `theme-set` hook; the
+    /// app also watches the theme on its own).
+    ReloadTheme,
 }
 
 struct Service {
@@ -48,6 +51,9 @@ impl Service {
     async fn quit(&self) {
         let _ = self.tx.send(Command::Quit).await;
     }
+    async fn reload_theme(&self) {
+        let _ = self.tx.send(Command::ReloadTheme).await;
+    }
     #[zbus(property)]
     fn version(&self) -> String {
         env!("CARGO_PKG_VERSION").into()
@@ -63,6 +69,7 @@ trait App {
     fn apply_profile(&self, name: &str) -> zbus::Result<()>;
     fn navigate(&self, page: &str) -> zbus::Result<()>;
     fn quit(&self) -> zbus::Result<()>;
+    fn reload_theme(&self) -> zbus::Result<()>;
 }
 
 /// Subscription stream: owns the bus name for the lifetime of the app.
@@ -120,6 +127,7 @@ pub async fn send(args: &[String]) -> anyhow::Result<()> {
         Some("profile") => p.apply_profile(args.get(1).map(String::as_str).unwrap_or("")).await,
         Some("page") => p.navigate(args.get(1).map(String::as_str).unwrap_or("")).await,
         Some("quit") => p.quit().await,
+        Some("reload-theme") => p.reload_theme().await,
         _ => return Ok(()),
     };
     r.map_err(|e| anyhow::anyhow!("OmaAsus is not running ({e}). Start it with `omaasus --overlay`."))
