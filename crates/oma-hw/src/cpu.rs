@@ -203,7 +203,9 @@ pub fn control_state() -> CpuControlState {
     CpuControlState {
         governor: sysfs::read_string(governor_path(0)).unwrap_or_default(),
         epp: sysfs::read_string(epp_path(0)),
-        boost: sysfs::read_u64(boost_path()).map(|v| v == 1),
+        // The knob the plan writes: per policy where the kernel offers it, so
+        // a read-back compares like with like; the global knob otherwise.
+        boost: sysfs::read_u64(policy_attr(0, "boost")).or_else(|| sysfs::read_u64(boost_path())).map(|v| v == 1),
         smt: sysfs::read_string(smt_path()).map(|s| s == "on"),
         scaling_min_khz: sysfs::read_u64(min_freq_path(0)).unwrap_or(0),
         scaling_max_khz: sysfs::read_u64(max_freq_path(0)).unwrap_or(0),

@@ -235,9 +235,17 @@ impl FanBackend {
                 // No automatic mode to return to once driven.
                 Release::SafeFixed(d) => self.ctl.write(&ch.path, duty_value(d)).await.map_err(|e| e.to_string()),
                 Release::RestoreMode | Release::Auto => {
-                    let saved = self.saved_enable.lock().unwrap().remove(&out.id);
+                    // The saved mode is forgotten only once the write confirmed it:
+                    // a refused release is retried, and must still know the mode.
+                    let saved = self.saved_enable.lock().unwrap().get(&out.id).copied();
                     match (ch.has_enable, saved) {
-                        (true, Some(mode)) => self.ctl.write(ch.enable_path(), mode.as_u8().to_string()).await.map_err(|e| e.to_string()),
+                        (true, Some(mode)) => {
+                            let r = self.ctl.write(ch.enable_path(), mode.as_u8().to_string()).await.map_err(|e| e.to_string());
+                            if r.is_ok() {
+                                self.saved_enable.lock().unwrap().remove(&out.id);
+                            }
+                            r
+                        }
                         // Never taken over: nothing to hand back.
                         _ => Ok(()),
                     }

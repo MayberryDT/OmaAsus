@@ -34,19 +34,21 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let edit = &app.gpu_edit;
     let dirty = app.gpu_dirty;
 
-    let temp = nv.as_ref().and_then(|n| n.temp_c).unwrap_or(0) as f32;
-    let util = nv.as_ref().and_then(|n| n.util_gpu).unwrap_or(0) as f32;
-    let power = nv.as_ref().and_then(|n| n.power_w).unwrap_or(0.0) as f32;
+    // A card that isn't being read (asleep, a switch settling) shows dashes, not zeros.
+    let temp = nv.as_ref().and_then(|n| n.temp_c).map(|t| t as f32).unwrap_or(f32::NAN);
+    let util = nv.as_ref().and_then(|n| n.util_gpu).map(|u| u as f32).unwrap_or(f32::NAN);
+    let power = nv.as_ref().and_then(|n| n.power_w).map(|w| w as f32).unwrap_or(f32::NAN);
     let limit = nv.as_ref().and_then(|n| n.power_limit_w).unwrap_or(info.power_default_mw as f64 / 1000.0) as f32;
-    let clk = nv.as_ref().and_then(|n| n.graphics_mhz).unwrap_or(0);
-    let mclk = nv.as_ref().and_then(|n| n.memory_mhz).unwrap_or(0);
-    let vram = nv.as_ref().and_then(|n| n.vram_used_mb).unwrap_or(0);
+    let mhz = |v: Option<u32>| v.map(|c| c.to_string()).unwrap_or_else(|| "—".into());
+    let clk = mhz(nv.as_ref().and_then(|n| n.graphics_mhz));
+    let mclk = mhz(nv.as_ref().and_then(|n| n.memory_mhz));
+    let vram = nv.as_ref().and_then(|n| n.vram_used_mb).map(|v| format!("{:.1}", v as f64 / 1024.0)).unwrap_or_else(|| "—".into());
 
     let header = Row::new().spacing(space::XL).align_y(iced::Alignment::Center)
         .push(column![
             widgets::eyebrow(p, "Graphics"),
             widgets::headline(p, info.name.replace("NVIDIA ", "")),
-            widgets::dim(p, format!("driver {} · {} MiB · PCIe {}x{} · {} fans", info.driver_version, info.vram_total_mb, nv.as_ref().and_then(|n| n.pcie_gen).unwrap_or(0), nv.as_ref().and_then(|n| n.pcie_width).unwrap_or(0), info.num_fans)),
+            widgets::dim(p, format!("driver {} · {} MiB · PCIe {} · {} fans", info.driver_version, info.vram_total_mb, match (nv.as_ref().and_then(|n| n.pcie_gen), nv.as_ref().and_then(|n| n.pcie_width)) { (Some(g), Some(w)) => format!("{g}x{w}"), _ => "—".into() }, info.num_fans)),
         ]
         .spacing(space::XS))
         .push(canvas(Gauge { palette: p, value: temp, min: 0.0, max: 90.0, label: "temp".into(), unit: "°C".into(), color: theme::thermal(&p, temp as f64, 30.0, 85.0), decimals: 0, inner: Some((util / 100.0, p.gpu)) }).width(Length::Fixed(120.0)).height(Length::Fixed(120.0)))
@@ -55,9 +57,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     let stats = Row::new()
         .spacing(space::MD)
-        .push(widgets::card(p, widgets::metric(p, "Core clock", clk.to_string(), "MHz", p.gpu)).width(Length::Fill))
-        .push(widgets::card(p, widgets::metric(p, "Memory clock", mclk.to_string(), "MHz", p.gpu)).width(Length::Fill))
-        .push(widgets::card(p, widgets::metric(p, "VRAM used", format!("{:.1}", vram as f64 / 1024.0), "GiB", p.gpu)).width(Length::Fill))
+        .push(widgets::card(p, widgets::metric(p, "Core clock", clk, "MHz", p.gpu)).width(Length::Fill))
+        .push(widgets::card(p, widgets::metric(p, "Memory clock", mclk, "MHz", p.gpu)).width(Length::Fill))
+        .push(widgets::card(p, widgets::metric(p, "VRAM used", vram, "GiB", p.gpu)).width(Length::Fill))
         .push(widgets::card(p, widgets::metric(p, "Fans", nv.as_ref().map(|n| n.fan_percent.iter().map(|f| format!("{f}")).collect::<Vec<_>>().join(" / ")).unwrap_or_default(), "%", p.fan)).width(Length::Fill))
         .push(widgets::card(p, column![widgets::eyebrow(p, "Limiter"), Row::with_children(nv.as_ref().map(|n| n.throttle_reasons.iter().map(|r| widgets::pill(p, r, if r == "Idle" { p.text_dim } else { p.warn })).collect::<Vec<_>>()).unwrap_or_default()).spacing(space::XS).wrap()].spacing(space::SM)).width(Length::Fill));
 

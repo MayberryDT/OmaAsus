@@ -66,7 +66,10 @@ impl<M> canvas::Program<M> for Gauge {
         if let Some((fi, col)) = self.inner {
             let ri = r - w * 2.2;
             frame.stroke(&arc(ri, start, start + span), Stroke::default().with_width(w * 0.5).with_color(p.surface_2));
-            frame.stroke(&arc(ri, start, start + span * fi.clamp(0.001, 1.0)), Stroke::default().with_width(w * 0.5).with_color(col));
+            // No inner reading: the track alone, never a NaN angle in the path.
+            if fi.is_finite() {
+                frame.stroke(&arc(ri, start, start + span * fi.clamp(0.001, 1.0)), Stroke::default().with_width(w * 0.5).with_color(col));
+            }
         }
         frame.fill_text(Text {
             content: if self.value.is_finite() { format!("{:.*}", self.decimals, self.value) } else { "—".into() },

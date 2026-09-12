@@ -112,6 +112,8 @@ pub struct App {
     tray_synced: tray::TrayState,
     /// Drop-down animation of the overlay panel.
     overlay_phase: Option<OverlayPhase>,
+    /// Shutting down: fans are being handed back, the engine must not retake them.
+    quitting: bool,
     /// power-profiles-daemon, for the panel's power-mode row when asusd isn't the owner.
     pub ppd: Option<oma_hw::ppd::PpdState>,
     /// Charge-limit slider position while it is being dragged in the panel.
@@ -409,6 +411,7 @@ impl App {
             tray_hosted: false,
             tray_synced: tray::TrayState::default(),
             overlay_phase: None,
+            quitting: false,
             ppd: None,
             quick_charge: None,
             attr_drag: None,
@@ -535,7 +538,15 @@ impl App {
     /// Run one apply under `generation`: the saved preference changes now, the
     /// hardware result comes back as `ProfileApplied`.
     fn launch_apply(&mut self, generation: u64, request: crate::coordinator::Request) -> Task<Message> {
-        let Some(pr) = self.config.profile(request.id).cloned() else { return Task::none() };
+        let Some(pr) = self.config.profile(request.id).cloned() else {
+            // Deleted while it waited: report so, and let the next queued one run.
+            let mut report = crate::apply::Report::default();
+            report.failed.push(format!("profile {} no longer exists", request.name));
+            return match self.coord.finished(generation, report, std::time::Instant::now()) {
+                crate::coordinator::Finish::StartNext(generation, next) => self.launch_apply(generation, next),
+                _ => Task::none(),
+            };
+        };
         self.config.active_profile = request.id;
         crate::config_store::save(&self.config);
         // Re-send the new profile's outputs; ones it drops are released by the engine.
@@ -1343,6 +1354,10 @@ impl App {
     fn fan_tick(&mut self, now: std::time::Instant) -> Task<Message> {
         // Commands can only be written once the backend exists; until then the
         // engine must not advance, or it would record duties that never landed.
+        // And once the shutdown has handed the fans back, nothing retakes them.
+        if self.quitting {
+            return Task::none();
+        }
         let Some(be) = self.fan_backend.clone() else { return Task::none() };
         if self.effective_fan_owner() != FanOwner::OmaAsus {
             if self.fan_engine.is_idle() {
@@ -1382,6 +1397,7 @@ impl App {
     /// config, then exit.
     fn shutdown(&mut self, reason: &str) -> Task<Message> {
         tracing::info!(reason, "shutting down: releasing fans and saving the config");
+        self.quitting = true;
         let mut cmds = self.fan_engine.release_all(std::time::Instant::now());
         // Firmware curves are safe without OmaAsus: leave them in place.
         if let Some(m) = &self.model {

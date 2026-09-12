@@ -58,6 +58,8 @@ const RETRY_CHECK: std::time::Duration = std::time::Duration::from_secs(2);
 /// inside the unit's TimeoutStopSec so systemd never has to SIGKILL a
 /// helper mid-restore.
 const STOP_BUDGET: std::time::Duration = std::time::Duration::from_secs(12);
+/// More GPUs than any supported machine has: bounds the lane map.
+const MAX_GPUS: u32 = 8;
 
 /// Classify a canonical (symlink-resolved) sysfs path into the polkit action
 /// guarding writes to it, or `None` if it may not be written at all.
@@ -198,10 +200,12 @@ fn resolve_read(path: &str) -> Option<PathBuf> {
 /// A client's HID path, canonical and under /dev/hidraw, before it names a
 /// lane: the lane map must not grow with arbitrary strings.
 fn hidraw_path(path: &str) -> zbus::fdo::Result<String> {
-    let canon = std::fs::canonicalize(path).map_err(|e| zbus::fdo::Error::FileNotFound(format!("{path}: {e}")))?;
+    // One answer for "missing" and "elsewhere": not a path-existence oracle.
+    let denied = || zbus::fdo::Error::AccessDenied(format!("{path} is not a hidraw device"));
+    let canon = std::fs::canonicalize(path).map_err(|_| denied())?;
     let s = canon.to_string_lossy();
     if !s.starts_with("/dev/hidraw") {
-        return Err(zbus::fdo::Error::AccessDenied(format!("{path} is not a hidraw device")));
+        return Err(denied());
     }
     Ok(s.into_owned())
 }
@@ -291,8 +295,8 @@ impl Helper {
         // Idle time counts from the answer, not the question.
         *self.last_active.lock().unwrap() = std::time::Instant::now();
         // The helper began stopping while polkit answered, and may have handed
-        // the claims back already: claim nothing new. Nothing awaits between
-        // here and a call's write, so a call that gets past this finishes first.
+        // the claims back already: claim nothing new. The lane checks again
+        // right before the write, since the lane wait is an await.
         if self.closing.load(Ordering::SeqCst) {
             return Err(zbus::fdo::Error::Failed(oma_hw::helper::RESTARTING.into()));
         }
@@ -504,10 +508,13 @@ impl Helper {
         // Counted until the device work is done, so a stop waits for it.
         let _work = Busy::enter(&self.in_flight);
         info!(path = %canon.display(), %value, "write");
-        Ok(match write_in_lane(&self.lanes, &self.ledger, &self.closing, sender(&hdr), canon, value).await {
-            Ok(()) => String::new(),
-            Err(e) => e,
-        })
+        match write_in_lane(&self.lanes, &self.ledger, &self.closing, sender(&hdr), canon, value).await {
+            Ok(()) => Ok(String::new()),
+            // Refused because the helper is stopping: a bus error, so the client's
+            // one retry reaches the fresh helper.
+            Err(e) if e == oma_hw::helper::RESTARTING => Err(zbus::fdo::Error::Failed(e)),
+            Err(e) => Ok(e),
+        }
     }
 
     /// Write many attributes atomically-ish; returns per-entry error strings ("" = ok).
@@ -564,6 +571,9 @@ impl Helper {
             }
             i = j;
         }
+        if out.iter().any(|e| e == oma_hw::helper::RESTARTING) {
+            return Err(zbus::fdo::Error::Failed(oma_hw::helper::RESTARTING.into()));
+        }
         Ok(out)
     }
 
@@ -580,6 +590,10 @@ impl Helper {
     /// Returns a JSON array of `[step, error-or-null]`.
     async fn nvidia_apply(&self, #[zbus(header)] hdr: Header<'_>, index: u32, control_json: String) -> zbus::fdo::Result<String> {
         let ctl: NvidiaControl = serde_json::from_str(&control_json).map_err(|e| zbus::fdo::Error::InvalidArgs(e.to_string()))?;
+        // A lane is named after the index: keep the map to plausible GPUs.
+        if index >= MAX_GPUS {
+            return Err(zbus::fdo::Error::InvalidArgs(format!("GPU index {index} out of range")));
+        }
         let advanced = ctl.touches_advanced();
         self.authorize(&hdr, if advanced { ACTION_ADVANCED } else { ACTION_CONTROL }).await?;
         let _work = Busy::enter(&self.in_flight);
@@ -617,8 +631,8 @@ impl Helper {
 
     /// Write a raw HID output report to an ASUS / ENE device (LCD, Aura, Ryujin).
     async fn hid_write(&self, #[zbus(header)] hdr: Header<'_>, path: String, report: Vec<u8>) -> zbus::fdo::Result<u32> {
-        let path = hidraw_path(&path)?;
         self.authorize(&hdr, ACTION_ADVANCED).await?;
+        let path = hidraw_path(&path)?;
         let _work = Busy::enter(&self.in_flight);
         self.lanes
             .run(&lanes::hid_lane(&path), LANE_WAIT, move || {
@@ -631,8 +645,8 @@ impl Helper {
 
     /// Send a HID feature report to an ASUS / ENE device.
     async fn hid_send_feature(&self, #[zbus(header)] hdr: Header<'_>, path: String, report: Vec<u8>) -> zbus::fdo::Result<()> {
-        let path = hidraw_path(&path)?;
         self.authorize(&hdr, ACTION_ADVANCED).await?;
+        let path = hidraw_path(&path)?;
         let _work = Busy::enter(&self.in_flight);
         self.lanes
             .run(&lanes::hid_lane(&path), LANE_WAIT, move || {

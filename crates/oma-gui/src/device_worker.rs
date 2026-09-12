@@ -15,6 +15,8 @@ pub struct Worker<R> {
     results: Receiver<R>,
     /// A request is outstanding: the thread is reading (or stuck).
     busy: bool,
+    /// When the outstanding request went out: a reading is as old as that.
+    requested_at: Option<Instant>,
     stalled_since: Option<Instant>,
     last_ok: Option<Instant>,
 }
@@ -22,7 +24,9 @@ pub struct Worker<R> {
 /// What a collection cycle found for one worker.
 #[derive(Debug, PartialEq)]
 pub enum Poll<R> {
-    Ready(R),
+    /// A reading, and when it was asked for: one that took long is old news,
+    /// not a current value.
+    Ready(R, Instant),
     /// Nothing arrived in time; the outstanding request stays out.
     Stalled,
     /// The thread is gone (its reader panicked).
@@ -46,17 +50,25 @@ impl<R: Send + 'static> Worker<R> {
         if let Err(e) = spawned {
             tracing::warn!(device = %name, error = %e, "cannot start a reader thread");
         }
-        Self { name, requests, results, busy: false, stalled_since: None, last_ok: None }
+        Self { name, requests, results, busy: false, requested_at: None, stalled_since: None, last_ok: None }
     }
 
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Ask for a reading unless one is still outstanding.
-    pub fn request(&mut self) {
-        if !self.busy && self.requests.send(()).is_ok() {
+    /// Ask for a reading unless one is still outstanding. A reader that is
+    /// gone (never started, or panicked) counts as a device that never answers.
+    pub fn request(&mut self, now: Instant) {
+        if self.busy {
+            return;
+        }
+        if self.requests.send(()).is_ok() {
             self.busy = true;
+            self.requested_at = Some(now);
+        } else if self.stalled_since.is_none() {
+            tracing::warn!(device = %self.name, "reader thread gone; the device counts as not answering");
+            self.stalled_since = Some(now);
         }
     }
 
@@ -72,7 +84,7 @@ impl<R: Send + 'static> Worker<R> {
                     tracing::info!(device = %self.name, stalled_s = now.duration_since(since).as_secs(), "device answering again");
                 }
                 self.last_ok = Some(now);
-                Poll::Ready(r)
+                Poll::Ready(r, self.requested_at.take().unwrap_or(now))
             }
             Err(RecvTimeoutError::Timeout) => {
                 if self.stalled_since.is_none() {
@@ -81,7 +93,13 @@ impl<R: Send + 'static> Worker<R> {
                 }
                 Poll::Stalled
             }
-            Err(RecvTimeoutError::Disconnected) => Poll::Dead,
+            Err(RecvTimeoutError::Disconnected) => {
+                if self.stalled_since.is_none() {
+                    tracing::warn!(device = %self.name, "reader thread died; the device counts as not answering");
+                    self.stalled_since = Some(now);
+                }
+                Poll::Dead
+            }
         }
     }
 
@@ -117,12 +135,12 @@ mod tests {
             42u32
         });
         let now = Instant::now();
-        w.request();
+        w.request(now);
         assert_eq!(w.collect(Duration::from_millis(30), now), Poll::Stalled);
         assert!(!w.healthy());
         // More cycles: no further request goes out while one is outstanding.
         for _ in 0..3 {
-            w.request();
+            w.request(now);
             assert_eq!(w.collect(Duration::from_millis(10), now), Poll::Stalled);
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -130,12 +148,12 @@ mod tests {
         // The device answers.
         drop(held);
         let later = now + Duration::from_secs(3);
-        assert_eq!(w.collect(Duration::from_millis(500), later), Poll::Ready(42));
+        assert_eq!(w.collect(Duration::from_millis(500), later), Poll::Ready(42, now), "dated when it was asked for, not when it arrived");
         assert!(w.healthy());
         assert_eq!(w.last_ok(), Some(later));
         // And the next cycle reads again.
-        w.request();
-        assert_eq!(w.collect(Duration::from_millis(500), later), Poll::Ready(42));
+        w.request(later);
+        assert_eq!(w.collect(Duration::from_millis(500), later), Poll::Ready(42, later));
         assert_eq!(*calls.lock().unwrap(), 2);
     }
 
@@ -148,8 +166,8 @@ mod tests {
         });
         let now = Instant::now();
         for expect in 1..=5 {
-            w.request();
-            assert_eq!(w.collect(Duration::from_millis(500), now), Poll::Ready(expect));
+            w.request(now);
+            assert_eq!(w.collect(Duration::from_millis(500), now), Poll::Ready(expect, now));
         }
         assert!(w.stalled_for(now).is_none());
     }
@@ -159,5 +177,18 @@ mod tests {
         let mut w = Worker::spawn("idle", || 1);
         assert_eq!(w.collect(Duration::from_millis(10), Instant::now()), Poll::Stalled);
         assert!(w.healthy(), "not asked is not stalled");
+    }
+
+    #[test]
+    fn a_dead_reader_is_an_unhealthy_device() {
+        let mut w = Worker::spawn("flaky", || -> u32 { panic!("reader panics") });
+        let now = Instant::now();
+        w.request(now);
+        // The thread dies; the result channel closes.
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(w.collect(Duration::from_millis(100), now), Poll::Dead);
+        assert!(!w.healthy(), "a dead reader must not look fine");
+        w.request(now);
+        assert!(!w.healthy());
     }
 }

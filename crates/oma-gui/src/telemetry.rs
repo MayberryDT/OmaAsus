@@ -407,16 +407,15 @@ impl Sampler {
             .map(|d| {
                 let dev = d.clone();
                 let temp_idx: Vec<usize> = d.temps.iter().enumerate().filter(|(_, t)| !knowledge::sensor_hidden(&d.name, &t.label)).map(|(i, _)| i).collect();
-                Worker::spawn(d.name.clone(), move || read_hwmon(&dev, &temp_idx))
+                Worker::spawn(d.friendly_name().to_string(), move || read_hwmon(&dev, &temp_idx))
             })
             .collect();
         let lianli = LianLiHub::enumerate();
         let lianli_workers = lianli
             .iter()
-            .enumerate()
-            .map(|(i, h)| {
+            .map(|h| {
                 let hub = h.clone();
-                Worker::spawn(format!("lianli{i}"), move || hub.read_rpm().ok())
+                Worker::spawn(h.kind.label().to_string(), move || hub.read_rpm().ok())
             })
             .collect();
         let named_tachs = hwmon.iter().any(|d| d.fans.iter().any(|f| knowledge::tach_role(&d.name, &f.label) == TachRole::Fan && f.label != format!("fan{}", f.index)));
@@ -430,7 +429,7 @@ impl Sampler {
             return;
         }
         let d = &self.hwmon[i];
-        let long_ago = std::time::Instant::now() - OFFLINE_AFTER;
+        let long_ago = std::time::Instant::now().checked_sub(OFFLINE_AFTER).unwrap_or_else(std::time::Instant::now);
         for f in d.fans.iter().filter(|f| matches!(knowledge::tach_role(&d.name, &f.label), TachRole::Fan | TachRole::Pump)) {
             let key = format!("{}:{}", d.name, f.label);
             if !self.fans.contains_key(&key) {
@@ -476,22 +475,26 @@ impl Sampler {
         s.amd_integrated = amd.is_some_and(|g| g.is_integrated);
         s.cpu_control = oma_hw::cpu::control_state();
         let now = std::time::Instant::now();
-        let mut pending_temps: Vec<(String, String, f64)> = Vec::new();
-        let mut pending_fans: Vec<(String, FanReading)> = Vec::new();
+        let mut pending_temps: Vec<(String, String, f64, std::time::Instant)> = Vec::new();
+        let mut pending_fans: Vec<(String, FanReading, std::time::Instant)> = Vec::new();
         // Ask every device at once, then collect within one budget: a device
         // that does not answer costs the rest nothing beyond that budget.
         for w in &mut self.hwmon_workers {
-            w.request();
+            w.request(now);
         }
         for w in &mut self.lianli_workers {
-            w.request();
+            w.request(now);
         }
         let deadline = now + COLLECT_BUDGET;
-        let mut samples: Vec<Option<HwmonSample>> = Vec::with_capacity(self.hwmon.len());
+        // Each reading is dated when it was asked for: one that took long to
+        // arrive goes into the registry with that age and never into this
+        // frame's control inputs, so a 30-second-old coolant temperature is
+        // not what a curve acts on.
+        let mut samples: Vec<Option<(HwmonSample, std::time::Instant)>> = Vec::with_capacity(self.hwmon.len());
         for w in &mut self.hwmon_workers {
             let wait = deadline.saturating_duration_since(std::time::Instant::now());
             samples.push(match w.collect(wait, now) {
-                Poll::Ready(r) => Some(r),
+                Poll::Ready(r, taken) => Some((r, taken)),
                 Poll::Stalled | Poll::Dead => None,
             });
         }
@@ -500,14 +503,20 @@ impl Sampler {
             self.register_offline(i);
         }
         for (i, sample) in samples.into_iter().enumerate() {
-            let Some(sample) = sample else { continue };
+            let Some((sample, taken)) = sample else { continue };
+            let fresh = now.duration_since(taken) < STALE_AFTER;
             let d = &self.hwmon[i];
             let igpu = self.amd.iter().any(|g| g.is_integrated && g.device_path == d.device_path);
             let (mut storage, mut memory) = (false, false);
             for (ti, v) in sample.temps {
                 let t = &d.temps[ti];
-                s.hwmon_temps.insert((d.name.clone(), t.label.clone()), v);
                 let key = format!("{}:{}", d.name, t.label);
+                if !fresh {
+                    // Old news: shown with its age, not fed to anything that acts.
+                    pending_temps.push((key, temp_label(d, &t.label), v, taken));
+                    continue;
+                }
+                s.hwmon_temps.insert((d.name.clone(), t.label.clone()), v);
                 match knowledge::sensor_role(&d.name, &t.label, igpu) {
                     // Shown with the CPU and GPU figures, or not a component's temperature.
                     SensorRole::CpuTemp | SensorRole::CpuCore | SensorRole::IgpuTemp | SensorRole::DgpuTemp | SensorRole::GpuHotspot | SensorRole::Wireless => {}
@@ -526,9 +535,9 @@ impl Sampler {
                     SensorRole::Board => s.board_c = s.board_c.or(Some(v)),
                     SensorRole::Coolant => {
                         s.coolant_c = s.coolant_c.or(Some(v));
-                        pending_temps.push((key, temp_label(d, &t.label), v));
+                        pending_temps.push((key, temp_label(d, &t.label), v, taken));
                     }
-                    _ => pending_temps.push((key, temp_label(d, &t.label), v)),
+                    _ => pending_temps.push((key, temp_label(d, &t.label), v, taken)),
                 }
             }
             for (fi, rpm, duty) in sample.fans {
@@ -537,7 +546,7 @@ impl Sampler {
                 if role == TachRole::Duplicate && self.named_tachs {
                     continue;
                 }
-                if role == TachRole::Pump {
+                if role == TachRole::Pump && fresh {
                     s.pump_rpm = Some(rpm);
                 }
                 let key = format!("{}:{}", d.name, f.label);
@@ -549,18 +558,18 @@ impl Sampler {
                     continue;
                 }
                 let (label, max_rpm) = fan_identity(model.as_deref(), &format!("hwmon:{}:{}", d.name, f.label), &f.label);
-                pending_fans.push((key, FanReading { label, rpm, duty, device: d.friendly_name().to_string(), freshness: Freshness::Live, max_rpm, peak_rpm: 0 }));
+                pending_fans.push((key, FanReading { label, rpm, duty, device: d.friendly_name().to_string(), freshness: Freshness::Live, max_rpm, peak_rpm: 0 }, taken));
             }
         }
         // Lian Li hub tachometers (HID input report).
         for (i, w) in self.lianli_workers.iter_mut().enumerate() {
             let wait = deadline.saturating_duration_since(std::time::Instant::now());
-            let Poll::Ready(Some(rpm)) = w.collect(wait, now) else { continue };
+            let Poll::Ready(Some(rpm), taken) = w.collect(wait, now) else { continue };
             let h = &self.lianli[i];
             for (c, r) in rpm.iter().enumerate() {
                 if *r > 0 {
                     let (label, max_rpm) = fan_identity(model.as_deref(), &format!("lianli:{i}:ch{}", c + 1), &format!("{} channel {}", h.kind.label(), c + 1));
-                    pending_fans.push((format!("lianli{i}:{}", c + 1), FanReading { label, rpm: *r as u64, duty: None, device: h.kind.label().to_string(), freshness: Freshness::Live, max_rpm, peak_rpm: 0 }));
+                    pending_fans.push((format!("lianli{i}:{}", c + 1), FanReading { label, rpm: *r as u64, duty: None, device: h.kind.label().to_string(), freshness: Freshness::Live, max_rpm, peak_rpm: 0 }, taken));
                 }
             }
         }
@@ -570,11 +579,11 @@ impl Sampler {
             .map(|w| SourceHealth { name: w.name().to_string(), healthy: w.healthy(), stalled_s: w.stalled_for(now).map(|d| d.as_secs()) })
             .chain(self.lianli_workers.iter().map(|w| SourceHealth { name: w.name().to_string(), healthy: w.healthy(), stalled_s: w.stalled_for(now).map(|d| d.as_secs()) }))
             .collect();
-        for (key, label, v) in pending_temps {
-            self.track_temp(key, label, v, now);
+        for (key, label, v, taken) in pending_temps {
+            self.track_temp(key, label, v, taken);
         }
-        for (key, r) in pending_fans {
-            self.track_fan(key, r, now);
+        for (key, r, taken) in pending_fans {
+            self.track_fan(key, r, taken);
         }
         // Emit the registries in discovery order with freshness flags.
         let mut fans: Vec<&Tracked<FanReading>> = self.fans.values().collect();

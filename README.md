@@ -250,7 +250,7 @@ oma nvidia | cpu | daemons | rgb [--set index]   (rgb --set writes)
 - GPU clock offsets apply to the P0 VF curve. Start small and check stability.
 - A profile is a complete GPU state. One without a power limit restores the stock limit where the card allows it, so a Quiet profile's cap doesn't carry over into Performance.
 - CPU boost is written per policy where the kernel offers it. A global boost of 0 made `power-profiles-daemon` fail every switch out of power-saver.
-- Every sensor device has its own bounded reader: one that stops answering holds a single outstanding read, is shown as silent in Cooling and Settings, and cannot slow the others or the app. The helper likewise runs each device's writes in their own lane, so a wedged device fails its own calls as busy instead of freezing the helper.
+- Every hwmon device and fan hub has its own bounded reader: one that stops answering holds a single outstanding read, is shown as silent in Cooling and Settings, and cannot slow the others or the app. A reading that arrives late is dated when it was asked for and never drives a fan curve. CPU, NVML and amdgpu reads still run inline in the sampler; if one of those blocks, frames stop and fan control falls back after four seconds. The helper likewise runs each device's writes in their own lane, so a wedged device fails its own calls as busy instead of freezing the helper.
 - Closing the window exits unless a bar shows the tray item, the overlay is open, or OmaAsus was started with `--overlay`.
 
 ## License

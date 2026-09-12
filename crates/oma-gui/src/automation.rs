@@ -77,7 +77,9 @@ pub struct Readings {
 
 impl Readings {
     pub fn from_snapshot(snap: Option<&crate::telemetry::Snapshot>) -> Self {
-        Self { cpu_c: snap.and_then(|s| s.cpu.tctl_c), gpu_c: snap.and_then(|s| s.gpu()).and_then(|g| g.temp_c) }
+        // The same GPU view fan curves use: an awake dGPU that isn't being read is
+        // unknown, not the integrated GPU's temperature.
+        Self { cpu_c: snap.and_then(|s| s.cpu.tctl_c), gpu_c: snap.and_then(|s| s.curve_gpu_temp()) }
     }
 }
 

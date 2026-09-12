@@ -162,9 +162,9 @@ fn view_inner(app: &App, compact: bool, size_avail: iced::Size) -> Element<'_, M
     let gpu_mhz = snap.and_then(|s| s.nvidia.as_ref().and_then(|n| n.graphics_mhz).map(f64::from).or_else(|| s.amd.as_ref().and_then(|a| a.sclk_mhz))).unwrap_or(0.0);
     let cpu_w = snap.and_then(|s| s.cpu.package_w);
     let gpu_label = format!("{gpu_name} load");
-    let mut tiles: Vec<Element<Message>> = vec![spark("CPU load", &app.hist.cpu_load, 0.0, 100.0, p.cpu, format!("{:.0}", cpu_load * 100.0), "%", format!("{cpu_mhz:.0} MHz")).into()];
+    let mut tiles: Vec<Element<Message>> = vec![spark("CPU load", &app.hist.cpu_load, 0.0, 100.0, p.cpu, widgets::fmt0(cpu_load * 100.0), "%", format!("{cpu_mhz:.0} MHz")).into()];
     if gpu.is_some() {
-        tiles.push(spark(&gpu_label, &app.hist.gpu_load, 0.0, 100.0, p.gpu, format!("{:.0}", gpu_load * 100.0), "%", format!("{gpu_mhz:.0} MHz")).into());
+        tiles.push(spark(&gpu_label, &app.hist.gpu_load, 0.0, 100.0, p.gpu, widgets::fmt0(gpu_load * 100.0), "%", format!("{gpu_mhz:.0} MHz")).into());
     }
     if !compact {
         let caption = match (nvidia, nv_limit) {

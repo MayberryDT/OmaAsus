@@ -43,7 +43,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             ]
             .spacing(space::XS),
         )
-        .push(widgets::metric(p, "Tctl", format!("{:.0}", snap.and_then(|s| s.cpu.tctl_c).unwrap_or(0.0)), "°C", theme::thermal(&p, snap.and_then(|s| s.cpu.tctl_c).unwrap_or(0.0), 35.0, 95.0)))
+        .push(widgets::metric(p, "Tctl", widgets::fmt0(snap.and_then(|s| s.cpu.tctl_c).map(|t| t as f32).unwrap_or(f32::NAN)), "°C", theme::thermal(&p, snap.and_then(|s| s.cpu.tctl_c).unwrap_or(f64::NAN), 35.0, 95.0)))
         .push(widgets::metric(p, "Fastest core", format!("{:.0}", snap.map(|s| s.cpu.max_core_mhz).unwrap_or(0.0)), "MHz", p.cpu))
         .push(widgets::metric(p, "Load", format!("{:.0}", snap.map(|s| s.cpu.util_total).unwrap_or(0.0)), "%", p.cpu))
         .wrap();
@@ -151,7 +151,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let history = widgets::card(
         p,
         column![
-            row![widgets::eyebrow(p, "Package temperature"), widgets::hfill(), widgets::mono(p, format!("{:.1} °C", snap.and_then(|s| s.cpu.tctl_c).unwrap_or(0.0)), size::SMALL)],
+            row![widgets::eyebrow(p, "Package temperature"), widgets::hfill(), widgets::mono(p, snap.and_then(|s| s.cpu.tctl_c).map(|t| format!("{t:.1} °C")).unwrap_or_else(|| "— °C".into()), size::SMALL)],
             canvas(Sparkline { palette: p, data: &app.hist.cpu_temp, min: 30.0, max: 95.0, color: p.accent, capacity: crate::app::HISTORY }).width(Length::Fill).height(Length::Fill),
         ]
         .spacing(space::SM)
