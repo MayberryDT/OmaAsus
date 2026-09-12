@@ -228,7 +228,10 @@ fn fan_readings(app: &App) -> iced::widget::Container<'_, Message> {
         })
         .unwrap_or_default();
     let body: Element<Message> = if rows.is_empty() { widgets::dim(p, "No tachometer signals yet.") } else { scrollable(Column::with_children(rows).spacing(space::SM)).height(Length::Fill).into() };
-    widgets::card(p, column![widgets::eyebrow(p, "Live readings"), body].spacing(space::MD).height(Length::Fill)).width(Length::Fill)
+    // Devices that have stopped answering: their rows above are what they last said.
+    let silent: Vec<String> = app.snapshot.as_ref().map(|s| s.sources.iter().filter(|h| !h.healthy).map(|h| match h.stalled_s { Some(secs) => format!("{} ({secs}s silent)", h.name), None => h.name.clone() }).collect()).unwrap_or_default();
+    let health: Element<Message> = if silent.is_empty() { iced::widget::Space::new().height(0.0).into() } else { widgets::pill(p, format!("not answering: {}", silent.join(", ")), p.warn) };
+    widgets::card(p, column![widgets::eyebrow(p, "Live readings"), health, body].spacing(space::MD).height(Length::Fill)).width(Length::Fill)
 }
 
 pub fn preset(name: &str, source: TempSource) -> FanCurve {

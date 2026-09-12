@@ -243,14 +243,14 @@ oma nvidia | cpu | daemons | rgb [--set index]   (rgb --set writes)
 
 - The helper writes only allow-listed sysfs attributes, refused before polkit is asked, and HID reports only to ASUS and ENE devices.
 - Releasing a fan output, on exit or when a profile stops driving it, restores the saved `pwm_enable` mode on hwmon outputs, returns GPU fans to automatic and re-enables PWM sync on Lian Li channels. The Ryujin falls back to a safe fixed duty.
-- If OmaAsus dies instead, the helper restores the hwmon outputs it had changed, and NVIDIA fans where the GPU is awake. Lian Li channels aren't covered.
-- A software fan curve that can't read its temperature holds its speed for 30 seconds, then runs at its top.
+- If OmaAsus dies instead, the helper restores the hwmon outputs it had changed, and NVIDIA fans where the GPU is awake. A restore that fails is kept and retried for about two minutes; if it still fails the helper logs it, tells a running OmaAsus (which shows a persistent warning), and reports it through `RecoveryReport`. Lian Li channels aren't covered: a crash while a hub channel is under manual control leaves it at its last speed until OmaAsus runs again or the hub is power-cycled.
+- A software fan curve that can't read its temperature holds its speed for 30 seconds, then runs at its top. Fan evaluation runs on its own clock, and a reading older than four seconds no longer counts, so a stalled sensor path cannot leave a curve acting on old numbers or stop the fallback.
 - OmaAsus opens the NVIDIA GPU only in graphics modes that use it, lets go when `supergfxd` announces a switch, leaves it alone for 15 seconds after it comes back on the bus, and never wakes a sleeping one to read it.
 - On desktops without an internal panel, `supergfxd`'s Integrated mode isn't offered; it would unbind your display GPU. Graphics switches ask first and say what they involve.
 - GPU clock offsets apply to the P0 VF curve. Start small and check stability.
 - A profile is a complete GPU state. One without a power limit restores the stock limit where the card allows it, so a Quiet profile's cap doesn't carry over into Performance.
 - CPU boost is written per policy where the kernel offers it. A global boost of 0 made `power-profiles-daemon` fail every switch out of power-saver.
-- Stalled devices are quarantined for a minute instead of blocking the app.
+- Every sensor device has its own bounded reader: one that stops answering holds a single outstanding read, is shown as silent in Cooling and Settings, and cannot slow the others or the app. The helper likewise runs each device's writes in their own lane, so a wedged device fails its own calls as busy instead of freezing the helper.
 - Closing the window exits unless a bar shows the tray item, the overlay is open, or OmaAsus was started with `--overlay`.
 
 ## License

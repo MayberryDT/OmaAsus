@@ -1,6 +1,6 @@
 # OmaAsus reliability and product plan
 
-Status: proposed implementation, 12 September 2026. Baseline reviewed: `63c4170`; 79 workspace tests passed. The branding work accompanying this document is implemented locally. The reliability work below is not yet implemented. This plan does not change hardware settings or authorize a release by itself.
+Status: 12 September 2026. Baseline reviewed: `63c4170`; 79 workspace tests passed. Phases 0–4 landed in `9477f80` (helper lanes and ledger with retries, bounded per-device sampling, fan safety on its own clock with sequenced commands, the apply coordinator with read-back, gaps for missing readings, automation over the machine's GPU). Phase 5 is partly in place (apply status on the dashboard and quick panel, source health in Cooling and Settings); phase 6 has the ownership-checking uninstaller, the README fixes and an advisory job. Remaining items are listed per phase below as they stand. This plan does not change hardware settings or authorize a release by itself.
 
 ## Outcome
 

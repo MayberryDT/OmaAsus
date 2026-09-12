@@ -20,3 +20,17 @@ jobs:
     uses: ./.github/workflows/check.yml
   package:
     uses: ./.github/workflows/package.yml
+  advisories:
+    # Known vulnerabilities in the dependency tree, as RustSec lists them.
+    # Informational: a clean run is not a security audit, and a new advisory
+    # in a transitive crate must not block unrelated work; it is reviewed
+    # before a release instead.
+    name: Dependency advisories
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - run: pacman -Syu --noconfirm --needed git cargo-audit
+      - uses: actions/checkout@v7
+      - run: cargo audit --deny warnings
