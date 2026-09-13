@@ -332,6 +332,8 @@ pub enum Message {
     Tray(tray::Event),
     /// Omarchy applied a theme: the desktop's palette and its name.
     ThemeChanged(Palette, String),
+    /// Whether an OpenRGB server answered at start.
+    RgbServer(bool),
     /// `omaasus reload-theme`: read the theme again now.
     ReloadTheme,
     /// The runtime destroyed a surface (compositor close, `RemoveWindow`).
@@ -388,7 +390,8 @@ impl App {
             overlay_only,
             toast: config_notice.map(|n| (n, false)),
             toast_at: None,
-            cpu_edit: oma_hw::cpu::control_state(),
+            // Filled from the first telemetry frame: nothing is read here on the UI thread.
+            cpu_edit: Default::default(),
             cpu_synced: false,
             gpu_edit: oma_hw::nvidia::NvidiaControl::default(),
             gpu_dirty: false,
@@ -400,7 +403,7 @@ impl App {
             fan_backend: None,
             fan_engine: oma_hw::fanengine::FanEngine::new(std::time::Duration::from_millis(500)),
             fan_errors: 0,
-            rgb_server: oma_hw::rgb::server_running(),
+            rgb_server: false,
             rgb_devices: Vec::new(),
             rgb_sel: 0,
             rgb_hex: String::new(),
@@ -453,7 +456,8 @@ impl App {
             },
             |(ok, modes)| Message::CcReady(ok, modes),
         );
-        let rgb = if app.rgb_server { Task::perform(async { oma_hw::rgb::devices().await.map_err(|e| e.to_string()) }, Message::RgbDevices) } else { Task::none() };
+        // The OpenRGB probe is a TCP connect: off the UI thread, like every other probe.
+        let rgb = Task::perform(async { tokio::task::spawn_blocking(oma_hw::rgb::server_running).await.unwrap_or(false) }, Message::RgbServer);
         let asus = Task::perform(crate::pages::asus::load(), Message::AsusLoaded);
         // iced_exwlshell's daemon does not apply `Settings::fonts`; the runtime font
         // action does, so bundle-load through tasks (fallback fonts otherwise).
@@ -1971,6 +1975,10 @@ impl App {
                 _ if self.overlay_id().is_some() => self.close_overlay(),
                 _ => self.open_overlay(),
             },
+            Message::RgbServer(up) => {
+                self.rgb_server = up;
+                if up { Self::rgb_refresh() } else { Task::none() }
+            }
             Message::ThemeChanged(palette, name) => {
                 tracing::info!(theme = %name, "adopting the desktop theme");
                 self.theme_name = name;

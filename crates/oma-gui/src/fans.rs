@@ -22,6 +22,9 @@ pub const SUPERSEDED: &str = "superseded by a newer command";
 /// curves then follow the missing-source policy instead of a stale number.
 pub const CONTROL_FRESH: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// Saved `auto_point` attribute values, by output.
+type SavedCurves = HashMap<FanTarget, Vec<(PathBuf, String)>>;
+
 #[derive(Clone)]
 pub struct FanBackend {
     ctl: Controller,
@@ -36,6 +39,10 @@ pub struct FanBackend {
     channels: HashMap<FanTarget, PwmChannel>,
     /// `pwmN_enable` modes saved before taking an output over, by output id.
     saved_enable: Arc<Mutex<HashMap<FanTarget, PwmEnable>>>,
+    /// The board's own curve points, saved before OmaAsus programs a hardware
+    /// curve over them, so a release puts the firmware curve back rather than
+    /// leaving OmaAsus's points behind.
+    saved_curve: Arc<Mutex<SavedCurves>>,
     lianli: Vec<LianLiHub>,
     pub cc: Option<CoolerControl>,
     /// The active profile's power mode: firmware curves are stored per mode.
@@ -69,7 +76,7 @@ impl FanBackend {
             }
         }
         let lianli = if model.fans.iter().any(|f| matches!(f.backend, Via::LianLi { .. })) { tokio::task::spawn_blocking(LianLiHub::enumerate).await.unwrap_or_default() } else { Vec::new() };
-        Self { ctl, model, quarantine: Arc::new(Mutex::new(HashMap::new())), lanes: Arc::new(Mutex::new(HashMap::new())), newest: Arc::new(Mutex::new(HashMap::new())), channels, saved_enable: Arc::new(Mutex::new(HashMap::new())), lianli, cc, power_mode: Arc::new(Mutex::new(None)) }
+        Self { ctl, model, quarantine: Arc::new(Mutex::new(HashMap::new())), lanes: Arc::new(Mutex::new(HashMap::new())), newest: Arc::new(Mutex::new(HashMap::new())), channels, saved_enable: Arc::new(Mutex::new(HashMap::new())), saved_curve: Arc::new(Mutex::new(HashMap::new())), lianli, cc, power_mode: Arc::new(Mutex::new(None)) }
     }
 
     /// Tell the backend which power mode the active profile selects.
@@ -230,25 +237,30 @@ impl FanBackend {
                 let errs = self.ctl.write_batch(&writes).await.map_err(|e| e.to_string())?;
                 errs.first().map(|(_, e)| Err(e.clone())).unwrap_or(Ok(()))
             }
-            (None, Some(curve)) => self.program_smart_fan(ch, curve).await,
+            (None, Some(curve)) => self.program_smart_fan(&out.id, ch, curve).await,
             (None, None) => match out.caps.release {
                 // No automatic mode to return to once driven.
                 Release::SafeFixed(d) => self.ctl.write(&ch.path, duty_value(d)).await.map_err(|e| e.to_string()),
                 Release::RestoreMode | Release::Auto => {
-                    // The saved mode is forgotten only once the write confirmed it:
-                    // a refused release is retried, and must still know the mode.
+                    // What was found before the take-over goes back: the board's own
+                    // curve points first, then the mode. Forgotten only once the writes
+                    // confirmed it: a refused release is retried and must still know.
+                    let mut writes: Vec<(PathBuf, String)> = self.saved_curve.lock().unwrap().get(&out.id).cloned().unwrap_or_default();
                     let saved = self.saved_enable.lock().unwrap().get(&out.id).copied();
-                    match (ch.has_enable, saved) {
-                        (true, Some(mode)) => {
-                            let r = self.ctl.write(ch.enable_path(), mode.as_u8().to_string()).await.map_err(|e| e.to_string());
-                            if r.is_ok() {
-                                self.saved_enable.lock().unwrap().remove(&out.id);
-                            }
-                            r
-                        }
-                        // Never taken over: nothing to hand back.
-                        _ => Ok(()),
+                    if let (true, Some(mode)) = (ch.has_enable, saved) {
+                        writes.push((ch.enable_path(), mode.as_u8().to_string()));
                     }
+                    if writes.is_empty() {
+                        // Never taken over: nothing to hand back.
+                        return Ok(());
+                    }
+                    let errs = self.ctl.write_batch(&writes).await.map_err(|e| e.to_string())?;
+                    if let Some((p, e)) = errs.first() {
+                        return Err(format!("{p}: {e}"));
+                    }
+                    self.saved_curve.lock().unwrap().remove(&out.id);
+                    self.saved_enable.lock().unwrap().remove(&out.id);
+                    Ok(())
                 }
             },
         }
@@ -266,8 +278,20 @@ impl FanBackend {
     }
 
     /// Program an nct6775 Smart Fan IV curve (5 points: 4 curve + critical).
-    async fn program_smart_fan(&self, ch: &PwmChannel, curve: &FanCurve) -> Result<(), String> {
+    /// The board's own points and mode are saved first, once, so a release can
+    /// put them back.
+    async fn program_smart_fan(&self, id: &FanTarget, ch: &PwmChannel, curve: &FanCurve) -> Result<(), String> {
         let ac = ch.auto_curve.as_ref().ok_or("channel has no hardware curve")?;
+        {
+            let mut saved = self.saved_curve.lock().unwrap();
+            if !saved.contains_key(id) {
+                saved.insert(id.clone(), curve_originals(|p| oma_hw::sysfs::read_string(p), &ch.path, ac.points));
+            }
+        }
+        if ch.has_enable {
+            let cur = ch.read().enable.unwrap_or(PwmEnable::SmartFan4);
+            self.saved_enable.lock().unwrap().entry(id.clone()).or_insert(cur);
+        }
         let mut pts: Vec<(f64, f64)> = curve.points.clone();
         pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         // Resample to points-1 curve points + a critical point at 100 %.
@@ -290,6 +314,17 @@ impl FanBackend {
         let errs = self.ctl.write_batch(&writes).await.map_err(|e| e.to_string())?;
         errs.first().map(|(p, e)| Err(format!("{p}: {e}"))).unwrap_or(Ok(()))
     }
+}
+
+/// The current values of an output's `auto_point` attributes (the board's own
+/// curve), read through `read` so it can be tested without sysfs.
+fn curve_originals(read: impl Fn(&std::path::Path) -> Option<String>, pwm: &std::path::Path, points: u32) -> Vec<(PathBuf, String)> {
+    let base = pwm.to_string_lossy().into_owned();
+    (1..=points)
+        .flat_map(|i| [format!("{base}_auto_point{i}_temp"), format!("{base}_auto_point{i}_pwm")])
+        .map(PathBuf::from)
+        .filter_map(|p| read(&p).map(|v| (p, v)))
+        .collect()
 }
 
 /// Points in an output's firmware curve (8 on ASUS laptops).
@@ -326,6 +361,24 @@ pub fn temps_from(snap: &crate::telemetry::Snapshot) -> oma_hw::fanengine::Temps
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_boards_own_curve_is_read_before_it_is_overwritten() {
+        let pwm = std::path::Path::new("/sys/class/hwmon/hwmon4/pwm1");
+        let read = |p: &std::path::Path| {
+            let n = p.file_name()?.to_str()?.to_string();
+            match n.as_str() {
+                "pwm1_auto_point1_temp" => Some("20000".to_string()),
+                "pwm1_auto_point1_pwm" => Some("153".to_string()),
+                "pwm1_auto_point2_temp" => Some("45000".to_string()),
+                "pwm1_auto_point2_pwm" => Some("178".to_string()),
+                _ => None,
+            }
+        };
+        let saved = curve_originals(read, pwm, 5);
+        let names: Vec<String> = saved.iter().map(|(p, v)| format!("{}={v}", p.file_name().unwrap().to_string_lossy())).collect();
+        assert_eq!(names, ["pwm1_auto_point1_temp=20000", "pwm1_auto_point1_pwm=153", "pwm1_auto_point2_temp=45000", "pwm1_auto_point2_pwm=178"], "only what the board reports, in write order");
+    }
 
     #[test]
     fn stale_frames_give_fan_control_no_temperatures() {

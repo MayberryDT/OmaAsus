@@ -71,10 +71,10 @@ pub struct RestoreOutcome {
     pub errors: Vec<String>,
 }
 
-/// Put the sysfs part of a claim back: duties first, then the modes that hand
-/// control back. Failed entries are returned for a later attempt; a mode whose
-/// duty failed is still attempted, since handing the fan back matters more
-/// than the duty it hands back at.
+/// Put the sysfs part of a claim back: the board's curve points, then duties,
+/// then the modes that hand control back. Failed entries are returned for a
+/// later attempt; a mode whose duty failed is still attempted, since handing
+/// the fan back matters more than the duty it hands back at.
 pub fn restore_sysfs(w: &dyn Writer, sysfs: &BTreeMap<PathBuf, String>) -> RestoreOutcome {
     let mut out = RestoreOutcome::default();
     for (p, v) in restore_order(sysfs) {
@@ -86,21 +86,46 @@ pub fn restore_sysfs(w: &dyn Writer, sysfs: &BTreeMap<PathBuf, String>) -> Resto
             }
         }
     }
-    // A duty that failed on an output whose mode was handed back is moot:
-    // firmware drives the fan now, and writing the duty later would either be
-    // refused or take the fan over again.
-    let handed_back: Vec<PathBuf> = out.failed.keys().filter(|p| !p.to_string_lossy().ends_with("_enable") && out.restored.contains(&output_pair(p).1)).cloned().collect();
+    // A duty or curve point that failed on an output whose mode was handed
+    // back is moot: firmware drives the fan now, and writing it later would
+    // either be refused or take the fan over again.
+    let handed_back: Vec<PathBuf> = out.failed.keys().filter(|p| !is_mode(p) && out.restored.contains(&output_pair(p).1)).cloned().collect();
     for p in handed_back {
         out.failed.remove(&p);
     }
     out
 }
 
-/// The writes that put a client's fan settings back: duties first, then the
-/// modes that hand control back to firmware.
+/// The writes that put a client's fan settings back: curve points, then
+/// duties, then the modes that hand control back to firmware.
 pub fn restore_order(sysfs: &BTreeMap<PathBuf, String>) -> Vec<(PathBuf, String)> {
-    let (modes, duties): (Vec<_>, Vec<_>) = sysfs.iter().map(|(p, v)| (p.clone(), v.clone())).partition(|(p, _)| p.to_string_lossy().ends_with("_enable"));
-    duties.into_iter().chain(modes).collect()
+    let rank = |p: &Path| if is_mode(p) { 2 } else if is_curve_point(p) { 0 } else { 1 };
+    let mut all: Vec<(PathBuf, String)> = sysfs.iter().map(|(p, v)| (p.clone(), v.clone())).collect();
+    all.sort_by_key(|(p, _)| rank(p));
+    all
+}
+
+/// `pwmN_enable`: the attribute that hands an output back.
+pub fn is_mode(path: &Path) -> bool {
+    path.to_string_lossy().ends_with("_enable")
+}
+
+/// `pwmN_auto_pointK_pwm` / `_temp`: a point of the board's own curve.
+pub fn is_curve_point(path: &Path) -> bool {
+    path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains("_auto_point"))
+}
+
+/// The `pwmN` an attribute belongs to: itself, or the duty attribute of a
+/// `pwmN_enable` or `pwmN_auto_pointK_*`.
+pub fn output_base(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(b) = s.strip_suffix("_enable") {
+        return PathBuf::from(b);
+    }
+    if let Some(i) = s.find("_auto_point") {
+        return PathBuf::from(&s[..i]);
+    }
+    path.to_path_buf()
 }
 
 /// Whether writing `value` to a `pwmN_enable` hands the output back: anything
@@ -115,27 +140,25 @@ pub fn hands_back(value: &str, original: Option<&str>) -> bool {
     n(value) != Some(1) || original.and_then(n) == n(value)
 }
 
-/// The duty and mode attributes of a fan output, from either of them.
+/// The duty and mode attributes of a fan output, from any of its attributes.
 pub fn output_pair(path: &Path) -> (PathBuf, PathBuf) {
-    let s = path.to_string_lossy();
-    match s.strip_suffix("_enable") {
-        Some(base) => (PathBuf::from(base), path.to_path_buf()),
-        None => (path.to_path_buf(), PathBuf::from(format!("{s}_enable"))),
-    }
+    let base = output_base(path);
+    let enable = PathBuf::from(format!("{}_enable", base.to_string_lossy()));
+    (base, enable)
 }
 
-/// The state of a fan output's duty and mode attributes, read *before* a
-/// write and outside any lock, so a device that blocks on the read cannot
-/// freeze the helper.
+/// The state an output held *before* a write, read outside any lock so a
+/// device that blocks on the read cannot freeze the helper: the attribute
+/// being written (the duty, or a curve point) and the mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Originals {
-    pub duty: (PathBuf, Option<String>),
-    pub enable: (PathBuf, Option<String>),
+    pub entries: Vec<(PathBuf, Option<String>)>,
 }
 
 pub fn read_originals(w: &dyn Writer, path: &Path) -> Originals {
     let (duty, enable) = output_pair(path);
-    Originals { duty: (duty.clone(), w.read(&duty)), enable: (enable.clone(), w.read(&enable)) }
+    let first = if is_curve_point(path) { path.to_path_buf() } else { duty };
+    Originals { entries: vec![(first.clone(), w.read(&first)), (enable.clone(), w.read(&enable))] }
 }
 
 /// Every client's claims plus restores waiting for another attempt.
@@ -153,17 +176,17 @@ impl Ledger {
     /// held before it. A write that failed changes nothing here: a failed
     /// hand-back keeps its claim, a failed take-over records none.
     pub fn record_write(&mut self, client: &str, path: &Path, value: &str, originals: &Originals) {
-        let (duty, enable) = (&originals.duty.0, &originals.enable.0);
-        // Handing the output back leaves nothing to restore.
-        let original_mode = self.by_client.get(client).and_then(|c| c.sysfs.get(enable)).cloned();
+        let (base, enable) = output_pair(path);
+        // Handing the output back leaves nothing to restore: the client has put
+        // the duty and any curve points back itself before giving up the mode.
+        let original_mode = self.by_client.get(client).and_then(|c| c.sysfs.get(&enable)).cloned();
         if path == enable && hands_back(value.trim(), original_mode.as_deref()) {
             if let Some(c) = self.by_client.get_mut(client) {
-                c.sysfs.remove(enable);
-                c.sysfs.remove(duty);
+                c.sysfs.retain(|k, _| output_base(k) != base);
             }
             return;
         }
-        for (p, read) in [&originals.duty, &originals.enable] {
+        for (p, read) in &originals.entries {
             // Another client's claim on this output moves over, original intact:
             // what the new client found is the old client's manual state.
             let inherited = self.take_from_others(client, p);
@@ -263,6 +286,16 @@ impl Ledger {
                 true
             }
         }
+    }
+
+    /// Keep a restore that could not run *yet* (the GPU is asleep and NVML
+    /// would wake it): tried again later without spending an attempt, since
+    /// nothing failed.
+    pub fn defer(&mut self, client: &str, claims: Claims, attempts: u32, why: String, now: Instant) {
+        if claims.is_empty() {
+            return;
+        }
+        self.pending.push(Pending { client: client.to_string(), claims, attempts: attempts.saturating_sub(1), due: now + Duration::from_secs(2), last_error: why });
     }
 
     /// Restores whose next attempt is due.
@@ -481,6 +514,36 @@ mod tests {
         l.record_write("b", Path::new(PWM), "90", &originals);
         assert_eq!(l.by_client["b"].sysfs.get(Path::new(EN)).map(String::as_str), Some("5"), "b now owns it with the true original");
         assert!(l.by_client["a"].sysfs.is_empty());
+    }
+
+    #[test]
+    fn curve_points_are_claimed_restored_first_and_dropped_on_hand_back() {
+        let p1t = "/sys/devices/platform/nct6775.656/hwmon/hwmon3/pwm2_auto_point1_temp";
+        let p1p = "/sys/devices/platform/nct6775.656/hwmon/hwmon3/pwm2_auto_point1_pwm";
+        let fs = Fake::with(&[(PWM, "200"), (EN, "5"), (p1t, "20000"), (p1p, "153")]);
+        let mut l = Ledger::default();
+        // OmaAsus programs a Smart Fan IV curve: each point is claimed with the board's value.
+        for (p, v) in [(p1t, "30000"), (p1p, "60")] {
+            let o = read_originals(&fs, Path::new(p));
+            fs.write(Path::new(p), v).unwrap();
+            l.record_write("a", Path::new(p), v, &o);
+        }
+        let c = &l.by_client["a"];
+        assert_eq!(c.sysfs.get(Path::new(p1t)).map(String::as_str), Some("20000"));
+        assert_eq!(c.sysfs.get(Path::new(p1p)).map(String::as_str), Some("153"));
+        assert_eq!(c.sysfs.get(Path::new(EN)).map(String::as_str), Some("5"), "the mode too");
+        // A crash restore writes the points before the mode.
+        let order: Vec<String> = restore_order(&c.sysfs).into_iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(order.last().map(String::as_str), Some("pwm2_enable"));
+        assert!(order[0].contains("auto_point") && order[1].contains("auto_point"));
+        // The client hands the output back: nothing of it stays claimed.
+        let o = read_originals(&fs, Path::new(EN));
+        fs.write(Path::new(EN), "5").unwrap();
+        l.record_write("a", Path::new(EN), "5", &o);
+        assert!(l.by_client["a"].is_empty());
+        assert_eq!(output_base(Path::new(p1p)), PathBuf::from(PWM));
+        assert_eq!(output_base(Path::new(EN)), PathBuf::from(PWM));
+        assert_eq!(output_base(Path::new(PWM)), PathBuf::from(PWM));
     }
 
     #[test]

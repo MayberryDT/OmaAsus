@@ -165,15 +165,20 @@ fn is_fan_attr(name: &str) -> bool {
     }
 }
 
-/// A PWM duty (`pwmN`) or mode (`pwmN_enable`) attribute: the state the
-/// watchdog restores when a client vanishes.
+/// A PWM duty (`pwmN`), mode (`pwmN_enable`) or board curve point
+/// (`pwmN_auto_pointK_pwm|_temp`) attribute: the state the watchdog restores
+/// when a client vanishes.
 fn is_fan_output(path: &Path) -> bool {
     let in_hwmon = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).is_some_and(is_hwmon_dir);
     let Some(rest) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("pwm")) else {
         return false;
     };
     let (n, tail) = split_digits(rest);
-    in_hwmon && !n.is_empty() && (tail.is_empty() || tail == "_enable")
+    let point = tail.strip_prefix("_auto_point").is_some_and(|r| {
+        let (k, kind) = split_digits(r);
+        !k.is_empty() && matches!(kind, "_pwm" | "_temp")
+    });
+    in_hwmon && !n.is_empty() && (tail.is_empty() || tail == "_enable" || point)
 }
 
 /// Resolve a client path and classify it; returns the canonical path to write.
@@ -427,9 +432,15 @@ impl Restorer {
             // the driver, which starts with its fans on automatic. Likewise a GPU
             // that is asleep or off: NVML would wake it, and an unloaded driver
             // starts with its fans on automatic.
-            let leave_to_driver = (!settled && closing.load(Ordering::SeqCst)) || !oma_hw::nvidia::awake();
-            if leave_to_driver {
-                info!("NVIDIA fans left to the driver (switch running, or the GPU asleep or off)");
+            // Stopping mid-switch: the switch reloads the driver, which starts with
+            // its fans on automatic. Asleep: NVML would wake it, and a driver that
+            // stays loaded keeps a manual fan policy, so the claim waits (without
+            // spending an attempt) until the GPU is awake for its own reasons.
+            if !settled && closing.load(Ordering::SeqCst) {
+                info!("NVIDIA fans left to the driver: a graphics switch is running");
+            } else if !oma_hw::nvidia::awake() {
+                info!(client, "NVIDIA fans: GPU asleep or off; the restore waits for it to wake");
+                lock_ledger(ledger).defer(&client, Claims { nvidia_fans: c.nvidia_fans.clone(), ..Default::default() }, attempts, "GPU asleep".into(), std::time::Instant::now());
             } else {
                 for index in c.nvidia_fans {
                     let r = lanes
@@ -759,6 +770,15 @@ async fn main() -> anyhow::Result<()> {
         while restoring.load(Ordering::SeqCst) > 0 || in_flight.load(Ordering::SeqCst) > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+        // A call that passed the closing check before it was set may have
+        // recorded a claim after the list above was taken: put those back too.
+        loop {
+            let late: Vec<String> = lock_ledger(&ledger).guarding();
+            if late.is_empty() {
+                break;
+            }
+            futures_util::future::join_all(late.into_iter().map(|client| restorer.restore_client(client, "helper stopping (late write)"))).await;
+        }
     };
     if tokio::time::timeout(STOP_BUDGET, stop).await.is_err() {
         warn!(budget_s = STOP_BUDGET.as_secs(), "stop budget spent; leaving what has not returned");
@@ -860,7 +880,9 @@ mod tests {
     fn watchdog_tracks_duty_and_mode_only() {
         assert!(is_fan_output(Path::new("/sys/devices/platform/nct6775.656/hwmon/hwmon3/pwm2")));
         assert!(is_fan_output(Path::new("/sys/devices/platform/nct6775.656/hwmon/hwmon3/pwm2_enable")));
-        assert!(!is_fan_output(Path::new("/sys/devices/platform/nct6775.656/hwmon/hwmon3/pwm2_auto_point1_pwm")));
+        assert!(is_fan_output(Path::new("/sys/devices/platform/nct6775.656/hwmon/hwmon3/pwm2_auto_point1_pwm")), "the board's curve points are put back too");
+        assert!(!is_fan_output(Path::new("/sys/devices/platform/nct6775.656/hwmon/hwmon3/pwm2_auto_point_temp")));
+        assert!(!is_fan_output(Path::new("/sys/devices/platform/nct6775.656/hwmon/hwmon3/pwm2_mode")));
         assert!(!is_fan_output(Path::new("/sys/devices/system/cpu/cpufreq/policy0/pwm1")));
     }
 }

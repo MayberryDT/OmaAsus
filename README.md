@@ -35,7 +35,7 @@ It runs as a window, as a tray item, and as a layer-shell overlay you toggle ove
 | Graphics modes | Integrated, Hybrid, VFIO, MUX and eGPU | `supergfxd` 5.x |
 | ASUS desktop boards | Nuvoton Super I/O fan headers, including the board's own Smart Fan IV curves; VRM, board and coolant temperatures; an experimental text readout on the LiveDash OLED of ROG Extreme boards | `nct6775`, `asus-ec-sensors`, HID |
 | Coolers | ROG Ryujin II 360 pump and fans (tested on the EVA edition; the III should work through the same driver, untested); Lian Li UNI FAN hubs (the desktop's hub is tested, other models are recognised by product id but untested) | `asus_rog_ryujin`, HID |
-| NVIDIA GPUs | Power limit, clock lock and offsets (driver 555+), fans, persistence | NVML |
+| NVIDIA GPUs | Power limit, clock lock and offsets (driver 555+), fans, persistence. One NVIDIA GPU: with two, the first on the bus is the one tuned | NVML |
 | AMD GPUs | DPM performance level, temperature, power | amdgpu sysfs |
 | CPUs | Governor, EPP, SMT, frequency limits, temperatures; boost where the driver offers it (`amd-pstate` from Linux 6.11, `acpi-cpufreq`); package power from an APU's reported power, or RAPL where the kernel lets users read it | cpufreq (`amd-pstate`, `acpi-cpufreq`, `intel_pstate`), hwmon, powercap |
 | Everything else | Any hwmon fan output and sensor, OpenRGB devices, power modes | hwmon, the OpenRGB SDK, `power-profiles-daemon` or ACPI `platform_profile` |
@@ -81,7 +81,7 @@ hide = ["hwmon:acpitz:temp1"]         # leave out of the model
 | **ASUS** | Power mode, charge limit, firmware attributes read live from the kernel and applied on release, `supergfxd` graphics mode with a confirmation that says what the switch involves |
 | **Settings** | Helper install, CoolerControl credentials, overlay and tray, telemetry rate, a LiveDash OLED test where there is one, a summary of the detected hardware and the knowledge it used |
 
-Graphics, Cooling, Lighting and ASUS appear only when there is hardware or a daemon behind them.
+Graphics, Cooling and ASUS appear only when there is hardware or a daemon behind them; Lighting also appears when OpenRGB is installed, since that page is where its server is started.
 
 <p align="center">
   <img src="docs/screenshots/cooling.png" alt="Cooling page with the curve editor" width="900">
@@ -216,7 +216,7 @@ crates/
 research/      the interface notes the code was built from, with live-verified corrections
 ```
 
-The GUI never touches hardware from its UI thread. A sampler thread produces telemetry frames into a persistent registry, where channels are live, stale or offline but never missing. Writes go through the helper, through the owning daemon over D-Bus, or through background tasks.
+Hardware is read on sampler and reader threads and written through the helper, the owning daemon over D-Bus, or background tasks; the UI thread renders what those report. A persistent registry keeps every channel live, stale or offline, never missing.
 
 ## CLI
 

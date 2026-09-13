@@ -89,10 +89,14 @@ pub struct AsusState {
     pub gfx: Option<GfxState>,
     pub kbd: Option<KbdLight>,
     pub error: Option<String>,
+    /// The machine has an internal panel, so leaving the dGPU is safe to offer.
+    /// Read once here, not on every frame.
+    pub has_internal_panel: bool,
 }
 
 pub async fn load() -> AsusState {
-    let mut st = AsusState::default();
+    let has_internal_panel = tokio::task::spawn_blocking(oma_hw::supergfx::is_safe_to_switch).await.unwrap_or(false);
+    let mut st = AsusState { has_internal_panel, ..Default::default() };
     let Ok(conn) = zbus::Connection::system().await else {
         st.error = Some("system bus unavailable".into());
         return st;
@@ -141,7 +145,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         None => {
             col = col.push(widgets::card(p, column![
                 widgets::title(p, "asusd not running"),
-                widgets::dim(p, "asusctl's daemon provides platform profiles, PPT tuning, MUX and keyboard lighting on ROG laptops and the ROG Ally. It does not start on desktop boards, where OmaAsus manages hardware directly."),
+                widgets::dim(p, "asusd, the daemon from the asusctl package, provides platform profiles, PPT tuning, MUX and keyboard lighting on ROG laptops and the ROG Ally. It does not start on desktop boards, where OmaAsus manages hardware directly."),
             ].spacing(space::SM)).width(Length::Fill));
         }
         Some(objs) => {
@@ -184,9 +188,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     }
 
     match &st.gfx {
-        None => col = col.push(widgets::card(p, column![widgets::title(p, "supergfxd not running"), widgets::dim(p, "Graphics mode switching (Hybrid / Integrated / VFIO / MUX) needs supergfxctl on hybrid laptops.")].spacing(space::SM)).width(Length::Fill)),
+        None => col = col.push(widgets::card(p, column![widgets::title(p, "supergfxd not running"), widgets::dim(p, "Graphics mode switching (Hybrid / Integrated / VFIO / MUX) needs supergfxd, from the supergfxctl package, on hybrid laptops.")].spacing(space::SM)).width(Length::Fill)),
         Some(g) => {
-            let safe = oma_hw::supergfx::is_safe_to_switch();
+            let safe = st.has_internal_panel;
             let asking = app.gfx_confirm;
             let chips = Row::with_children(g.supported.iter().map(|m| {
                 let allowed = safe || *m == GfxMode::Hybrid || *m == g.mode;

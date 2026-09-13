@@ -1,8 +1,8 @@
 //! CoolerControl daemon client (REST, `http://localhost:11987`).
 //!
-//! CoolerControl is the best fan engine on Linux and is frequently already
-//! installed. When present and authorised, OmaAsus delegates fan/pump control
-//! to it (profiles + modes) instead of fighting it for the same PWM outputs.
+//! Where CoolerControl runs and is authorised, OmaAsus delegates fan and pump
+//! control to it (its profiles and modes), so one owner drives each PWM
+//! output.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
