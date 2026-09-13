@@ -302,16 +302,16 @@ pub async fn apply_openrgb(devices: &[RgbDevice], name: &str, mode: &LightingMod
     let named = |words: &[&str]| d.modes.iter().find(|m| words.iter().any(|w| m.name.to_ascii_lowercase().contains(w))).map(|m| m.index);
     let r = match mode {
         LightingMode::Off => crate::rgb::turn_off(d.index).await,
-        LightingMode::Static(c) => crate::rgb::set_static(d.index, (c.r, c.g, c.b)).await,
+        LightingMode::Static(c) => crate::rgb::set_static(d.index, (c.r, c.g, c.b), true).await,
         LightingMode::Rainbow => match named(&["rainbow", "spectrum"]) {
-            Some(m) => crate::rgb::set_mode(d.index, m).await,
+            Some(m) => crate::rgb::set_mode(d.index, m, true).await,
             None => return Err(format!("{name} has no rainbow effect")),
         },
         LightingMode::Breathing(_) => match named(&["breath"]) {
-            Some(m) => crate::rgb::set_mode(d.index, m).await,
+            Some(m) => crate::rgb::set_mode(d.index, m, true).await,
             None => return Err(format!("{name} has no breathing effect")),
         },
-        LightingMode::Firmware(m) => crate::rgb::set_mode(d.index, *m as usize).await,
+        LightingMode::Firmware(m) => crate::rgb::set_mode(d.index, *m as usize, true).await,
         LightingMode::Direct(colours) => crate::rgb::set_leds(d.index, &colours.iter().map(|c| (c.r, c.g, c.b)).collect::<Vec<_>>()).await,
         LightingMode::Thermal { .. } => return Err("thermal glow runs from the Lighting page".into()),
     };

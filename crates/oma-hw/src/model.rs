@@ -523,8 +523,8 @@ fn pwm_output(d: &HwmonDevice, p: &crate::hwmon::PwmChannel, id: &Identity, sens
     if let Some(q) = quirk {
         notes.push(Note { what: format!("{out_id}: minimum {:.0} %, released to {:?}", q.min_duty, q.release), source: q.source });
     }
-    // Only Super I/O curves are programmed by OmaAsus (Smart Fan IV).
-    let firmware_curve = p.auto_curve.as_ref().filter(|_| d.is_super_io()).map(|c| CurveSpec { points: c.points, temp: if c.has_temp_sel { CurveTemp::Selectable } else { CurveTemp::Firmware } });
+    // Only Super I/O curves whose mode is known are programmed by OmaAsus (Smart Fan IV).
+    let firmware_curve = p.auto_curve.as_ref().filter(|_| d.is_super_io() && knowledge::smart_fan_mode(&d.name).is_some()).map(|c| CurveSpec { points: c.points, temp: if c.has_temp_sel { CurveTemp::Selectable } else { CurveTemp::Firmware } });
     let release = quirk.map(|q| q.release).unwrap_or(if p.has_enable {
         Release::RestoreMode
     } else {

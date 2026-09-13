@@ -21,11 +21,16 @@ mod id {
     pub const REQUEST_CONTROLLER_DATA: u32 = 1;
     pub const REQUEST_PROTOCOL_VERSION: u32 = 40;
     pub const SET_CLIENT_NAME: u32 = 50;
+    /// Sent by the server to every client when its device list changed.
+    pub const DEVICE_LIST_UPDATED: u32 = 100;
     pub const PROFILE_LOAD: u32 = 152;
     pub const PROFILE_SAVE: u32 = 153;
     pub const UPDATE_LEDS: u32 = 1050;
     pub const SET_CUSTOM_MODE: u32 = 1100;
     pub const UPDATE_MODE: u32 = 1101;
+    /// Save the mode to the device's own memory (protocol 3 and up; the
+    /// payload is UPDATE_MODE's).
+    pub const SAVE_MODE: u32 = 1102;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,6 +43,10 @@ pub struct RgbMode {
     pub per_led: bool,
     /// Mode takes its own colour(s) (flags bit MODE_SPECIFIC_COLOR).
     pub mode_color: bool,
+    /// The device keeps this mode in its own memory when asked to, so it
+    /// outlives OpenRGB and a reboot (flags bit MANUAL_SAVE).
+    #[serde(default)]
+    pub can_save: bool,
     #[serde(skip)]
     raw: ModeRaw,
 }
@@ -188,8 +197,10 @@ fn color_u32(r: u8, g: u8, b: u8) -> u32 {
 }
 
 const FLAG_HAS_SPEED: u32 = 1 << 0;
-const FLAG_HAS_BRIGHTNESS: u32 = 1 << 8;
+// Bits as RGBControllerInterface.h defines them.
+const FLAG_HAS_BRIGHTNESS: u32 = 1 << 4;
 const FLAG_PER_LED_COLOR: u32 = 1 << 5;
+const FLAG_MANUAL_SAVE: u32 = 1 << 8;
 const FLAG_MODE_SPECIFIC_COLOR: u32 = 1 << 6;
 const COLOR_MODE_PER_LED: u32 = 1;
 const COLOR_MODE_MODE_SPECIFIC: u32 = 2;
@@ -241,6 +252,7 @@ fn parse_controller(index: usize, b: &[u8], protocol: u32) -> anyhow::Result<Rgb
             has_brightness: raw.flags & FLAG_HAS_BRIGHTNESS != 0,
             per_led: raw.flags & FLAG_PER_LED_COLOR != 0,
             mode_color: raw.flags & FLAG_MODE_SPECIFIC_COLOR != 0,
+            can_save: raw.flags & FLAG_MANUAL_SAVE != 0,
             raw,
         });
     }
@@ -282,6 +294,16 @@ fn parse_controller(index: usize, b: &[u8], protocol: u32) -> anyhow::Result<Rgb
 
 // ---------------------------------------------------------------- client
 
+/// What a held connection reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Link {
+    /// The server's device list changed: it finished a detection, or a
+    /// device came or went.
+    DevicesChanged,
+    /// The server closed the connection: it exited.
+    Gone,
+}
+
 pub struct Client {
     stream: TcpStream,
     pub protocol: u32,
@@ -311,6 +333,31 @@ impl Client {
         buf.extend_from_slice(payload);
         tokio::time::timeout(IO_TIMEOUT, self.stream.write_all(&buf)).await.map_err(|_| anyhow::anyhow!("OpenRGB write timed out"))??;
         Ok(())
+    }
+
+    /// Wait on the open connection, without a timeout: the server says when
+    /// its device list changes, and the connection ends when the server
+    /// exits. This is how a client learns the server was restarted.
+    pub async fn wait(&mut self) -> Link {
+        loop {
+            let mut hdr = [0u8; 16];
+            if self.stream.read_exact(&mut hdr).await.is_err() || &hdr[..4] != b"ORGB" {
+                return Link::Gone;
+            }
+            let packet = u32::from_le_bytes(hdr[8..12].try_into().unwrap_or([0; 4]));
+            let len = u32::from_le_bytes(hdr[12..16].try_into().unwrap_or([0; 4])) as usize;
+            if len > 1 << 20 {
+                // Not a packet this client understands: the stream cannot be trusted past it.
+                return Link::Gone;
+            }
+            let mut payload = vec![0u8; len];
+            if !payload.is_empty() && self.stream.read_exact(&mut payload).await.is_err() {
+                return Link::Gone;
+            }
+            if packet == id::DEVICE_LIST_UPDATED {
+                return Link::DevicesChanged;
+            }
+        }
     }
 
     /// Receive the next packet with the expected id (skipping unsolicited ones).
@@ -361,13 +408,26 @@ impl Client {
     }
 
     async fn update_mode(&mut self, index: u32, mode_index: usize, raw: &ModeRaw) -> anyhow::Result<()> {
-        let body = serialize_mode(raw, self.protocol);
-        let mut p = Vec::with_capacity(8 + body.len());
-        p.extend_from_slice(&((8 + body.len()) as u32).to_le_bytes());
-        p.extend_from_slice(&(mode_index as i32).to_le_bytes());
-        p.extend_from_slice(&body);
-        self.send(index, id::UPDATE_MODE, &p).await
+        self.send(index, id::UPDATE_MODE, &mode_payload(mode_index, raw, self.protocol)).await
     }
+
+    /// Ask the device to keep the mode in its own memory. Nothing on a server
+    /// too old to know the request.
+    async fn save_mode(&mut self, index: u32, mode_index: usize, raw: &ModeRaw) -> anyhow::Result<()> {
+        if self.protocol < 3 {
+            return Ok(());
+        }
+        self.send(index, id::SAVE_MODE, &mode_payload(mode_index, raw, self.protocol)).await
+    }
+}
+
+fn mode_payload(mode_index: usize, raw: &ModeRaw, protocol: u32) -> Vec<u8> {
+    let body = serialize_mode(raw, protocol);
+    let mut p = Vec::with_capacity(8 + body.len());
+    p.extend_from_slice(&((8 + body.len()) as u32).to_le_bytes());
+    p.extend_from_slice(&(mode_index as i32).to_le_bytes());
+    p.extend_from_slice(&body);
+    p
 }
 
 // ---------------------------------------------------------------- high level API
@@ -385,28 +445,74 @@ pub async fn devices() -> anyhow::Result<Vec<RgbDevice>> {
     Ok(out)
 }
 
-/// Set every LED of a device to one colour: direct mode when the device
-/// exposes LEDs, otherwise its `Static` mode with a mode-specific colour.
-pub async fn set_static(index: usize, rgb: (u8, u8, u8)) -> anyhow::Result<()> {
+/// Set every LED of a device to one colour.
+///
+/// `persist`: the device's own `Static` mode where it has one, saved to the
+/// device where it can be, so the colour outlives OpenRGB and a reboot; a
+/// device without one keeps a per-LED mode it can save, else runs direct.
+/// Not persisting (a glow that changes every second, say) means the direct
+/// mode: held by the running OpenRGB, and no writes to the device's memory.
+pub async fn set_static(index: usize, rgb: (u8, u8, u8), persist: bool) -> anyhow::Result<()> {
     let mut c = Client::connect().await?;
     let d = c.controller(index as u32).await?;
-    if d.leds > 0 && d.modes.iter().any(|m| m.per_led) {
-        c.set_custom_mode(index as u32).await?;
-        let colors = vec![rgb; d.leds];
-        c.update_leds(index as u32, &colors).await?;
+    let direct = d.leds > 0 && d.modes.iter().any(|m| m.per_led);
+    let own_static = d.modes.iter().find(|m| m.name.eq_ignore_ascii_case("static"));
+    let all_leds_are = |d: &RgbDevice| d.leds > 0 && d.colors.len() == d.leds && d.colors.iter().all(|c| *c == rgb);
+    // A Static mode that takes per-LED colours (ASUS GPUs, fan hubs): the
+    // mode, then every LED in the colour.
+    if persist && let Some(m) = own_static.filter(|m| m.per_led && !m.mode_color) {
+        if d.leds == 0 {
+            anyhow::bail!("{}: OpenRGB lists no LEDs for it; set its zone sizes in OpenRGB first", d.name);
+        }
+        if d.active_mode == m.index && all_leds_are(&d) {
+            // Already so: nothing written, nothing saved again.
+            return Ok(());
+        }
+        let mut raw = m.raw.clone();
+        raw.color_mode = COLOR_MODE_PER_LED;
+        if raw.flags & FLAG_HAS_BRIGHTNESS != 0 && raw.brightness == 0 {
+            raw.brightness = raw.brightness_max;
+        }
+        c.update_mode(index as u32, m.index, &raw).await?;
+        c.update_leds(index as u32, &vec![rgb; d.leds]).await?;
+        if m.can_save {
+            c.save_mode(index as u32, m.index, &raw).await?;
+        }
         return Ok(());
     }
-    let m = d
-        .modes
-        .iter()
-        .find(|m| m.name.eq_ignore_ascii_case("static") && m.mode_color)
-        .or_else(|| d.modes.iter().find(|m| m.mode_color))
-        .ok_or_else(|| anyhow::anyhow!("{} has no colour-capable mode", d.name))?;
+    let own_static = own_static.filter(|m| m.mode_color);
+    if direct && (!persist || own_static.is_none()) {
+        let colors = vec![rgb; d.leds];
+        if all_leds_are(&d) && d.modes.get(d.active_mode).is_some_and(|m| m.per_led) {
+            return Ok(());
+        }
+        if persist && let Some(m) = d.modes.iter().find(|m| m.per_led && m.can_save && !m.name.eq_ignore_ascii_case("direct")) {
+            let mut raw = m.raw.clone();
+            raw.color_mode = COLOR_MODE_PER_LED;
+            c.update_mode(index as u32, m.index, &raw).await?;
+            c.update_leds(index as u32, &colors).await?;
+            return c.save_mode(index as u32, m.index, &raw).await;
+        }
+        c.set_custom_mode(index as u32).await?;
+        return c.update_leds(index as u32, &colors).await;
+    }
+    let m = own_static.or_else(|| d.modes.iter().find(|m| m.mode_color)).ok_or_else(|| anyhow::anyhow!("{} has no colour-capable mode", d.name))?;
     let mut raw = m.raw.clone();
     raw.color_mode = COLOR_MODE_MODE_SPECIFIC;
+    if raw.flags & FLAG_HAS_BRIGHTNESS != 0 && raw.brightness == 0 {
+        raw.brightness = raw.brightness_max;
+    }
     let n = raw.colors_max.max(1) as usize;
     raw.colors = vec![color_u32(rgb.0, rgb.1, rgb.2); n];
-    c.update_mode(index as u32, m.index, &raw).await
+    if d.active_mode == m.index && m.raw.colors == raw.colors && m.raw.color_mode == raw.color_mode {
+        // Already so: nothing written, nothing saved again.
+        return Ok(());
+    }
+    c.update_mode(index as u32, m.index, &raw).await?;
+    if persist && m.can_save {
+        c.save_mode(index as u32, m.index, &raw).await?;
+    }
+    Ok(())
 }
 
 /// Set per-LED colours (direct mode).
@@ -416,8 +522,9 @@ pub async fn set_leds(index: usize, colors: &[(u8, u8, u8)]) -> anyhow::Result<(
     c.update_leds(index as u32, colors).await
 }
 
-/// Activate a built-in effect mode by index, keeping its current colours.
-pub async fn set_mode(index: usize, mode: usize) -> anyhow::Result<()> {
+/// Activate a built-in effect mode by index, keeping its current colours;
+/// `persist` saves it to the device where the device can.
+pub async fn set_mode(index: usize, mode: usize, persist: bool) -> anyhow::Result<()> {
     let mut c = Client::connect().await?;
     let d = c.controller(index as u32).await?;
     let m = d.modes.get(mode).ok_or_else(|| anyhow::anyhow!("mode {mode} not found"))?;
@@ -428,14 +535,23 @@ pub async fn set_mode(index: usize, mode: usize) -> anyhow::Result<()> {
     if raw.color_mode == 0 {
         raw.color_mode = if m.per_led { COLOR_MODE_PER_LED } else if m.mode_color { COLOR_MODE_MODE_SPECIFIC } else { 0 };
     }
-    c.update_mode(index as u32, mode, &raw).await
+    c.update_mode(index as u32, mode, &raw).await?;
+    if persist && m.can_save {
+        c.save_mode(index as u32, mode, &raw).await?;
+    }
+    Ok(())
 }
 
+/// Off, kept in the device's memory where it can be.
 pub async fn turn_off(index: usize) -> anyhow::Result<()> {
     let mut c = Client::connect().await?;
     let d = c.controller(index as u32).await?;
     if let Some(m) = d.modes.iter().find(|m| m.name.eq_ignore_ascii_case("off")) {
-        return c.update_mode(index as u32, m.index, &m.raw).await;
+        c.update_mode(index as u32, m.index, &m.raw).await?;
+        if m.can_save {
+            c.save_mode(index as u32, m.index, &m.raw).await?;
+        }
+        return Ok(());
     }
     if d.leds > 0 {
         c.set_custom_mode(index as u32).await?;

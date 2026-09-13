@@ -218,12 +218,21 @@ fn main() -> anyhow::Result<()> {
                 match oma_hw::rgb::devices().await {
                     Ok(d) => {
                         for x in &d {
-                            println!("[{}] {} · {} · {} LEDs · modes={:?} active={}", x.index, x.name, x.kind, x.leds, x.modes.iter().map(|m| m.name.clone()).collect::<Vec<_>>(), x.active_mode);
+                            println!("[{}] {} · {} · {} LEDs · modes={:?} active={} (* = the device can keep it)", x.index, x.name, x.kind, x.leds, x.modes.iter().map(|m| if m.can_save { format!("{}*", m.name) } else { m.name.clone() }).collect::<Vec<_>>(), x.active_mode);
+                        }
+                        // `oma rgb modes <index>`: every mode of one device with its flags.
+                        if args.get(1).map(String::as_str) == Some("modes") {
+                            let idx: usize = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(0);
+                            if let Some(x) = d.iter().find(|x| x.index == idx) {
+                                for m in &x.modes {
+                                    println!("  {:>2} {:<18} speed={} brightness={} per_led={} mode_color={} can_save={}", m.index, m.name, m.has_speed, m.has_brightness, m.per_led, m.mode_color, m.can_save);
+                                }
+                            }
                         }
                         // Listing is read-only; lighting changes only on request.
                         if args.get(1).map(String::as_str) == Some("--set") {
                             let idx: usize = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(0);
-                            println!("set_static({idx}) -> {:?}", oma_hw::rgb::set_static(idx, (255, 61, 104)).await.map_err(|e| e.to_string()));
+                            println!("set_static({idx}) -> {:?}", oma_hw::rgb::set_static(idx, (255, 61, 104), true).await.map_err(|e| e.to_string()));
                         }
                     }
                     Err(e) => println!("devices error: {e:#}"),
@@ -233,7 +242,8 @@ fn main() -> anyhow::Result<()> {
         Some("capture") => {
             let dir = std::path::PathBuf::from(args.get(1).map(String::as_str).unwrap_or("."));
             let rt = tokio::runtime::Runtime::new()?;
-            let raw = rt.block_on(oma_hw::capture::gather());
+            // A fixture can wait for a slow device longer than a start-up can.
+            let raw = rt.block_on(oma_hw::capture::gather_with(std::time::Duration::from_secs(20)));
             std::fs::create_dir_all(&dir)?;
             let path = dir.join("raw-inventory.json");
             std::fs::write(&path, serde_json::to_string_pretty(&raw)? + "\n")?;
@@ -248,6 +258,9 @@ fn main() -> anyhow::Result<()> {
                 yes(raw.supergfx.is_some()),
                 raw.nvidia.len()
             );
+            if !raw.unanswered.is_empty() {
+                println!("{} attributes did not answer within 20 s and have no value, e.g. {}", raw.unanswered.len(), raw.unanswered[0]);
+            }
             println!("wrote {}", path.display());
             println!("contains model, BIOS and kernel versions and live readings; no serial numbers (GPU UUIDs are redacted)");
         }

@@ -276,7 +276,6 @@ impl HwmonDevice {
     }
 
     fn probe(dir: &Path) -> Option<Self> {
-        let name = sysfs::read_string(dir.join("name"))?;
         let entries = sysfs::list_dir(dir);
         let names: Vec<String> = entries
             .iter()
@@ -292,25 +291,40 @@ impl HwmonDevice {
             v.dedup();
             v
         };
+        let (temps_i, fans_i, ins_i, powers_i) = (indices("temp", "_input"), indices("fan", "_input"), indices("in", "_input"), indices("power", "_input"));
 
-        let temps = indices("temp", "_input")
+        // Everything the probe reads goes to the device once, bounded: a driver
+        // that blocks per read (a wedged USB cooler: seconds per label) must
+        // not hold detection, and a label that did not come reads as absent.
+        let mut wanted = vec![dir.join("name")];
+        wanted.extend(temps_i.iter().flat_map(|i| [format!("temp{i}_label"), format!("temp{i}_crit"), format!("temp{i}_max")]).map(|n| dir.join(n)));
+        wanted.extend(fans_i.iter().flat_map(|i| [format!("fan{i}_label"), format!("fan{i}_min")]).map(|n| dir.join(n)));
+        wanted.extend(ins_i.iter().map(|i| dir.join(format!("in{i}_label"))));
+        wanted.extend(powers_i.iter().map(|i| dir.join(format!("power{i}_label"))));
+        let vals = read_bounded(wanted, PROBE_WAIT);
+        let name = vals.get(&dir.join("name"))?.clone();
+        let text = |n: String| vals.get(&dir.join(n)).cloned();
+        let milli = |n: String| text(n).and_then(|s| s.parse::<i64>().ok()).map(|v| v as f64 / 1000.0);
+        let whole = |n: String| text(n).and_then(|s| s.parse::<u64>().ok());
+
+        let temps = temps_i
             .into_iter()
             .map(|i| TempSensor {
                 index: i,
-                label: sysfs::read_string(dir.join(format!("temp{i}_label"))).unwrap_or_else(|| format!("temp{i}")),
+                label: text(format!("temp{i}_label")).unwrap_or_else(|| format!("temp{i}")),
                 input: dir.join(format!("temp{i}_input")),
-                crit: sysfs::read_milli(dir.join(format!("temp{i}_crit"))),
-                max: sysfs::read_milli(dir.join(format!("temp{i}_max"))),
+                crit: milli(format!("temp{i}_crit")),
+                max: milli(format!("temp{i}_max")),
             })
             .collect();
 
-        let fans = indices("fan", "_input")
+        let fans = fans_i
             .into_iter()
             .map(|i| FanSensor {
                 index: i,
-                label: sysfs::read_string(dir.join(format!("fan{i}_label"))).unwrap_or_else(|| format!("fan{i}")),
+                label: text(format!("fan{i}_label")).unwrap_or_else(|| format!("fan{i}")),
                 input: dir.join(format!("fan{i}_input")),
-                min: sysfs::read_u64(dir.join(format!("fan{i}_min"))),
+                min: whole(format!("fan{i}_min")),
             })
             .collect();
 
@@ -348,20 +362,20 @@ impl HwmonDevice {
             })
             .collect();
 
-        let voltages = indices("in", "_input")
+        let voltages = ins_i
             .into_iter()
             .map(|i| VoltageSensor {
                 index: i,
-                label: sysfs::read_string(dir.join(format!("in{i}_label"))).unwrap_or_else(|| format!("in{i}")),
+                label: text(format!("in{i}_label")).unwrap_or_else(|| format!("in{i}")),
                 input: dir.join(format!("in{i}_input")),
             })
             .collect();
 
-        let powers = indices("power", "_input")
+        let powers = powers_i
             .into_iter()
             .map(|i| PowerSensor {
                 index: i,
-                label: sysfs::read_string(dir.join(format!("power{i}_label"))).unwrap_or_else(|| format!("power{i}")),
+                label: text(format!("power{i}_label")).unwrap_or_else(|| format!("power{i}")),
                 input: dir.join(format!("power{i}_input")),
             })
             .collect();
@@ -379,9 +393,41 @@ impl HwmonDevice {
     }
 }
 
-/// Enumerate every hwmon device on the system.
+/// How long one device's probe reads may take together.
+const PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Read `paths` in order on a thread, waiting at most `wait` for all of them;
+/// what arrived in time is returned. The thread finishes on its own.
+fn read_bounded(paths: Vec<PathBuf>, wait: std::time::Duration) -> std::collections::HashMap<PathBuf, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut out = std::collections::HashMap::new();
+    let spawned = std::thread::Builder::new().name("oma-probe".into()).spawn(move || {
+        for p in paths {
+            if let Some(v) = sysfs::read_string(&p)
+                && tx.send((p, v)).is_err()
+            {
+                return;
+            }
+        }
+    });
+    if spawned.is_err() {
+        return out;
+    }
+    let deadline = std::time::Instant::now() + wait;
+    while let Ok((p, v)) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+        out.insert(p, v);
+    }
+    out
+}
+
+/// Enumerate every hwmon device on the system, each probed on its own
+/// thread, so the whole takes as long as the slowest device's bound.
 pub fn enumerate() -> Vec<HwmonDevice> {
-    sysfs::hwmon_dirs().iter().filter_map(|d| HwmonDevice::probe(d)).collect()
+    let dirs = sysfs::hwmon_dirs();
+    std::thread::scope(|scope| {
+        let probes: Vec<_> = dirs.iter().map(|d| scope.spawn(move || HwmonDevice::probe(d))).collect();
+        probes.into_iter().filter_map(|p| p.join().ok().flatten()).collect()
+    })
 }
 
 /// Find a device by driver name.

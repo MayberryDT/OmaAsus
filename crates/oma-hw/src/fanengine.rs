@@ -160,10 +160,15 @@ impl FanEngine {
                     }
                 }
                 FanMode::HardwareCurve(curve) => {
+                    // The output's floor holds for the programmed points too.
+                    let mut curve = curve.clone();
+                    for p in &mut curve.points {
+                        p.1 = p.1.max(floor);
+                    }
                     // Programmed once, and again when re-applied or edited.
-                    if self.state.get(&fa.target).is_none_or(|s| s.resend || s.curve.as_ref() != Some(curve)) {
+                    if self.state.get(&fa.target).is_none_or(|s| s.resend || s.curve.as_ref() != Some(&curve)) {
                         self.state.insert(fa.target.clone(), ChannelState { curve: Some(curve.clone()), ..ChannelState::new(-1.0, 0.0) });
-                        out.push(Command { target: fa.target.clone(), duty: None, hw_curve: Some(curve.clone()), seq: 0 });
+                        out.push(Command { target: fa.target.clone(), duty: None, hw_curve: Some(curve), seq: 0 });
                     }
                 }
                 FanMode::Curve(curve) => {

@@ -332,8 +332,19 @@ pub enum Message {
     Tray(tray::Event),
     /// Omarchy applied a theme: the desktop's palette and its name.
     ThemeChanged(Palette, String),
-    /// Whether an OpenRGB server answered at start.
+    /// Whether an OpenRGB server answers (probed off the UI thread): its
+    /// devices are fetched when it does.
     RgbServer(bool),
+    /// The same, noted without fetching devices.
+    RgbServerSeen(bool),
+    /// The held OpenRGB connection: made (or the server's device list
+    /// changed), or lost because the server exited.
+    RgbLink(bool),
+    /// The server's devices, listed after the link was made: the active
+    /// profile's lighting goes back on them.
+    RgbUp(Result<Vec<oma_hw::rgb::RgbDevice>, String>),
+    /// The active profile's OpenRGB lighting was put back: what failed.
+    LightingRestored(Vec<String>),
     /// `omaasus reload-theme`: read the theme again now.
     ReloadTheme,
     /// The runtime destroyed a surface (compositor close, `RemoveWindow`).
@@ -457,7 +468,6 @@ impl App {
             |(ok, modes)| Message::CcReady(ok, modes),
         );
         // The OpenRGB probe is a TCP connect: off the UI thread, like every other probe.
-        let rgb = Task::perform(async { tokio::task::spawn_blocking(oma_hw::rgb::server_running).await.unwrap_or(false) }, Message::RgbServer);
         let asus = Task::perform(crate::pages::asus::load(), Message::AsusLoaded);
         // iced_exwlshell's daemon does not apply `Settings::fonts`; the runtime font
         // action does, so bundle-load through tasks (fallback fonts otherwise).
@@ -465,7 +475,7 @@ impl App {
             iced::font::load(theme::font::SANS_BYTES).map(|r| Message::FontLoaded(r.is_ok())),
             iced::font::load(theme::font::MONO_BYTES).map(|r| Message::FontLoaded(r.is_ok())),
         ]);
-        (app, Task::batch([fonts, inv, ctl, nvi, cc, rgb, asus, load_ppd(), probe_graphics(), open]))
+        (app, Task::batch([fonts, inv, ctl, nvi, cc, asus, load_ppd(), probe_graphics(), open]))
     }
 
     fn namespace() -> String {
@@ -492,6 +502,7 @@ impl App {
         let tray = if self.config.tray_enabled { Subscription::run(tray::stream).map(Message::Tray) } else { Subscription::none() };
         Subscription::batch([
             Subscription::run(telemetry::stream).map(Message::Telemetry),
+            Subscription::run(rgb_stream).map(Message::RgbLink),
             Subscription::run(ipc::stream).map(Message::Ipc),
             Subscription::run(crate::automation::stream).map(Message::Auto),
             Subscription::run(crate::events::stream).map(Message::System),
@@ -1139,6 +1150,43 @@ impl App {
         }
     }
 
+    /// Ask, off the UI thread, whether an OpenRGB server answers.
+    fn probe_rgb(then: fn(bool) -> Message) -> Task<Message> {
+        Task::perform(async { tokio::task::spawn_blocking(oma_hw::rgb::server_running).await.unwrap_or(false) }, then)
+    }
+
+    /// Send the active profile's OpenRGB lighting to the devices just listed.
+    fn restore_openrgb_lighting(&self) -> Task<Message> {
+        let zones: Vec<(String, oma_hw::profile::LightingMode)> = self
+            .active_profile()
+            .map(|pr| {
+                pr.lighting
+                    .zones
+                    .iter()
+                    .filter(|(_, m)| !matches!(m, oma_hw::profile::LightingMode::Thermal { .. }))
+                    .filter_map(|(k, m)| k.strip_prefix("openrgb:").map(|n| (n.to_string(), m.clone())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if zones.is_empty() {
+            tracing::info!("the active profile sets no OpenRGB lighting; devices left as they are");
+            return Task::none();
+        }
+        let devices = self.rgb_devices.clone();
+        Task::perform(
+            async move {
+                let mut failed = Vec::new();
+                for (name, mode) in zones {
+                    if let Err(e) = oma_hw::lighting::apply_openrgb(&devices, &name, &mode).await {
+                        failed.push(e);
+                    }
+                }
+                failed
+            },
+            Message::LightingRestored,
+        )
+    }
+
     fn rgb_refresh() -> Task<Message> {
         Task::perform(async { oma_hw::rgb::devices().await.map_err(|e| e.to_string()) }, Message::RgbDevices)
     }
@@ -1205,11 +1253,7 @@ impl App {
             app.model.iter().flat_map(|m| &m.lighting).filter(|d| !colour || (matches!(d.backend, oma_hw::model::LightingBackend::AsusdAura { .. }) && d.modes.contains(&0))).map(|d| d.id.to_string()).collect()
         };
         match m {
-            LightingMsg::Refresh => {
-                self.rgb_server = oma_hw::rgb::server_running();
-                let rgb = if self.rgb_server { Self::rgb_refresh() } else { Task::none() };
-                return Task::batch([rgb, self.load_lights()]);
-            }
+            LightingMsg::Refresh => return Task::batch([Self::probe_rgb(Message::RgbServer), self.load_lights()]),
             LightingMsg::Reload => return self.load_lights(),
             LightingMsg::Loaded(states) => {
                 self.lights = states.into_iter().collect();
@@ -1282,7 +1326,7 @@ impl App {
                     async {
                         for _ in 0..40 {
                             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                            if oma_hw::rgb::server_running() {
+                            if tokio::task::spawn_blocking(oma_hw::rgb::server_running).await.unwrap_or(false) {
                                 tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
                                 return oma_hw::rgb::devices().await.map_err(|e| e.to_string());
                             }
@@ -1297,8 +1341,20 @@ impl App {
                 self.light_sel = None;
             }
             LightingMsg::Hex(s) => {
+                // Applied once typing settles, not per keystroke: a colour that
+                // sticks is written to the device's own memory.
                 self.rgb_hex = s.clone();
-                if let Some(c) = crate::pages::lighting::parse_hex(&s) {
+                if crate::pages::lighting::parse_hex(&s).is_some() {
+                    return Task::perform(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                        s
+                    }, |s| Message::Lighting(LightingMsg::HexSettled(s)));
+                }
+            }
+            LightingMsg::HexSettled(s) => {
+                if s == self.rgb_hex
+                    && let Some(c) = crate::pages::lighting::parse_hex(&s)
+                {
                     return self.update_lighting(LightingMsg::Color(c));
                 }
             }
@@ -1310,13 +1366,13 @@ impl App {
                 }
                 let Some(idx) = dev_index else { return Task::none() };
                 remember(self, dev_name, LightingMode::Static(c));
-                return Task::batch([Task::perform(async move { oma_hw::rgb::set_static(idx, (c.r, c.g, c.b)).await.map(|_| String::new()).map_err(|e| e.to_string()) }, |r| match r { Ok(_) => Message::Lighting(LightingMsg::Refresh), Err(e) => Message::Applied(Err(e)) })]);
+                return Task::batch([Task::perform(async move { oma_hw::rgb::set_static(idx, (c.r, c.g, c.b), true).await.map(|_| String::new()).map_err(|e| e.to_string()) }, |r| match r { Ok(_) => Message::Lighting(LightingMsg::Refresh), Err(e) => Message::Applied(Err(e)) })]);
             }
             LightingMsg::Mode(idx, mode) => {
                 let name = self.rgb_devices.iter().find(|d| d.index == idx).map(|d| d.name.clone());
                 let is_rainbow = self.rgb_devices.iter().find(|d| d.index == idx).and_then(|d| d.modes.get(mode)).map(|m| m.name.to_ascii_lowercase().contains("rainbow") || m.name.to_ascii_lowercase().contains("spectrum")).unwrap_or(false);
                 remember(self, name, if is_rainbow { LightingMode::Rainbow } else { LightingMode::Firmware(mode as u32) });
-                return Task::perform(async move { oma_hw::rgb::set_mode(idx, mode).await.map_err(|e| e.to_string()) }, |r| match r { Ok(_) => Message::Lighting(LightingMsg::Refresh), Err(e) => Message::Applied(Err(e)) });
+                return Task::perform(async move { oma_hw::rgb::set_mode(idx, mode, true).await.map_err(|e| e.to_string()) }, |r| match r { Ok(_) => Message::Lighting(LightingMsg::Refresh), Err(e) => Message::Applied(Err(e)) });
             }
             LightingMsg::Off(idx) => {
                 let name = self.rgb_devices.iter().find(|d| d.index == idx).map(|d| d.name.clone());
@@ -1344,7 +1400,7 @@ impl App {
                     remember(self, Some(n), LightingMode::Static(accent));
                 }
                 if !idxs.is_empty() {
-                    tasks.push(Task::perform(async move { for i in idxs { let _ = oma_hw::rgb::set_static(i, (accent.r, accent.g, accent.b)).await; } Ok::<_, String>(()) }, |_| Message::Lighting(LightingMsg::Refresh)));
+                    tasks.push(Task::perform(async move { for i in idxs { let _ = oma_hw::rgb::set_static(i, (accent.r, accent.g, accent.b), true).await; } Ok::<_, String>(()) }, |_| Message::Lighting(LightingMsg::Refresh)));
                 }
                 return Task::batch(tasks);
             }
@@ -1363,7 +1419,8 @@ impl App {
         let c = theme::thermal(&self.palette, t, 40.0, 90.0);
         let rgb = ((c.r * 255.0) as u8, (c.g * 255.0) as u8, (c.b * 255.0) as u8);
         let idxs: Vec<usize> = self.rgb_devices.iter().map(|d| d.index).collect();
-        Task::perform(async move { for i in idxs { let _ = oma_hw::rgb::set_static(i, rgb).await; } }, |_| Message::DismissToastNoop)
+        // A tint that changes every few seconds runs direct: nothing is written to the devices' memory.
+        Task::perform(async move { for i in idxs { let _ = oma_hw::rgb::set_static(i, rgb, false).await; } }, |_| Message::DismissToastNoop)
     }
 
     /// Run the software fan engine for one telemetry frame.
@@ -1604,7 +1661,9 @@ impl App {
                     self.gpu_edit.power_limit_w = n.power_limit_w.map(|w| w.round() as u32);
                     self.gpu_edit.fan_percent = if n.fan_policy_manual.iter().any(|m| *m) { Some(n.fan_percent.clone()) } else { None };
                 }
-                let rgb_probe = if !self.rgb_server && snap.seq % 20 == 5 && oma_hw::rgb::server_running() { Self::rgb_refresh() } else { Task::none() };
+                // The held connection (`rgb_stream`) says when the server comes
+                // or goes: nothing to poll here.
+                let rgb_probe = Task::none();
                 // The dGPU woke after startup: fetch its details for the GPU page
                 // (the sampler only reports it while awake, so this doesn't wake it).
                 let nvidia_info = if snap.nvidia.is_some() && self.nvidia_info.is_none() && snap.seq % 20 == 1 && telemetry::dgpu_open_ok() {
@@ -1775,11 +1834,50 @@ impl App {
                         self.rgb_devices = d;
                     }
                     Err(e) => {
-                        self.rgb_server = oma_hw::rgb::server_running();
                         self.toast = Some((format!("OpenRGB: {e}"), false));
+                        // Whether the server is there decides if it is asked again.
+                        return Self::probe_rgb(Message::RgbServerSeen);
                     }
                 }
                 Task::none()
+            }
+            Message::RgbLink(up) => {
+                self.rgb_server = up;
+                if up {
+                    // The server (or the app) just came up, or its devices changed:
+                    // the active profile's lighting goes back on, since nothing
+                    // else puts it there after a restart.
+                    Task::perform(async { oma_hw::rgb::devices().await.map_err(|e| e.to_string()) }, Message::RgbUp)
+                } else {
+                    tracing::info!("OpenRGB server gone");
+                    Task::none()
+                }
+            }
+            Message::RgbUp(r) => match r {
+                Ok(d) if d.is_empty() => {
+                    // Still detecting: its device-list notice follows.
+                    self.rgb_devices = d;
+                    Task::none()
+                }
+                Ok(d) => {
+                    self.rgb_devices = d;
+                    tracing::info!(devices = self.rgb_devices.len(), "OpenRGB server up; putting the profile's lighting back");
+                    self.restore_openrgb_lighting()
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "OpenRGB server up but its devices could not be listed");
+                    Task::none()
+                }
+            },
+            Message::LightingRestored(skipped) => {
+                // Unattended: a device that is absent, or that OpenRGB lists
+                // without LEDs, is noted in the log, not put in the user's face.
+                if skipped.is_empty() {
+                    tracing::info!("profile lighting put back on the OpenRGB devices");
+                } else {
+                    tracing::warn!(skipped = ?skipped, "some of the profile's lighting could not be put back");
+                }
+                Self::rgb_refresh()
             }
             Message::CcReady(ok, modes) => {
                 self.cc_connected = ok;
@@ -1978,6 +2076,10 @@ impl App {
             Message::RgbServer(up) => {
                 self.rgb_server = up;
                 if up { Self::rgb_refresh() } else { Task::none() }
+            }
+            Message::RgbServerSeen(up) => {
+                self.rgb_server = up;
+                Task::none()
             }
             Message::ThemeChanged(palette, name) => {
                 tracing::info!(theme = %name, "adopting the desktop theme");
@@ -2303,4 +2405,26 @@ impl App {
             .spacing(0.0)
             .into()
     }
+}
+
+/// Follows the OpenRGB SDK server over one held connection: `true` when the
+/// connection is made or the server's device list changes, `false` when the
+/// server goes away. Looks for the server again every few seconds while it
+/// is down. This is what puts a profile's lighting back after OpenRGB
+/// restarts: a liveness probe misses a quick restart, a closed connection
+/// does not.
+fn rgb_stream() -> impl iced::futures::Stream<Item = bool> {
+    use iced::futures::SinkExt;
+    iced::stream::channel(4, async move |mut out| {
+        loop {
+            if let Ok(mut c) = oma_hw::rgb::Client::connect().await {
+                let _ = out.send(true).await;
+                while c.wait().await == oma_hw::rgb::Link::DevicesChanged {
+                    let _ = out.send(true).await;
+                }
+                let _ = out.send(false).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    })
 }

@@ -48,7 +48,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
     let about = match (firmware_only, cc_detected) {
         (true, _) => "These fans run their curves in firmware. OmaAsus stores each profile's curves there when the profile is applied; Off leaves the firmware's own.",
-        (false, true) => "Choose who drives the fans. CoolerControl keeps its own curves, and OmaAsus then switches its Mode per profile. The OmaAsus engine runs the curves below itself, through the privileged helper.",
+        (false, true) => "Choose who drives the fans. CoolerControl is running and drives every fan it knows, hubs and headers alike; with it as the owner, OmaAsus sends no fan commands and only switches its Mode per profile. Choosing OmaAsus runs the curves below through the privileged helper instead: stop CoolerControl first, or the two fight over the same fans.",
         (false, false) => "The OmaAsus engine runs the curves below itself, through the privileged helper. Off leaves the fans to firmware.",
     };
     let mut chips = vec![owner_chip("Automatic", FanOwner::Auto), owner_chip("OmaAsus", FanOwner::OmaAsus)];

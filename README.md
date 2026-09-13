@@ -40,7 +40,7 @@ It runs as a window, as a tray item, and as a layer-shell overlay you toggle ove
 | CPUs | Governor, EPP, SMT, frequency limits, temperatures; boost where the driver offers it (`amd-pstate` from Linux 6.11, `acpi-cpufreq`); package power from an APU's reported power, or RAPL where the kernel lets users read it | cpufreq (`amd-pstate`, `acpi-cpufreq`, `intel_pstate`), hwmon, powercap |
 | Everything else | Any hwmon fan output and sensor, OpenRGB devices, power modes | hwmon, the OpenRGB SDK, `power-profiles-daemon` or ACPI `platform_profile` |
 
-It also works with CoolerControl, which can own the fans instead, GameMode and Hyprland IPC. None of these is required. A machine without a component doesn't get its controls. The ROG Ally goes through the same `asusd` interfaces but hasn't been tried.
+It also works with CoolerControl, which can own the fans instead (while it runs it drives every fan it knows, hubs included, and OmaAsus only switches its Mode per profile), GameMode and Hyprland IPC. None of these is required. A machine without a component doesn't get its controls. The ROG Ally goes through the same `asusd` interfaces but hasn't been tried.
 
 ### Tested on
 
@@ -75,7 +75,7 @@ hide = ["hwmon:acpitz:temp1"]         # leave out of the model
 | **Processor** | Governor, energy-performance preference, core boost, SMT, frequency ceiling and floor, per-core clocks and load with preferred-core ranking |
 | **Graphics** | NVIDIA power limit, locked clocks, core and memory offsets (driver 555+), fan speed, persistence, throttle reasons; amdgpu DPM level; the dGPU's state when it is asleep or switched off |
 | **Cooling** | Who drives the fans (OmaAsus, CoolerControl or firmware). Per output: automatic, fixed, software curve, the board's Smart Fan IV curve, or a laptop's firmware curve stored per power mode. Curve editor with hysteresis and ramp limiting; temperature sources from the sensors present |
-| **Lighting** | `asusd` keyboard Aura (effects, colour, brightness) and Slash bar (animations, brightness, when it shows); OpenRGB devices (colour, effects, thermal glow). Remembered per profile |
+| **Lighting** | `asusd` keyboard Aura (effects, colour, brightness) and Slash bar (animations, brightness, when it shows); OpenRGB devices (colour, effects, thermal glow). Remembered per profile. A solid colour uses the device's own Static mode and is saved to the device where it allows, so it outlives OpenRGB; the active profile's lighting is put back whenever the OpenRGB server starts |
 | **Profiles** | Create, duplicate, rename, recolour, delete, set default. A profile holds a power mode, CPU, GPU, cooling, lighting and a CoolerControl Mode, and can carry firmware limits set in `config.toml`. The first run creates one per power mode the machine has |
 | **Automation** | Manual or automatic mode; rules on GameMode, fullscreen game, window class, process name, CPU/GPU temperature, time of day; priorities and hold times |
 | **ASUS** | Power mode, charge limit, firmware attributes read live from the kernel and applied on release, `supergfxd` graphics mode with a confirmation that says what the switch involves |

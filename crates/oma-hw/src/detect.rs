@@ -195,10 +195,8 @@ pub mod pid {
     pub const RYUJIN_III: u16 = 0x1a45;
     /// Motherboard LiveDash OLED / AniMe Matrix controller (ROG Extreme boards).
     pub const LIVEDASH_OLED: u16 = 0x1a21;
+    /// Lian Li UNI FAN hubs: see `lianli::HubKind::from_pid` for every id.
     pub const LIANLI_UNI_SL: u16 = 0xa100;
-    pub const LIANLI_UNI_AL: u16 = 0x7750;
-    pub const LIANLI_UNI_SL_INF: u16 = 0xa101;
-    pub const LIANLI_UNI_SL_V2: u16 = 0xa102;
 }
 
 pub fn inventory() -> SystemInventory {
@@ -222,7 +220,7 @@ pub fn inventory() -> SystemInventory {
         ryujin_aio: hwmon.iter().any(|d| d.name == "rog_ryujin") || has_hid(pid::RYUJIN_II_360) || has_hid(pid::RYUJIN_III),
         livedash_oled: has_hid(pid::LIVEDASH_OLED),
         aura_usb: has_hid(pid::AURA_LED_CONTROLLER) || has_hid(pid::AURA_LED_CONTROLLER_ALT),
-        lianli_uni_hub: hid.iter().any(|h| h.vendor_id == pid::ENE && (0xa100..=0xa102).contains(&h.product_id) || h.product_id == pid::LIANLI_UNI_AL),
+        lianli_uni_hub: hid.iter().any(|h| h.vendor_id == pid::ENE && crate::lianli::HubKind::from_pid(h.product_id).is_some()),
         nvidia: nvidia_count > 0,
         amd_gpu: !amd_gpus.is_empty(),
         asus_ec_sensors: hwmon.iter().any(|d| d.name == "asusec"),

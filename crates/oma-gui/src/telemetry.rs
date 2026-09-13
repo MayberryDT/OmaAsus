@@ -415,7 +415,19 @@ impl Sampler {
             .iter()
             .map(|h| {
                 let hub = h.clone();
-                Worker::spawn(h.kind.label().to_string(), move || hub.read_rpm().ok())
+                let mut warned = false;
+                Worker::spawn(h.kind.label().to_string(), move || match hub.read_rpm() {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        // Usually the node is root-only (no udev rule): say so once
+                        // instead of showing a hub with no fans.
+                        if !warned {
+                            tracing::warn!(hub = %hub.path, error = %e, "fan hub not readable; its speeds are not shown");
+                            warned = true;
+                        }
+                        None
+                    }
+                })
             })
             .collect();
         let named_tachs = hwmon.iter().any(|d| d.fans.iter().any(|f| knowledge::tach_role(&d.name, &f.label) == TachRole::Fan && f.label != format!("fan{}", f.index)));

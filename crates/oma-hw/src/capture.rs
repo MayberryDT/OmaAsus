@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// Bumped when the capture format changes incompatibly.
 pub const FORMAT: u32 = 1;
@@ -32,11 +33,16 @@ pub struct RawInventory {
     pub drm_connectors: Vec<String>,
     /// Relevant sysfs attributes by path.
     pub sysfs: BTreeMap<String, SysfsAttr>,
+    /// Attributes whose device did not answer within the sweep's wait: their
+    /// `sysfs` entry has no value.
+    #[serde(default)]
+    pub unanswered: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SysfsAttr {
-    /// `None` when the capturing user can't read it (root-only attributes).
+    /// `None` when the capturing user can't read it (root-only attributes)
+    /// or it did not answer in time (listed in [`RawInventory::unanswered`]).
     pub value: Option<String>,
     /// Permission bits, e.g. `0o644`: tells writable from read-only attributes.
     pub mode: u32,
@@ -115,15 +121,21 @@ pub struct SlashSnapshot {
 /// Gather everything detection reads. Blocking sysfs/HID/NVML work runs on a
 /// blocking thread; D-Bus services that aren't running are simply absent.
 pub async fn gather() -> RawInventory {
+    gather_with(HWMON_WAIT).await
+}
+
+/// [`gather`] with its own bound on how long the hwmon sweep waits for a
+/// device: a fixture capture can afford to wait longer than a start-up.
+pub async fn gather_with(hwmon_wait: Duration) -> RawInventory {
     let (asusd, supergfx, ppd, gfx_running) = match zbus::Connection::system().await {
         Ok(c) => (asusd_snapshot(&c).await, supergfx::state(&c).await.ok(), ppd::state(&c).await.ok(), supergfx::present(&c).await),
         Err(_) => (None, None, None, false),
     };
     // supergfxd kills whatever holds the dGPU while it switches.
     let look = look_at_dgpu(gfx_running, supergfx.as_ref());
-    let (system, sysfs, pci_display, drm_connectors, nvidia) =
-        tokio::task::spawn_blocking(move || (detect::inventory(), snapshot_sysfs(), pci_display(), drm_connectors(), if look { nvidia_infos() } else { Vec::new() })).await.expect("capture thread");
-    RawInventory { format: FORMAT, captured_at: chrono::Local::now().to_rfc3339(), system, asusd, supergfx, ppd, nvidia, pci_display, drm_connectors, sysfs }
+    let (system, (sysfs, unanswered), pci_display, drm_connectors, nvidia) =
+        tokio::task::spawn_blocking(move || (detect::inventory(), snapshot_sysfs(hwmon_wait), pci_display(), drm_connectors(), if look { nvidia_infos() } else { Vec::new() })).await.expect("capture thread");
+    RawInventory { format: FORMAT, captured_at: chrono::Local::now().to_rfc3339(), system, asusd, supergfx, ppd, nvidia, pci_display, drm_connectors, sysfs, unanswered }
 }
 
 /// Whether startup may open the dGPU: where supergfxd runs, only once it has
@@ -273,16 +285,20 @@ fn files(dir: impl AsRef<Path>) -> Vec<PathBuf> {
     sysfs::list_dir(dir).into_iter().filter(|p| p.is_file()).collect()
 }
 
+/// How long the hwmon sweep waits for every device to answer. A driver whose
+/// device has stopped answering (a USB cooler that wedged) blocks each read
+/// for seconds; detection must not wait on it for the rest of the machine.
+const HWMON_WAIT: Duration = Duration::from_secs(2);
+
 /// Values of the attributes detection and control care about. Attributes the
-/// capturing user can't read are kept with `value: None`, so their presence
-/// and permissions still show. Serial numbers are never read.
-fn snapshot_sysfs() -> BTreeMap<String, SysfsAttr> {
+/// capturing user can't read, or that did not answer in time, are kept with
+/// `value: None`, so their presence and permissions still show. Serial
+/// numbers are never read.
+fn snapshot_sysfs(hwmon_wait: Duration) -> (BTreeMap<String, SysfsAttr>, Vec<String>) {
     let mut out = BTreeMap::new();
+    let unanswered = sweep_bounded(sysfs::hwmon_dirs(), hwmon_wait, read_attr, &mut out);
     let mut record = |p: &Path| record(&mut out, p);
 
-    for dir in sysfs::hwmon_dirs() {
-        files(&dir).iter().filter(|f| file_name(f) != "uevent").for_each(|f| record(f));
-    }
     for class in sysfs::list_dir("/sys/class/firmware-attributes") {
         for attr in sysfs::list_dir(class.join("attributes")) {
             if attr.is_dir() {
@@ -326,22 +342,104 @@ fn snapshot_sysfs() -> BTreeMap<String, SysfsAttr> {
     for d in sysfs::list_dir("/sys/class/powercap") {
         ["name", "energy_uj", "max_energy_range_uj"].iter().for_each(|n| record(&d.join(n)));
     }
-    out
+    (out, unanswered)
 }
 
 fn record(out: &mut BTreeMap<String, SysfsAttr>, path: &Path) {
-    let Ok(meta) = std::fs::metadata(path) else { return };
-    if !meta.is_file() {
-        return;
+    if let Some(attr) = read_attr(path) {
+        out.insert(path.to_string_lossy().into_owned(), attr);
     }
+}
+
+fn read_attr(path: &Path) -> Option<SysfsAttr> {
+    let meta = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
     let value = std::fs::read(path).ok().filter(|b| b.len() <= MAX_VALUE).and_then(|b| String::from_utf8(b).ok()).map(|s| s.trim_end().to_owned());
-    out.insert(path.to_string_lossy().into_owned(), SysfsAttr { value, mode: meta.permissions().mode() & 0o777 });
+    Some(SysfsAttr { value, mode: meta.permissions().mode() & 0o777 })
+}
+
+/// Read every attribute of every directory, each directory on its own thread,
+/// waiting at most `wait` for all of them. Names and settings are read before
+/// readings and duties (the attributes that go to the device), so a device
+/// that answers slowly still shows what it is. What has not answered by the
+/// deadline is kept with `value: None` and returned; its thread finishes on
+/// its own and is not waited for.
+fn sweep_bounded(dirs: Vec<PathBuf>, wait: Duration, read: fn(&Path) -> Option<SysfsAttr>, out: &mut BTreeMap<String, SysfsAttr>) -> Vec<String> {
+    let (tx, rx) = std::sync::mpsc::channel::<(String, SysfsAttr)>();
+    let mut expected: BTreeMap<String, u32> = BTreeMap::new();
+    for dir in dirs {
+        let mut attrs: Vec<PathBuf> = files(&dir).into_iter().filter(|f| file_name(f) != "uevent").collect();
+        attrs.sort_by_key(|f| {
+            let n = file_name(f);
+            n.ends_with("_input") || n.strip_prefix("pwm").is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+        });
+        for f in &attrs {
+            if let Some(m) = std::fs::metadata(f).ok().filter(|m| m.is_file()) {
+                expected.insert(f.to_string_lossy().into_owned(), m.permissions().mode() & 0o777);
+            }
+        }
+        let tx = tx.clone();
+        let spawned = std::thread::Builder::new().name("oma-sweep".into()).spawn(move || {
+            for f in attrs {
+                let Some(attr) = read(&f) else { continue };
+                if tx.send((f.to_string_lossy().into_owned(), attr)).is_err() {
+                    return;
+                }
+            }
+        });
+        if let Err(e) = spawned {
+            tracing::warn!(dir = %dir.display(), error = %e, "cannot start a reader thread for this device");
+        }
+    }
+    drop(tx);
+    let deadline = Instant::now() + wait;
+    while let Ok((path, attr)) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        out.insert(path, attr);
+    }
+    let late: Vec<String> = expected.keys().filter(|k| !out.contains_key(*k)).cloned().collect();
+    if let Some(first) = late.first() {
+        tracing::warn!(count = late.len(), first = %first, wait_s = wait.as_secs(), "sysfs attributes did not answer in time; detection goes on without their values");
+    }
+    for (path, mode) in expected {
+        out.entry(path).or_insert(SysfsAttr { value: None, mode });
+    }
+    late
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use supergfx::{GfxMode, GfxState, UserActionRequired};
+
+    /// A reader that answers at once for everything but one device's sensor
+    /// readings, which block the way a wedged cooler's driver does.
+    fn slow_reader(path: &Path) -> Option<SysfsAttr> {
+        if path.to_string_lossy().contains("wedged") && file_name(path).ends_with("_input") {
+            std::thread::sleep(Duration::from_secs(4));
+        }
+        Some(SysfsAttr { value: Some(format!("v:{}", file_name(path))), mode: 0o444 })
+    }
+
+    #[test]
+    fn a_device_that_does_not_answer_holds_neither_the_others_nor_detection() {
+        let root = std::env::temp_dir().join(format!("oma-sweep-{}", std::process::id()));
+        let (fine, wedged) = (root.join("fine"), root.join("wedged"));
+        for (dir, names) in [(&fine, ["name", "fan1_label", "fan1_input"]), (&wedged, ["name", "fan1_label", "fan1_input"])] {
+            std::fs::create_dir_all(dir).unwrap();
+            for n in names {
+                std::fs::write(dir.join(n), "x").unwrap();
+            }
+        }
+        let mut out = BTreeMap::new();
+        let started = Instant::now();
+        let late = sweep_bounded(vec![fine.clone(), wedged.clone()], Duration::from_millis(500), slow_reader, &mut out);
+        assert!(started.elapsed() < Duration::from_secs(2), "bounded by the wait, not by the wedged read");
+        assert_eq!(late, vec![wedged.join("fan1_input").to_string_lossy().into_owned()], "what did not answer is named");
+        let v = |dir: &Path, n: &str| out.get(&dir.join(n).to_string_lossy().into_owned()).cloned();
+        assert_eq!(v(&fine, "fan1_input").and_then(|a| a.value), Some("v:fan1_input".into()), "the healthy device answered in full");
+        assert_eq!(v(&wedged, "fan1_label").and_then(|a| a.value), Some("v:fan1_label".into()), "the wedged device's name and labels came first");
+        assert_eq!(v(&wedged, "fan1_input").map(|a| a.value), Some(None), "the reading that did not answer is present without a value");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn startup_opens_the_dgpu_only_when_supergfxd_allows() {

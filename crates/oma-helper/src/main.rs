@@ -31,7 +31,8 @@ use oma_hw::nvidia::{NvidiaControl, NvidiaGpu};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tracing::{info, warn};
+use oma_hw::nvidia::DgpuState;
+use tracing::{debug, info, warn};
 use zbus::interface;
 use zbus::message::Header;
 use zbus::object_server::SignalEmitter;
@@ -216,6 +217,13 @@ fn hidraw_path(path: &str) -> zbus::fdo::Result<String> {
 }
 
 /// Open a HID device only if it belongs to a vendor OmaAsus drives.
+/// The vendor of the HID device at `path`, from enumeration.
+fn hid_vendor(path: &str) -> Option<u16> {
+    let api = hidapi::HidApi::new().ok()?;
+    let cpath = std::ffi::CString::new(path).ok()?;
+    api.device_list().find(|d| d.path() == cpath.as_c_str()).map(|d| d.vendor_id())
+}
+
 fn open_vendor_hid(path: &str) -> zbus::fdo::Result<hidapi::HidDevice> {
     use oma_hw::detect::pid;
     let api = hidapi::HidApi::new().map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
@@ -359,7 +367,7 @@ impl Restorer {
         let Some(c) = lock_ledger(&self.ledger).take(&client) else {
             return;
         };
-        self.restore(client, c, 1, reason).await;
+        self.restore(client, c, 1, reason, None).await;
     }
 
     /// Restores whose next attempt is due (`all`: everything waiting, for a
@@ -369,15 +377,20 @@ impl Restorer {
             let mut l = lock_ledger(&self.ledger);
             if all { l.drain_pending() } else { l.due(std::time::Instant::now()) }
         };
-        futures_util::future::join_all(due.into_iter().map(|p| self.restore(p.client, p.claims, p.attempts + 1, "retrying an incomplete restore"))).await;
+        futures_util::future::join_all(due.into_iter().map(|p| self.restore(p.client, p.claims, p.attempts + 1, "retrying an incomplete restore", p.deferred_since))).await;
     }
 
-    async fn restore(&self, client: String, c: Claims, attempts: u32, reason: &str) {
+    /// `deferred_since`: when this restore first waited for a sleeping GPU.
+    async fn restore(&self, client: String, c: Claims, attempts: u32, reason: &str, deferred_since: Option<std::time::Instant>) {
         let (conn, ledger, lanes, closing) = (&self.conn, &self.ledger, &self.lanes, &self.closing);
         if c.is_empty() {
             return;
         }
-        warn!(client, reason, attempts, "restoring the fans this client left under manual control");
+        if deferred_since.is_some() {
+            debug!(client, reason, "restore due again");
+        } else {
+            warn!(client, reason, attempts, "restoring the fans this client left under manual control");
+        }
         let mut failed = Claims::default();
         let mut errors = Vec::new();
         // Group by device so each lane's writes keep their duty-before-mode order.
@@ -428,20 +441,29 @@ impl Restorer {
                     _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
                 }
             }
-            // Stopping mid-switch: stay off NVML. A switch that goes ahead reloads
-            // the driver, which starts with its fans on automatic. Likewise a GPU
-            // that is asleep or off: NVML would wake it, and an unloaded driver
-            // starts with its fans on automatic.
-            // Stopping mid-switch: the switch reloads the driver, which starts with
-            // its fans on automatic. Asleep: NVML would wake it, and a driver that
-            // stays loaded keeps a manual fan policy, so the claim waits (without
-            // spending an attempt) until the GPU is awake for its own reasons.
-            if !settled && closing.load(Ordering::SeqCst) {
+            // Stopping mid-switch: stay off NVML; the switch reloads the driver,
+            // which starts with its fans on automatic. So does a GPU that is off
+            // the bus. One that is asleep keeps a manual fan policy, and NVML
+            // would wake it: the claim waits (spending no attempt) for the GPU
+            // to wake on its own, unless the helper is stopping or has waited
+            // long enough, when it wakes the GPU once.
+            let stopping = closing.load(Ordering::SeqCst);
+            let now = std::time::Instant::now();
+            let state = oma_hw::nvidia::power_state(oma_hw::nvidia::pci_device().as_deref());
+            let wait = state == DgpuState::Suspended && !stopping && deferred_since.is_none_or(|s| now.duration_since(s) < claims::DEFER_MAX);
+            if !settled && stopping {
                 info!("NVIDIA fans left to the driver: a graphics switch is running");
-            } else if !oma_hw::nvidia::awake() {
-                info!(client, "NVIDIA fans: GPU asleep or off; the restore waits for it to wake");
-                lock_ledger(ledger).defer(&client, Claims { nvidia_fans: c.nvidia_fans.clone(), ..Default::default() }, attempts, "GPU asleep".into(), std::time::Instant::now());
+            } else if state == DgpuState::Absent {
+                info!(client, "NVIDIA fans left to the driver: the GPU is off the bus");
+            } else if wait {
+                if deferred_since.is_none() {
+                    info!(client, "NVIDIA fans: GPU asleep; the restore waits for it to wake");
+                }
+                lock_ledger(ledger).defer(&client, Claims { nvidia_fans: c.nvidia_fans.clone(), ..Default::default() }, attempts, "GPU asleep".into(), now, deferred_since);
             } else {
+                if state == DgpuState::Suspended {
+                    info!(client, stopping, "NVIDIA fans: waking the GPU once to hand them back");
+                }
                 for index in c.nvidia_fans {
                     let r = lanes
                         .run(&lanes::nvidia_lane(index), RESTORE_LANE_WAIT, move || {
@@ -466,8 +488,13 @@ impl Restorer {
         if !failed.is_empty() {
             let error = errors.join("; ");
             let outputs: Vec<String> = failed.sysfs.keys().map(|p| p.to_string_lossy().into_owned()).chain(failed.nvidia_fans.iter().map(|i| format!("nvidia:{i}"))).collect();
+            // Stale curve points under a mode that went back are the board's
+            // problem, not an uncontrolled fan.
+            let uncontrolled = failed.sysfs.keys().any(|p| !claims::is_curve_point(p)) || !failed.nvidia_fans.is_empty();
             let gave_up = lock_ledger(ledger).retain_failed(&client, failed, attempts, error.clone(), std::time::Instant::now());
-            if gave_up {
+            if gave_up && !uncontrolled {
+                warn!(client, attempts, outputs = ?outputs, error = %error, "the board's own curve points could not all be put back; its fan runs on the mode it had, with a stale point");
+            } else if gave_up {
                 // Nothing drives these fans now and the helper has run out of
                 // attempts: say so where it will be seen, and tell clients.
                 tracing::error!(client, attempts, outputs = ?outputs, error = %error, "fan recovery abandoned: these outputs could not be handed back");
@@ -642,8 +669,17 @@ impl Helper {
 
     /// Write a raw HID output report to an ASUS / ENE device (LCD, Aura, Ryujin).
     async fn hid_write(&self, #[zbus(header)] hdr: Header<'_>, path: String, report: Vec<u8>) -> zbus::fdo::Result<u32> {
-        self.authorize(&hdr, ACTION_ADVANCED).await?;
         let path = hidraw_path(&path)?;
+        // A fan hub's speed and control-mode reports are fan tuning, the same
+        // right as a fan header; anything else on a HID device (lighting, an
+        // LCD) is advanced control. The cheaper right is checked first, so an
+        // unauthorised caller costs no device walk.
+        self.authorize(&hdr, ACTION_CONTROL).await?;
+        let p = path.clone();
+        let vendor = tokio::task::spawn_blocking(move || hid_vendor(&p)).await.ok().flatten();
+        if !(vendor == Some(oma_hw::detect::pid::ENE) && oma_hw::lianli::is_fan_report(&report)) {
+            self.authorize(&hdr, ACTION_ADVANCED).await?;
+        }
         let _work = Busy::enter(&self.in_flight);
         self.lanes
             .run(&lanes::hid_lane(&path), LANE_WAIT, move || {

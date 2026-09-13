@@ -187,6 +187,15 @@ pub fn curve_enable_values(driver: &str) -> Option<(&'static str, &'static str)>
     }
 }
 
+/// The `pwmN_enable` value that runs the driver's own multi-point curve
+/// (`pwmN_auto_pointK_*`): Smart Fan IV on the nct6775 family, mode 5
+/// (Documentation/hwmon/nct6775.rst; verified on an nct6799). Other Super I/O
+/// drivers expose points with other counts and modes: none is programmed
+/// until its mode is known here.
+pub fn smart_fan_mode(driver: &str) -> Option<&'static str> {
+    if driver.starts_with("nct6") { Some("5") } else { None }
+}
+
 /// Naming and safety limits for a specific PWM output.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OutputQuirk {

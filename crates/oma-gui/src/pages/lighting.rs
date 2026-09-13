@@ -25,6 +25,8 @@ pub enum LightingMsg {
     SelectDevice(String),
     Color(Rgb),
     Hex(String),
+    /// The typed hex colour, once it has stayed the same for a moment.
+    HexSettled(String),
     /// OpenRGB device index, mode index.
     Mode(usize, usize),
     Off(usize),
