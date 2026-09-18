@@ -6,3 +6,4 @@
 # Downloaded release artifacts
 *.pkg.tar.zst
 *.tar.gz
+dist-*/
