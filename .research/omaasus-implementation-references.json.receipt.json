@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "artifact_sha256": "96c2e8414c3e82bb7ea5204814f04ff7bf0472c2589828650bb240417b9b2e79",
+  "verified_at": "2026-09-18T16:54:27.927651+00:00",
+  "status": "passed",
+  "sources": [
+    {
+      "label": "veelox-read-only-bringup:behavior-repo",
+      "url": "https://github.com/Mhsbrian/OmaAsus",
+      "status": 200
+    },
+    {
+      "label": "veelox-read-only-bringup:behavior-evidence",
+      "url": "https://github.com/Mhsbrian/OmaAsus/blob/3e836389d976a995c2e49b8e4c4b72ae78ad9d3d/crates/oma-gui/src/pages/dashboard.rs",
+      "status": 200
+    },
+    {
+      "label": "veelox-read-only-bringup:platform",
+      "url": "https://wayland.freedesktop.org/docs/html/",
+      "status": 200
+    },
+    {
+      "label": "veelox-local-profiles:behavior-evidence",
+      "url": "https://github.com/Mhsbrian/OmaAsus/blob/3e836389d976a995c2e49b8e4c4b72ae78ad9d3d/crates/oma-gui/src/config_store.rs",
+      "status": 200
+    },
+    {
+      "label": "veelox-local-profiles:platform",
+      "url": "https://www.kernel.org/doc/html/latest/hwmon/sysfs-interface.html",
+      "status": 200
+    },
+    {
+      "label": "privileged-helper-boundary:behavior-evidence",
+      "url": "https://github.com/Mhsbrian/OmaAsus/blob/3e836389d976a995c2e49b8e4c4b72ae78ad9d3d/crates/oma-helper/src/polkit.rs",
+      "status": 200
+    },
+    {
+      "label": "privileged-helper-boundary:platform",
+      "url": "https://www.freedesktop.org/software/polkit/docs/latest/polkit.8.html",
+      "status": 200
+    },
+    {
+      "label": "fork-regression-gate:behavior-evidence",
+      "url": "https://github.com/Mhsbrian/OmaAsus/blob/3e836389d976a995c2e49b8e4c4b72ae78ad9d3d/.github/workflows/check.yml",
+      "status": 200
+    },
+    {
+      "label": "fork-regression-gate:platform",
+      "url": "https://doc.rust-lang.org/cargo/commands/cargo-test.html",
+      "status": 200
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "feature": "Veelox OmaAsus fork bring-up",
+  "researched_at": "2026-09-18",
+  "coverage": [
+    {"class": "ui-primitives", "status": "required", "reason": "The fork runs an interactive iced Wayland window, tray item, and Hyprland overlay."},
+    {"class": "state-persistence", "status": "required", "reason": "Profiles and local settings are persisted under the user's configuration directory."},
+    {"class": "auth-security", "status": "required", "reason": "The hardware helper installs a root D-Bus service and polkit actions for device writes."},
+    {"class": "network-sync", "status": "not-applicable", "reason": "The Veelox bring-up uses local hardware APIs and does not add network synchronization."},
+    {"class": "platform-device", "status": "required", "reason": "Veelox exposes ASUS WMI, platform profiles, hwmon, NVIDIA NVML, Wayland, and Hyprland interfaces."},
+    {"class": "accessibility", "status": "required", "reason": "The control center must remain operable through keyboard bindings and native Wayland input."},
+    {"class": "testing", "status": "required", "reason": "The fork changes privileged desktop hardware software and needs source tests plus machine read-only smoke tests."},
+    {"class": "behavior-precedent", "status": "required", "reason": "The selected behavior is an existing upstream control center and overlay that we are adapting for Veelox."}
+  ],
+  "mappings": [
+    {
+      "id": "veelox-read-only-bringup",
+      "profile": "user-facing",
+      "concerns": ["ui-primitives", "accessibility", "behavior-precedent"],
+      "direct": null,
+      "behavior": {
+        "repo_url": "https://github.com/Mhsbrian/OmaAsus",
+        "revision": "3e836389d976a995c2e49b8e4c4b72ae78ad9d3d",
+        "evidence_url": "https://github.com/Mhsbrian/OmaAsus/blob/3e836389d976a995c2e49b8e4c4b72ae78ad9d3d/crates/oma-gui/src/pages/dashboard.rs",
+        "behavior": "Render a local hardware dashboard and expose it as a native Wayland window/tray application.",
+        "edge_states": ["missing optional daemon", "no controllable fan", "GPU asleep or unavailable"],
+        "do_not_copy": "Do not copy controls into the UI unless the Veelox inventory reports the corresponding capability."
+      },
+      "platform": {"url": "https://wayland.freedesktop.org/docs/html/", "requirement": "The application must use the active Wayland session rather than assuming X11."},
+      "proof": ["cargo test --workspace", "target/release/oma inventory --json", "target/release/oma model --json"]
+    },
+    {
+      "id": "veelox-local-profiles",
+      "profile": "integration-or-mechanism",
+      "concerns": ["state-persistence", "platform-device"],
+      "direct": null,
+      "behavior": {
+        "repo_url": "https://github.com/Mhsbrian/OmaAsus",
+        "revision": "3e836389d976a995c2e49b8e4c4b72ae78ad9d3d",
+        "evidence_url": "https://github.com/Mhsbrian/OmaAsus/blob/3e836389d976a995c2e49b8e4c4b72ae78ad9d3d/crates/oma-gui/src/config_store.rs",
+        "behavior": "Persist profiles locally and select only backends detected in the hardware model.",
+        "edge_states": ["profile references unavailable hardware", "power profile daemon unavailable", "configuration migration"],
+        "do_not_copy": "Do not copy claims of charge-limit, fan, lighting, or MUX support when the Veelox model reports no matching capability."
+      },
+      "platform": {"url": "https://www.kernel.org/doc/html/latest/hwmon/sysfs-interface.html", "requirement": "Read hwmon sensors and controls through the kernel's hwmon interface and preserve firmware ownership when no writable output exists."},
+      "proof": ["cargo test --workspace", "target/release/oma daemons", "target/release/oma sensors"]
+    },
+    {
+      "id": "privileged-helper-boundary",
+      "profile": "integration-or-mechanism",
+      "concerns": ["auth-security", "platform-device"],
+      "direct": null,
+      "behavior": {
+        "repo_url": "https://github.com/Mhsbrian/OmaAsus",
+        "revision": "3e836389d976a995c2e49b8e4c4b72ae78ad9d3d",
+        "evidence_url": "https://github.com/Mhsbrian/OmaAsus/blob/3e836389d976a995c2e49b8e4c4b72ae78ad9d3d/crates/oma-helper/src/polkit.rs",
+        "behavior": "Keep privileged sysfs, NVML, and HID writes behind a narrow D-Bus helper and polkit policy.",
+        "edge_states": ["helper absent", "polkit denial", "helper restart while a device is claimed"],
+        "do_not_copy": "Do not copy a privileged write path into the bring-up until the read-only Veelox model proves the corresponding backend exists."
+      },
+      "platform": {"url": "https://www.freedesktop.org/software/polkit/docs/latest/polkit.8.html", "requirement": "Privileged operations must be mediated by polkit rather than granting the GUI direct root access."},
+      "proof": ["cargo test --workspace", "systemctl is-active oma-helper.service", "journalctl -b -u oma-helper.service --no-pager"]
+    },
+    {
+      "id": "fork-regression-gate",
+      "profile": "integration-or-mechanism",
+      "concerns": ["testing", "behavior-precedent"],
+      "direct": null,
+      "behavior": {
+        "repo_url": "https://github.com/Mhsbrian/OmaAsus",
+        "revision": "3e836389d976a995c2e49b8e4c4b72ae78ad9d3d",
+        "evidence_url": "https://github.com/Mhsbrian/OmaAsus/blob/3e836389d976a995c2e49b8e4c4b72ae78ad9d3d/.github/workflows/check.yml",
+        "behavior": "Run the upstream workspace tests before packaging or installing the fork.",
+        "edge_states": ["compile failure", "test failure", "package/install mismatch"],
+        "do_not_copy": "Do not copy an unverified build into the installed system or bypass failed tests."
+      },
+      "platform": {"url": "https://doc.rust-lang.org/cargo/commands/cargo-test.html", "requirement": "The workspace test command is the reproducible source-level regression gate."},
+      "proof": ["cargo test --workspace", "cargo build --release --workspace", "git status --short --branch"]
+    }
+  ]
+}
